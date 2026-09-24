@@ -25,7 +25,7 @@ pub fn apply_filter_decode(
         FILTER_E8 => Ok(e8_decode(data, file_offset, true)),
         FILTER_E8E9 => Ok(e8_decode(data, file_offset, false)),
         FILTER_ARM => Ok(arm_decode(data, file_offset)),
-        other => Err(RarError::Format(format!(
+        other => Err(RarError::format(format!(
             "unsupported RAR5 filter type {other}"
         ))),
     }

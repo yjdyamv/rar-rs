@@ -50,7 +50,7 @@ impl TryFrom<u8> for CompressionLevel {
         if value <= Self::BEST.get() {
             Ok(Self(value))
         } else {
-            Err(RarError::InvalidOption(format!(
+            Err(RarError::invalid_option(format!(
                 "compression level must be in 0..=5, got {value}"
             )))
         }
@@ -81,7 +81,7 @@ impl TryFrom<usize> for ThreadCount {
         if value <= MAX_THREADS {
             Ok(Self(value))
         } else {
-            Err(RarError::InvalidOption(format!(
+            Err(RarError::invalid_option(format!(
                 "compression threads must be in 0..={MAX_THREADS}, got {value}"
             )))
         }
@@ -382,7 +382,7 @@ impl WriterOptions {
         if let Some(channels) = self.filters.delta_channels
             && !(1..=31).contains(&channels)
         {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "delta filter channels must be in 1..=31, got {channels}"
             )));
         }
@@ -770,10 +770,9 @@ impl ArchiveWriter {
     pub fn set_archive_comment(&mut self, comment: Option<Vec<u8>>) -> RarResult<()> {
         self.apply(|archive| {
             if !archive.is_legacy() {
-                return Err(RarError::Unsupported(
+                return Err(RarError::unsupported(
                     "archive comments must be queued before creation for RAR4/RAR 1.3/1.4; \
-                     use the editor for RAR5"
-                        .into(),
+                     use the editor for RAR5",
                 ));
             }
             archive.set_rar4_writer_comment(comment);
@@ -876,7 +875,7 @@ impl ArchiveWriter {
     }
 
     fn poisoned_error() -> RarError {
-        RarError::InvalidState("archive writer transaction has been aborted".into())
+        RarError::invalid_state("archive writer transaction has been aborted")
     }
 }
 

@@ -55,7 +55,7 @@ impl DictionarySize {
     /// Construct a dictionary size from a RAR5 log (`128 KiB << log`).
     pub fn from_rar5_log(log: u8) -> RarResult<Self> {
         if log > 15 {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "RAR5 dictionary log must be in 0..=15, got {log}"
             )));
         }
@@ -84,7 +84,7 @@ impl TryFrom<u64> for DictionarySize {
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         if !(MIN_DICTIONARY_BYTES..=MAX_RAR7_DICTIONARY_BYTES).contains(&value) {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "dictionary size must be in {MIN_DICTIONARY_BYTES}..={MAX_RAR7_DICTIONARY_BYTES} bytes, got {value}"
             )));
         }
@@ -299,7 +299,7 @@ impl CreateOptions {
 /// report the same error text.
 pub(crate) fn require_writable_version(version: ArchiveVersion) -> RarResult<()> {
     if !version.is_writable() {
-        return Err(RarError::InvalidOption(format!(
+        return Err(RarError::invalid_option(format!(
             "only versions v14, v15, v20, v29, v50 and v70 are writable, got {version}"
         )));
     }
@@ -317,14 +317,13 @@ pub(crate) fn validate_solid_reset(
         return Ok(());
     }
     if compression.is_rar13() || matches!(compression, ArchiveVersion::V15 | ArchiveVersion::V20) {
-        return Err(RarError::InvalidOption(
-            "solid-chain resets (-se/-sv) are not supported for RAR 1.3/1.4/1.5/2.x archives"
-                .into(),
+        return Err(RarError::invalid_option(
+            "solid-chain resets (-se/-sv) are not supported for RAR 1.3/1.4/1.5/2.x archives",
         ));
     }
     if compression.is_legacy() && solid_reset == SolidReset::PerVolume {
-        return Err(RarError::InvalidOption(
-            "per-volume solid resets (-sv) are not supported for RAR4 archives".into(),
+        return Err(RarError::invalid_option(
+            "per-volume solid resets (-sv) are not supported for RAR4 archives",
         ));
     }
     Ok(())
@@ -337,19 +336,19 @@ pub(crate) fn validate_dictionary(
     if let Some(log) = dict_size_log
         && log > 15
     {
-        return Err(RarError::InvalidOption(format!(
+        return Err(RarError::invalid_option(format!(
             "dictionary size log {log} exceeds the supported maximum 15"
         )));
     }
     if dict_size_log.is_some() && dict_size_bytes.is_some() {
-        return Err(RarError::InvalidOption(
-            "dict_size_log and dict_size_bytes are mutually exclusive".into(),
+        return Err(RarError::invalid_option(
+            "dict_size_log and dict_size_bytes are mutually exclusive",
         ));
     }
     if let Some(bytes) = dict_size_bytes
         && !(MIN_DICTIONARY_BYTES..=MAX_RAR7_DICTIONARY_BYTES).contains(&bytes)
     {
-        return Err(RarError::InvalidOption(format!(
+        return Err(RarError::invalid_option(format!(
             "dictionary size {bytes} bytes is outside the supported range {MIN_DICTIONARY_BYTES}..={MAX_RAR7_DICTIONARY_BYTES}"
         )));
     }
@@ -360,7 +359,7 @@ pub(crate) fn validate_threads(threads: Option<usize>) -> RarResult<()> {
     if let Some(threads) = threads
         && threads > MAX_COMPRESSION_THREADS
     {
-        return Err(RarError::InvalidOption(format!(
+        return Err(RarError::invalid_option(format!(
             "compression threads must be in 0..={MAX_COMPRESSION_THREADS}, got {threads}"
         )));
     }
@@ -378,13 +377,13 @@ pub(crate) fn validate_locator_estimate(
         return Ok(());
     };
     if estimate == 0 {
-        return Err(RarError::InvalidOption(
-            "the locator size estimate must be greater than zero".into(),
+        return Err(RarError::invalid_option(
+            "the locator size estimate must be greater than zero",
         ));
     }
     if version.is_legacy() || version.is_rar13() {
-        return Err(RarError::InvalidOption(
-            "the locator size estimate is a RAR5 option".into(),
+        return Err(RarError::invalid_option(
+            "the locator size estimate is a RAR5 option",
         ));
     }
     Ok(())
@@ -409,13 +408,13 @@ pub(crate) struct CombinationRules<'a> {
 
 pub(crate) fn validate_combinations(rules: CombinationRules<'_>) -> RarResult<()> {
     if rules.quick_open && rules.encrypt_headers {
-        return Err(RarError::InvalidOption(
-            "quick-open cannot be combined with header encryption".into(),
+        return Err(RarError::invalid_option(
+            "quick-open cannot be combined with header encryption",
         ));
     }
     if rules.quick_open && rules.volume_size.is_some() {
-        return Err(RarError::InvalidOption(
-            "quick-open cannot be combined with data volumes".into(),
+        return Err(RarError::invalid_option(
+            "quick-open cannot be combined with data volumes",
         ));
     }
     for (name, percent) in [
@@ -423,41 +422,41 @@ pub(crate) fn validate_combinations(rules: CombinationRules<'_>) -> RarResult<()
         ("recovery-volume percent", rules.recovery_volumes_percent),
     ] {
         if percent.is_some_and(|value| value > 100) {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "{name} must be in 0..=100"
             )));
         }
     }
     if rules.volume_size == Some(0) {
-        return Err(RarError::InvalidOption(
-            "volume size must be greater than zero".into(),
+        return Err(RarError::invalid_option(
+            "volume size must be greater than zero",
         ));
     }
     if rules.encrypt_headers && rules.password.is_none_or(str::is_empty) {
-        return Err(RarError::InvalidOption(
-            "header encryption requires a non-empty password".into(),
+        return Err(RarError::invalid_option(
+            "header encryption requires a non-empty password",
         ));
     }
     if rules.recovery_percent.is_some() && rules.recovery_sectors.is_some() {
-        return Err(RarError::InvalidOption(
-            "recovery percent and an exact recovery-sector count are mutually exclusive".into(),
+        return Err(RarError::invalid_option(
+            "recovery percent and an exact recovery-sector count are mutually exclusive",
         ));
     }
     if rules.recovery_sectors == Some(0) {
-        return Err(RarError::InvalidOption(
-            "recovery sector count must be greater than zero".into(),
+        return Err(RarError::invalid_option(
+            "recovery sector count must be greater than zero",
         ));
     }
     if rules.recovery_volumes_percent.is_some() && rules.recovery_volume_count.is_some() {
-        return Err(RarError::InvalidOption(
-            "recovery-volume percent and exact count are mutually exclusive".into(),
+        return Err(RarError::invalid_option(
+            "recovery-volume percent and exact count are mutually exclusive",
         ));
     }
     if (rules.recovery_volumes_percent.is_some() || rules.recovery_volume_count.is_some())
         && rules.volume_size.is_none()
     {
-        return Err(RarError::InvalidOption(
-            "recovery volumes require a data-volume size".into(),
+        return Err(RarError::invalid_option(
+            "recovery volumes require a data-volume size",
         ));
     }
     Ok(())

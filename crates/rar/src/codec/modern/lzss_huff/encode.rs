@@ -145,7 +145,7 @@ pub fn encode_chunked(data: &[u8], opts: EncodeOptions<'_>) -> RarResult<Vec<u8>
             variant,
         );
     }
-    Err(RarError::Unsupported(format!(
+    Err(RarError::unsupported(format!(
         "unknown compression method: {method}"
     )))
 }

@@ -177,26 +177,15 @@ mod tests {
     #[test]
     fn library_categories_map_to_distinct_exit_codes() {
         assert_eq!(CliError::from(RarError::WrongPassword).exit_code(), 11);
-        assert_eq!(
-            CliError::from(RarError::Crc {
-                expected: 1,
-                actual: 2,
-                context: "x".into(),
-            })
-            .exit_code(),
-            3
-        );
+        assert_eq!(CliError::from(RarError::crc(1, 2, "x")).exit_code(), 3);
         assert_eq!(CliError::from(RarError::ArchiveLocked).exit_code(), 4);
         assert_eq!(CliError::from(RarError::Cancelled).exit_code(), 255);
+        assert_eq!(CliError::from(RarError::invalid_option("x")).exit_code(), 7);
         assert_eq!(
-            CliError::from(RarError::InvalidOption("x".into())).exit_code(),
-            7
-        );
-        assert_eq!(
-            CliError::from(RarError::MemberNotFound { name: "x".into() }).exit_code(),
+            CliError::from(RarError::member_not_found("x")).exit_code(),
             10
         );
-        assert_eq!(CliError::from(RarError::Format("x".into())).exit_code(), 2);
+        assert_eq!(CliError::from(RarError::format("x")).exit_code(), 2);
     }
 
     #[test]

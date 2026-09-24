@@ -37,9 +37,7 @@ pub(crate) fn editor_delete_plan(
             .entries_named(name)
             .map(|entry| entry.id())
             .find(|id| !chosen.contains(id))
-            .ok_or_else(|| rar_rs::RarError::MemberNotFound {
-                name: (*name).to_string(),
-            })?;
+            .ok_or_else(|| rar_rs::RarError::member_not_found((*name).to_string()))?;
         chosen.push(id);
         plan = plan.delete(id);
     }
@@ -64,9 +62,7 @@ pub(crate) fn editor_rename_plan(
                 entry.name().trim_end_matches('/') == old_norm && !chosen.contains(&entry.id())
             })
             .map(|entry| entry.id())
-            .ok_or_else(|| rar_rs::RarError::MemberNotFound {
-                name: (*old).to_string(),
-            })?;
+            .ok_or_else(|| rar_rs::RarError::member_not_found((*old).to_string()))?;
         chosen.push(id);
         plan = plan.rename(id, (*new).to_string());
     }
@@ -99,9 +95,7 @@ pub(crate) fn editor_chained_rename_plan(
                     == old_norm
             })
             .map(|entry| entry.id())
-            .ok_or_else(|| rar_rs::RarError::MemberNotFound {
-                name: (*old).to_string(),
-            })?;
+            .ok_or_else(|| rar_rs::RarError::member_not_found((*old).to_string()))?;
         planned.insert(id, (*new).to_string());
         plan = plan.rename(id, (*new).to_string());
     }

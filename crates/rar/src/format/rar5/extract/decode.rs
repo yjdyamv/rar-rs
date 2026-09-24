@@ -80,16 +80,16 @@ fn decode_stream_payload(
             None,
             crate::version::ArchiveVersion::V50,
         )
-        .map_err(|e| RarError::Format(format!("stream decode: {e}")))?
+        .map_err(|e| RarError::format(format!("stream decode: {e}")))?
     };
     if let Some(expected) = record.crc32 {
         let actual = crc32fast::hash(&data);
         if actual != expected {
-            return Err(RarError::Crc {
+            return Err(RarError::crc(
                 expected,
                 actual,
-                context: format!("NTFS stream {}", record.name),
-            });
+                format!("NTFS stream {}", record.name),
+            ));
         }
     }
     Ok(data)
@@ -113,26 +113,28 @@ pub(crate) fn read_streams_with<R: crate::format::rar5::payload::ChunkReader + ?
     let mut out = Vec::with_capacity(records.len());
     for s in records {
         if s.data_size > limit {
-            return Err(RarError::LimitExceeded {
+            return Err(RarError::limit_exceeded(
                 limit,
-                context: format!(
+                format!(
                     "NTFS stream {:?} declares {} packed bytes",
                     s.name, s.data_size
                 ),
-            });
+            ));
         }
-        let declared = usize::try_from(s.data_size).map_err(|_| RarError::LimitExceeded {
-            limit,
-            context: format!("NTFS stream {:?} packed size does not fit in usize", s.name),
+        let declared = usize::try_from(s.data_size).map_err(|_| {
+            RarError::limit_exceeded(
+                limit,
+                format!("NTFS stream {:?} packed size does not fit in usize", s.name),
+            )
         })?;
         if s.unpacked_size > limit {
-            return Err(RarError::LimitExceeded {
+            return Err(RarError::limit_exceeded(
                 limit,
-                context: format!(
+                format!(
                     "NTFS stream {:?} declares {} unpacked bytes",
                     s.name, s.unpacked_size
                 ),
-            });
+            ));
         }
         // A compressed stream allocates the same LZ window a member
         // would, and its 4-bit dictionary field can declare up to 4 GiB.
@@ -142,17 +144,17 @@ pub(crate) fn read_streams_with<R: crate::format::rar5::payload::ChunkReader + ?
         if let Some(cap) = max_dict_size
             && dict_bytes > cap
         {
-            return Err(RarError::LimitExceeded {
-                limit: cap,
-                context: format!(
+            return Err(RarError::limit_exceeded(
+                cap,
+                format!(
                     "NTFS stream {:?} dictionary size {dict_bytes} bytes exceeds the extraction cap (use -mdx to raise it)",
                     s.name
                 ),
-            });
+            ));
         }
         let packed = reader.read_chunk(s.volume_index, s.data_offset, s.data_size)?;
         if packed.len() != declared {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "NTFS stream {:?} is truncated: {} of {declared} bytes",
                 s.name,
                 packed.len()
@@ -165,7 +167,7 @@ pub(crate) fn read_streams_with<R: crate::format::rar5::payload::ChunkReader + ?
         let keys = match s.params.as_ref() {
             Some(params) => {
                 let password = password.ok_or_else(|| {
-                    RarError::Encrypted(format!(
+                    RarError::encrypted(format!(
                         "{}: encrypted NTFS stream, no password set",
                         s.name
                     ))
@@ -338,10 +340,10 @@ pub(crate) fn member_dict_window(cx: &dyn Engine, idx: usize) -> RarResult<usize
     let hdr = &cx.entries()[idx].header;
     let bytes = capped_dict_bytes(hdr, cx.read_ctx().extract_options.max_dict_size)?;
     let bytes = usize::try_from(bytes)
-        .map_err(|_| RarError::Format("dictionary size overflows host address space".into()))?;
+        .map_err(|_| RarError::format("dictionary size overflows host address space"))?;
     bytes
         .checked_next_power_of_two()
-        .ok_or_else(|| RarError::Format("dictionary size overflows host address space".into()))
+        .ok_or_else(|| RarError::format("dictionary size overflows host address space"))
 }
 
 /// Decode a single file, streaming output to `writer` (bounded memory),

@@ -26,39 +26,39 @@ pub(crate) fn parse_archive_encrypt_header(raw: &RawBlock) -> RarResult<Encrypti
 
     // Skip block_type and block_flags (already parsed, but stored in header_data)
     let (_, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("block type: {e}")))?;
+        .map_err(|e| RarError::format(format!("block type: {e}")))?;
     offset += n;
     let (_, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("block flags: {e}")))?;
+        .map_err(|e| RarError::format(format!("block flags: {e}")))?;
     offset += n;
 
     // Encryption-specific fields
     let (version, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("encr version: {e}")))?;
+        .map_err(|e| RarError::format(format!("encr version: {e}")))?;
     offset += n;
     if version > u64::from(ENCR_VERSION_AES256) {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "unsupported encryption version {version}"
         )));
     }
     let (flags, n) = vint::decode_from_slice(data, offset)
-        .map_err(|e| RarError::Format(format!("encr flags: {e}")))?;
+        .map_err(|e| RarError::format(format!("encr flags: {e}")))?;
     offset += n;
     check_encr_flags(flags)?;
 
     if offset >= data.len() {
-        return Err(RarError::Format("truncated encryption header".into()));
+        return Err(RarError::format("truncated encryption header"));
     }
     let strength = data[offset];
     offset += 1;
     if strength > MAX_KDF_COUNT_LOG {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "encryption strength {strength} exceeds maximum {MAX_KDF_COUNT_LOG}"
         )));
     }
 
     if offset + ENCR_SALT_SIZE > data.len() {
-        return Err(RarError::Format("truncated encryption header salt".into()));
+        return Err(RarError::format("truncated encryption header salt"));
     }
     let mut salt = [0u8; ENCR_SALT_SIZE];
     salt.copy_from_slice(&data[offset..offset + ENCR_SALT_SIZE]);
@@ -66,8 +66,8 @@ pub(crate) fn parse_archive_encrypt_header(raw: &RawBlock) -> RarResult<Encrypti
 
     let checksum = if flags & u64::from(ENCR_FLAG_CHECKSUM) != 0 {
         if data.len().saturating_sub(offset) < 12 {
-            return Err(RarError::Format(
-                "truncated encryption header password check value".into(),
+            return Err(RarError::format(
+                "truncated encryption header password check value",
             ));
         }
         let mut ck = [0u8; 12];
@@ -100,9 +100,8 @@ pub(crate) fn derive_header_key(
     raw: &RawBlock,
     password: Option<&str>,
 ) -> RarResult<[u8; ENCR_KEY_SIZE]> {
-    let password = password.ok_or_else(|| {
-        RarError::Encrypted("archive has encrypted headers; provide a password".into())
-    })?;
+    let password = password
+        .ok_or_else(|| RarError::encrypted("archive has encrypted headers; provide a password"))?;
     let params = parse_archive_encrypt_header(raw)?;
     let keys = params
         .derive_and_verify(password)?

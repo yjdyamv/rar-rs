@@ -12,14 +12,14 @@ use crate::error::{RarError, RarResult};
 /// components are dropped.
 pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
     if name.is_empty() {
-        return Err(RarError::Security("empty entry name".into()));
+        return Err(RarError::security("empty entry name"));
     }
     if name.contains('\0') {
-        return Err(RarError::Security("entry name contains a NUL byte".into()));
+        return Err(RarError::security("entry name contains a NUL byte"));
     }
     let normalized = name.replace('\\', "/");
     if normalized.starts_with('/') {
-        return Err(RarError::Security(format!(
+        return Err(RarError::security(format!(
             "absolute entry name {name:?} rejected"
         )));
     }
@@ -29,12 +29,12 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
             continue;
         }
         if comp == ".." {
-            return Err(RarError::Security(format!(
+            return Err(RarError::security(format!(
                 "entry name {name:?} contains a '..' traversal component"
             )));
         }
         if component_is_ambiguous(comp) {
-            return Err(RarError::Security(format!(
+            return Err(RarError::security(format!(
                 "entry name {name:?} contains the platform-ambiguous component {comp:?}"
             )));
         }
@@ -44,7 +44,7 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
         out.push_str(comp);
     }
     if out.is_empty() {
-        return Err(RarError::Security(format!(
+        return Err(RarError::security(format!(
             "entry name {name:?} resolves to an empty path"
         )));
     }
@@ -128,16 +128,14 @@ fn component_is_ambiguous(_component: &str) -> bool {
 #[cfg(any(unix, windows))]
 pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult<Vec<String>> {
     if target.is_empty() {
-        return Err(RarError::Security("redirect target is empty".into()));
+        return Err(RarError::security("redirect target is empty"));
     }
     if target.contains('\0') {
-        return Err(RarError::Security(
-            "redirect target contains a NUL byte".into(),
-        ));
+        return Err(RarError::security("redirect target contains a NUL byte"));
     }
     let normalized = target.replace('\\', "/");
     if normalized.starts_with('/') {
-        return Err(RarError::Security(format!(
+        return Err(RarError::security(format!(
             "absolute redirect target {target:?} rejected"
         )));
     }
@@ -153,7 +151,7 @@ pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult
         }
         if component == ".." {
             if parts.pop().is_none() {
-                return Err(RarError::Security(format!(
+                return Err(RarError::security(format!(
                     "redirect target {target:?} escapes the destination directory"
                 )));
             }
@@ -162,7 +160,7 @@ pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult
             // dot/space stripping, device names) when the link is later
             // opened, so the lexical containment check alone would not hold
             // on disk.
-            return Err(RarError::Security(format!(
+            return Err(RarError::security(format!(
                 "redirect target {target:?} contains the platform-ambiguous component {component:?}"
             )));
         } else {

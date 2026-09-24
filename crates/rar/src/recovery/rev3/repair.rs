@@ -53,11 +53,11 @@ pub(super) fn rebuild_missing_volumes_chunked(
         payloads: revs,
     } = collect_recovery_volumes(&parent, &layout.base)?;
     if revs.is_empty() {
-        return Err(RarError::Format("no recovery volumes found".into()));
+        return Err(RarError::format("no recovery volumes found"));
     }
     let shard_len = revs.iter().map(|source| source.len).max().unwrap_or(0);
     if shard_len == 0 {
-        return Err(RarError::Format("empty recovery volume".into()));
+        return Err(RarError::format("empty recovery volume"));
     }
     let protected = match format {
         Format::Trailer => shard_len.saturating_sub(TRAILER_LEN as u64),
@@ -85,7 +85,7 @@ pub(super) fn rebuild_missing_volumes_chunked(
     erasures.extend(missing_recovery.iter().map(|k| meta.data_count + k));
     erasures.sort_unstable();
     if erasures.len() > meta.rec_count {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{} volume(s) missing but only {} recovery volume(s) available",
             erasures.len(),
             meta.rec_count
@@ -128,13 +128,13 @@ pub(super) fn rebuild_missing_volumes_chunked(
         erasures.dedup();
         damaged.sort_unstable();
         if !added {
-            return Err(RarError::Format(
-                "recovery volumes cannot repair this damage".into(),
+            return Err(RarError::format(
+                "recovery volumes cannot repair this damage",
             ));
         }
         if erasures.len() > meta.rec_count {
-            return Err(RarError::Format(
-                "too many damaged or missing volumes for the recovery data".into(),
+            return Err(RarError::format(
+                "too many damaged or missing volumes for the recovery data",
             ));
         }
     }

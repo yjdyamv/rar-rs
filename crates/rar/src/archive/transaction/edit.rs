@@ -23,8 +23,8 @@ impl RarArchive {
         comment: Option<&[u8]>,
     ) -> RarResult<EditSummary> {
         if self.mode != Mode::Read {
-            return Err(RarError::Format(
-                "edit requires an archive opened for reading".into(),
+            return Err(RarError::format(
+                "edit requires an archive opened for reading",
             ));
         }
         // A lone volume of a set (the other parts missing, so discovery
@@ -34,19 +34,18 @@ impl RarArchive {
         // split ones. RAR4 refuses the same shape in its own edit entry
         // points.
         if self.volume_paths.len() <= 1 && self.main_header_declares_volume_set()? {
-            return Err(RarError::Unsupported(
-                "cannot edit an incomplete multi-volume archive; open the first volume with every part present"
-                    .into(),
+            return Err(RarError::unsupported(
+                "cannot edit an incomplete multi-volume archive; open the first volume with every part present",
             ));
         }
         if force_rr.is_some_and(|percent| percent > 100) {
-            return Err(RarError::InvalidOption(
-                "recovery percent must be in 0..=100".into(),
+            return Err(RarError::invalid_option(
+                "recovery percent must be in 0..=100",
             ));
         }
         if self.volume_paths.len() > 1 && comment.is_some() {
-            return Err(RarError::Unsupported(
-                "comment changes are not supported for multi-volume archives".into(),
+            return Err(RarError::unsupported(
+                "comment changes are not supported for multi-volume archives",
             ));
         }
         self.ensure_write_ctx();
@@ -74,15 +73,15 @@ impl RarArchive {
                 return Err(RarError::StaleEntryId);
             }
             if deleted[*idx] {
-                return Err(RarError::InvalidOption(
-                    "cannot rename a member that the same edit deletes".into(),
+                return Err(RarError::invalid_option(
+                    "cannot rename a member that the same edit deletes",
                 ));
             }
         }
 
         let (map, renamed_count) = super::super::rename::build_rename_map(&self.entries, renames)?;
         if deleted_count == 0 && renamed_count == 0 && force_rr.is_none() && comment.is_none() {
-            return Err(RarError::Format("no members to edit".into()));
+            return Err(RarError::format("no members to edit"));
         }
 
         if deleted_count == self.entries.len() {
@@ -92,9 +91,8 @@ impl RarArchive {
             // above leaves no target — and comment/recovery changes would be
             // silently dropped, so they are refused too.
             if force_rr.is_some() || comment.is_some() {
-                return Err(RarError::InvalidOption(
-                    "cannot combine comment or recovery-record changes with deleting every member"
-                        .into(),
+                return Err(RarError::invalid_option(
+                    "cannot combine comment or recovery-record changes with deleting every member",
                 ));
             }
             if self.main_header_is_locked()? {
@@ -137,9 +135,8 @@ impl RarArchive {
         for (start, end) in &chains {
             for idx in map.keys() {
                 if !deleted[*idx] && (*start..=*end).contains(idx) {
-                    return Err(RarError::Unsupported(
-                        "renaming a member of a solid chain that also loses a member is not supported; split the edit into separate transactions"
-                            .into(),
+                    return Err(RarError::unsupported(
+                        "renaming a member of a solid chain that also loses a member is not supported; split the edit into separate transactions",
                     ));
                 }
             }
@@ -341,19 +338,16 @@ impl RarArchive {
                     // error instead of silently truncating the comment.
                     let limit = self.read_ctx().extract_options.metadata_limit();
                     if meta.raw.data_size > limit {
-                        return Err(RarError::LimitExceeded {
+                        return Err(RarError::limit_exceeded(
                             limit,
-                            context: format!(
-                                "archive comment declares {} bytes",
-                                meta.raw.data_size
-                            ),
-                        });
+                            format!("archive comment declares {} bytes", meta.raw.data_size),
+                        ));
                     }
                     let declared = usize::try_from(meta.raw.data_size).map_err(|_| {
-                        RarError::LimitExceeded {
+                        RarError::limit_exceeded(
                             limit,
-                            context: "archive comment size does not fit in usize".into(),
-                        }
+                            "archive comment size does not fit in usize",
+                        )
                     })?;
                     let mut data = vec![0u8; declared];
                     reader.seek(SeekFrom::Start(meta.data_offset))?;

@@ -20,8 +20,8 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 impl From<Error> for RarError {
     fn from(error: Error) -> Self {
         match error {
-            Error::InvalidData(message) => RarError::Format(format!("RARVM: {message}")),
-            Error::NeedMoreInput => RarError::Format("RARVM bitstream is truncated".into()),
+            Error::InvalidData(message) => RarError::format(format!("RARVM: {message}")),
+            Error::NeedMoreInput => RarError::format("RARVM bitstream is truncated"),
         }
     }
 }

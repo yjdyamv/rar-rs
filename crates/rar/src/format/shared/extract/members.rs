@@ -189,24 +189,24 @@ impl ExtractionReport {
 pub(crate) fn validate_entry_limits(cx: &dyn Engine, idx: usize) -> RarResult<()> {
     let hdr = &cx.entries()[idx].header;
     if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
-        return Err(RarError::LimitExceeded {
-            limit: MAX_DICT_SIZE_LOG as u64,
-            context: format!(
+        return Err(RarError::limit_exceeded(
+            MAX_DICT_SIZE_LOG as u64,
+            format!(
                 "{}: dictionary size log {} exceeds supported maximum {}",
                 hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
             ),
-        });
+        ));
     }
     if let Some(limit) = cx.read_ctx().extract_options.max_unpacked_bytes
         && hdr.unpacked_size > limit
     {
-        return Err(RarError::LimitExceeded {
+        return Err(RarError::limit_exceeded(
             limit,
-            context: format!(
+            format!(
                 "{}: unpacked size {} exceeds limit",
                 hdr.name, hdr.unpacked_size
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -239,20 +239,22 @@ pub(crate) fn extract_all_with_options(
         cx.check_cancel()?;
         total_unpacked = total_unpacked
             .checked_add(entry.header.unpacked_size)
-            .ok_or_else(|| RarError::LimitExceeded {
-                limit: opts.max_total_unpacked_bytes.unwrap_or(u64::MAX),
-                context: "total unpacked size overflow".into(),
+            .ok_or_else(|| {
+                RarError::limit_exceeded(
+                    opts.max_total_unpacked_bytes.unwrap_or(u64::MAX),
+                    "total unpacked size overflow",
+                )
             })?;
         if let Some(limit) = opts.max_total_unpacked_bytes
             && total_unpacked > limit
         {
-            return Err(RarError::LimitExceeded {
+            return Err(RarError::limit_exceeded(
                 limit,
-                context: format!(
+                format!(
                     "total unpacked size {total_unpacked} exceeds limit while extracting {}",
                     entry.name()
                 ),
-            });
+            ));
         }
         extract_entry(cx, index, entry, dest, &mut report)?;
     }
@@ -312,10 +314,10 @@ fn extract_all_parallel(
     if let Some(limit) = opts.max_total_unpacked_bytes
         && total_unpacked > limit
     {
-        return Err(RarError::LimitExceeded {
+        return Err(RarError::limit_exceeded(
             limit,
-            context: "total unpacked size exceeds limit".into(),
-        });
+            "total unpacked size exceeds limit",
+        ));
     }
 
     // Phase 1: read + decrypt all payloads sequentially.
@@ -347,13 +349,13 @@ fn extract_all_parallel(
             .map(|(i, payload)| {
                 let hdr = &headers[i];
                 if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
-                    return Err(RarError::LimitExceeded {
-                        limit: MAX_DICT_SIZE_LOG as u64,
-                        context: format!(
+                    return Err(RarError::limit_exceeded(
+                        MAX_DICT_SIZE_LOG as u64,
+                        format!(
                             "{}: dictionary size log {} exceeds supported maximum {}",
                             hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
                         ),
-                    });
+                    ));
                 }
                 // The RAR7 byte dictionary bypasses the 4-bit log: enforce
                 // the extraction cap here too.
@@ -361,13 +363,13 @@ fn extract_all_parallel(
                 if let Some(limit) = opts.max_unpacked_bytes
                     && hdr.unpacked_size > limit
                 {
-                    return Err(RarError::LimitExceeded {
+                    return Err(RarError::limit_exceeded(
                         limit,
-                        context: format!(
+                        format!(
                             "{}: unpacked size {} exceeds limit",
                             hdr.name, hdr.unpacked_size
                         ),
-                    });
+                    ));
                 }
 
                 // The one member decoder (STORE bound, decode, size
@@ -474,9 +476,7 @@ fn extract_all_parallel(
             return match staged {
                 Err(e) => Err(e),
                 // Unreachable: the closure above never reports success.
-                Ok(()) => Err(RarError::InvalidState(
-                    "failed member staged as complete".into(),
-                )),
+                Ok(()) => Err(RarError::invalid_state("failed member staged as complete")),
             };
         }
         materialize_member_file(&dest_path, keep_broken, |file| {
@@ -509,8 +509,8 @@ pub(crate) fn extract_index_with_options(
     report: &mut ExtractionReport,
 ) -> RarResult<PathBuf> {
     if idx >= cx.entries().len() {
-        return Err(RarError::InvalidState(
-            "entry index is outside the current catalog".into(),
+        return Err(RarError::invalid_state(
+            "entry index is outside the current catalog",
         ));
     }
     // Capture the member's payload position before the catalog can be
@@ -540,8 +540,8 @@ pub(crate) fn extract_index_with_options(
         idx
     };
     if idx >= cx.entries().len() {
-        return Err(RarError::InvalidState(
-            "entry index is outside the scanned catalog".into(),
+        return Err(RarError::invalid_state(
+            "entry index is outside the scanned catalog",
         ));
     }
     validate_entry_limits(cx, idx)?;

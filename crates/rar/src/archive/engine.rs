@@ -51,7 +51,7 @@ impl RarArchive {
         params: crypto::EncryptionParams,
     ) -> RarResult<()> {
         let password = self.password.as_ref().ok_or_else(|| {
-            RarError::Encrypted("archive has encrypted headers; provide a password".into())
+            RarError::encrypted("archive has encrypted headers; provide a password")
         })?;
         let keys = params
             .derive_and_verify(password)?
@@ -117,8 +117,8 @@ impl RarArchive {
             // Volume creation only happens in multivolume mode, where
             // `open_write` (or `rewrite_multivolume`) has staged the set.
             _ => {
-                return Err(RarError::Format(
-                    "internal error: volume created without a staged volume set".into(),
+                return Err(RarError::format(
+                    "internal error: volume created without a staged volume set",
                 ));
             }
         };
@@ -147,7 +147,7 @@ impl RarArchive {
     /// volume holds the archive comment extension).
     pub(crate) fn start_next_volume_rar13(&mut self) -> RarResult<()> {
         if self.write_ctx().output.current_volume >= crate::fs::volume::LEGACY_VOLUME_MAX {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "volume set exceeds the {}-volume legacy `.rNN` naming limit",
                 crate::fs::volume::LEGACY_VOLUME_MAX
             )));
@@ -161,8 +161,8 @@ impl RarArchive {
                 final_base,
             }) => (parent.clone(), tmp_base.clone(), final_base.clone()),
             _ => {
-                return Err(RarError::Format(
-                    "internal error: volume created without a staged volume set".into(),
+                return Err(RarError::format(
+                    "internal error: volume created without a staged volume set",
                 ));
             }
         };

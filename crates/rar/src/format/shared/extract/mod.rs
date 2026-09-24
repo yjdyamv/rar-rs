@@ -26,7 +26,7 @@ pub(crate) const MAX_CATALOG_ENTRIES: usize = 1_000_000;
 /// Reject a catalog that would grow past `max`.
 pub(crate) fn check_entry_cap(count: usize, max: usize) -> RarResult<()> {
     if count >= max {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "archive catalog exceeds the {max}-entry ceiling"
         )));
     }
@@ -44,7 +44,7 @@ pub(crate) const MAX_MEMBER_CHUNKS: usize = 1_000_000;
 /// Reject a continuing member that would grow past `max` chunks.
 pub(crate) fn check_chunk_cap(count: usize, max: usize, member: &str) -> RarResult<()> {
     if count >= max {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "member {member} exceeds the {max}-chunk ceiling"
         )));
     }

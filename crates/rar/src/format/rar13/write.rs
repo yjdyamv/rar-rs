@@ -100,8 +100,8 @@ pub(crate) fn build_archive_comment(comment: Option<&[u8]>) -> RarResult<Vec<u8>
         return Ok(Vec::new());
     };
     if comment.len() > u16::MAX as usize {
-        return Err(RarError::InvalidOption(
-            "RAR 1.3/1.4 archive comment is longer than 65535 bytes".into(),
+        return Err(RarError::invalid_option(
+            "RAR 1.3/1.4 archive comment is longer than 65535 bytes",
         ));
     }
     let mut packed = crate::codec::legacy::rar15_encoder::unpack15_encode(comment)?;
@@ -109,10 +109,10 @@ pub(crate) fn build_archive_comment(comment: Option<&[u8]>) -> RarResult<Vec<u8>
     let packed_field_len = packed
         .len()
         .checked_add(2)
-        .ok_or_else(|| RarError::InvalidOption("RAR 1.3/1.4 comment size overflows".into()))?;
+        .ok_or_else(|| RarError::invalid_option("RAR 1.3/1.4 comment size overflows"))?;
     if packed_field_len > u16::MAX as usize {
-        return Err(RarError::InvalidOption(
-            "RAR 1.3/1.4 packed archive comment is longer than 65535 bytes".into(),
+        return Err(RarError::invalid_option(
+            "RAR 1.3/1.4 packed archive comment is longer than 65535 bytes",
         ));
     }
     let mut out = Vec::with_capacity(4 + packed.len());
@@ -143,8 +143,8 @@ pub(crate) fn build_main_header(
     }
     let head_size = MAIN_HEAD_SIZE + comment_extra.len();
     if head_size > u16::MAX as usize {
-        return Err(RarError::InvalidOption(
-            "RAR 1.3/1.4 main header is longer than 65535 bytes".into(),
+        return Err(RarError::invalid_option(
+            "RAR 1.3/1.4 main header is longer than 65535 bytes",
         ));
     }
     let mut out = Vec::with_capacity(head_size);
@@ -162,8 +162,8 @@ pub(crate) fn build_file_comment(comment: Option<&[u8]>) -> RarResult<Vec<u8>> {
         return Ok(Vec::new());
     };
     if comment.len() > u16::MAX as usize {
-        return Err(RarError::InvalidOption(
-            "RAR 1.3/1.4 member comment is longer than 65535 bytes".into(),
+        return Err(RarError::invalid_option(
+            "RAR 1.3/1.4 member comment is longer than 65535 bytes",
         ));
     }
     let mut out = Vec::with_capacity(2 + comment.len());
@@ -190,15 +190,15 @@ struct MemberHeader<'a> {
 fn build_file_header(header: &MemberHeader<'_>) -> RarResult<Vec<u8>> {
     let name_bytes = header.name.as_bytes();
     if name_bytes.len() > u8::MAX as usize {
-        return Err(RarError::InvalidOption(format!(
+        return Err(RarError::invalid_option(format!(
             "RAR 1.3/1.4 member names are limited to 255 bytes (got {})",
             name_bytes.len()
         )));
     }
     let head_size = super::FILE_HEAD_BASE_SIZE + name_bytes.len() + header.extra.len();
     if head_size > u16::MAX as usize {
-        return Err(RarError::InvalidOption(
-            "RAR 1.3/1.4 file header is longer than 65535 bytes".into(),
+        return Err(RarError::invalid_option(
+            "RAR 1.3/1.4 file header is longer than 65535 bytes",
         ));
     }
     let mut out = Vec::with_capacity(head_size);
@@ -293,8 +293,8 @@ pub(crate) fn add_rar13_data(
         let packed = match encoder {
             LegacySolidEncoder::Rar15(encoder) => encoder.encode_member(&data)?,
             LegacySolidEncoder::Rar20(_) => {
-                return Err(RarError::InvalidState(
-                    "RAR 1.3/1.4 solid chain uses the Unpack15 encoder".into(),
+                return Err(RarError::invalid_state(
+                    "RAR 1.3/1.4 solid chain uses the Unpack15 encoder",
                 ));
             }
         };
@@ -383,7 +383,7 @@ fn add_rar13_file_streaming(
         flags |= LHD_PASSWORD;
         let password = cx
             .password()
-            .ok_or_else(|| RarError::Encrypted("encrypted member, no password provided".into()))?;
+            .ok_or_else(|| RarError::encrypted("encrypted member, no password provided"))?;
         cipher = Some(crate::crypto::Rar13Cipher::new(password.as_bytes()));
     }
 
@@ -571,7 +571,7 @@ fn write_rar13_member(
     if member.flags & LHD_PASSWORD != 0 {
         let password = cx
             .password()
-            .ok_or_else(|| RarError::Encrypted("encrypted member, no password provided".into()))?;
+            .ok_or_else(|| RarError::encrypted("encrypted member, no password provided"))?;
         crate::crypto::Rar13Cipher::new(password.as_bytes()).encrypt_in_place(&mut data);
     }
     match cx.write_ctx().output.volume_size {
@@ -649,12 +649,12 @@ fn write_rar13_split_member(
                 break;
             }
             if rolled {
-                return Err(RarError::InvalidOption(format!(
+                return Err(RarError::invalid_option(format!(
                     "volume size {volume_size} is too small for a RAR 1.3/1.4 member header"
                 )));
             }
             if rar13_first_volume_is_empty(cx, 0) {
-                return Err(RarError::InvalidOption(format!(
+                return Err(RarError::invalid_option(format!(
                     "volume size {volume_size} leaves no room for the first member after the archive main header"
                 )));
             }
@@ -698,12 +698,12 @@ fn write_rar13_split_member(
                 break;
             }
             if rolled {
-                return Err(RarError::InvalidOption(format!(
+                return Err(RarError::invalid_option(format!(
                     "volume size {volume_size} is too small for a RAR 1.3/1.4 member header"
                 )));
             }
             if rar13_first_volume_is_empty(cx, chunks.len()) {
-                return Err(RarError::InvalidOption(format!(
+                return Err(RarError::invalid_option(format!(
                     "volume size {volume_size} leaves no room for the first member after the archive main header"
                 )));
             }
@@ -718,7 +718,7 @@ fn write_rar13_split_member(
         chunk.reserve(chunk_len as usize);
         source(cx, sent, chunk_len, &mut chunk)?;
         if chunk.len() as u64 != chunk_len {
-            return Err(RarError::InvalidState(format!(
+            return Err(RarError::invalid_state(format!(
                 "RAR 1.3/1.4 split source produced {} of {chunk_len} bytes",
                 chunk.len()
             )));

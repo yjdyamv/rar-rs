@@ -43,9 +43,7 @@ impl RarArchive {
             .entries
             .iter()
             .position(|e| e.name() == name)
-            .ok_or_else(|| RarError::MemberNotFound {
-                name: name.to_string(),
-            })?;
+            .ok_or_else(|| RarError::member_not_found(name.to_string()))?;
         crate::format::shared::extract::read::read_at_index_with_options(self, target_idx, opts)
     }
 

@@ -593,7 +593,7 @@ pub(super) fn ensure_rar5_volume_space(cx: &mut dyn Engine, added: u64) -> RarRe
             return Ok(());
         }
         if rolled {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "volume size {volume_size} is too small for a RAR5 member header"
             )));
         }
@@ -655,18 +655,18 @@ pub(crate) fn add_redirect_with_time(
     mtime_ns: Option<u32>,
 ) -> RarResult<()> {
     if cx.is_rar4() {
-        return Err(RarError::Unsupported(
-            "redirect members are not supported for RAR4 archives".into(),
+        return Err(RarError::unsupported(
+            "redirect members are not supported for RAR4 archives",
         ));
     }
     if cx.is_rar13() {
-        return Err(RarError::Unsupported(
-            "redirect members are not supported for RAR 1.3/1.4 archives".into(),
+        return Err(RarError::unsupported(
+            "redirect members are not supported for RAR 1.3/1.4 archives",
         ));
     }
     if cx.mode() != Mode::Write && cx.mode() != Mode::Append {
-        return Err(RarError::Format(
-            "add_redirect requires an archive being written".into(),
+        return Err(RarError::format(
+            "add_redirect requires an archive being written",
         ));
     }
     crate::format::shared::write_ops::reset_solid_chain(cx);

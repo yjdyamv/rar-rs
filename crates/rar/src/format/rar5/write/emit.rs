@@ -215,7 +215,7 @@ pub(super) fn write_split_member(
             let used = cx.bytes_written();
             let remaining = volume_size.saturating_sub(used);
             if remaining < hdr_size + volume_tail_reserve(cx, used + hdr_size) {
-                return Err(RarError::InvalidOption(format!(
+                return Err(RarError::invalid_option(format!(
                     "volume size {volume_size} is too small for a member header ({hdr_size} bytes) plus the end block"
                 )));
             }
@@ -353,7 +353,7 @@ pub(super) fn write_split_member(
         };
         if chunk_size == 0 {
             if rolled {
-                return Err(RarError::InvalidOption(format!(
+                return Err(RarError::invalid_option(format!(
                     "volume size {volume_size} is too small for a member header ({hdr_size} bytes) plus the end block"
                 )));
             }

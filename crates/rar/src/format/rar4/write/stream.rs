@@ -224,7 +224,7 @@ pub(super) fn add_rar4_file_streaming(
                 salt = Some(salt_bytes);
                 padded = true;
                 let cipher = crate::crypto::Rar30Cipher::new(password_bytes, Some(salt_bytes))
-                    .map_err(|e| RarError::Format(format!("RAR4 member key setup: {e:?}")))?;
+                    .map_err(|e| RarError::format(format!("RAR4 member key setup: {e:?}")))?;
                 Box::new(Rar30RangeEmitter::new(cipher))
             }
             Some(LegacyCodec::Rar20) => {
@@ -237,7 +237,7 @@ pub(super) fn add_rar4_file_streaming(
                 crate::crypto::Rar15Cipher::new(password_bytes),
             )),
             _ => {
-                return Err(RarError::Unsupported(format!(
+                return Err(RarError::unsupported(format!(
                     "RAR4 write encryption: unp_ver {} has no cipher",
                     cx.write_ctx().solid.rar4_unp_ver
                 )));

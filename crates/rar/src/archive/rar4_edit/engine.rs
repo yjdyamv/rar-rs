@@ -96,7 +96,7 @@ fn apply_multivolume_edits(
             let mut rr_sectors: Option<u32> = None;
             while pos < file_len {
                 let view = read_block(&mut src, hp.is_some(), hp, EnvelopePolicy::EDIT)?
-                    .ok_or_else(|| RarError::Format("RAR4: truncated block stream".into()))?;
+                    .ok_or_else(|| RarError::format("RAR4: truncated block stream"))?;
                 if view.head_type == MAIN_HEAD {
                     let flags = main_flags(&view.header)?;
                     if flags & MHD_PASSWORD != 0 {
@@ -287,8 +287,8 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
         let rr_sectors = match &layout.protect {
             Some(protect) if &protect.mark == b"Protect+" => Some(protect.rec_sectors),
             Some(_) => {
-                return Err(RarError::Unsupported(
-                    "RAR4: archives with a PROTECT_HEAD recovery record cannot be appended to in place; recreate the archive".into(),
+                return Err(RarError::unsupported(
+                    "RAR4: archives with a PROTECT_HEAD recovery record cannot be appended to in place; recreate the archive",
                 ));
             }
             None => None,
@@ -311,8 +311,8 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
             (Some(protect.block_offset as u64), Some(protect.rec_sectors))
         }
         Some(_) => {
-            return Err(RarError::Unsupported(
-                "RAR4: archives with a PROTECT_HEAD recovery record cannot be appended to in place; recreate the archive".into(),
+            return Err(RarError::unsupported(
+                "RAR4: archives with a PROTECT_HEAD recovery record cannot be appended to in place; recreate the archive",
             ));
         }
         None => (Some(layout.endarc_offset as u64), None),
@@ -390,13 +390,13 @@ pub(crate) fn edit_rar4(
     member_comments: &[(usize, Option<Vec<u8>>)],
 ) -> RarResult<EditSummary> {
     if force_rr.is_some_and(|percent| percent > 100) {
-        return Err(RarError::InvalidOption(
-            "recovery percent must be in 0..=100".into(),
+        return Err(RarError::invalid_option(
+            "recovery percent must be in 0..=100",
         ));
     }
     if force_sectors == Some(0) {
-        return Err(RarError::InvalidOption(
-            "recovery sector count must be greater than zero".into(),
+        return Err(RarError::invalid_option(
+            "recovery sector count must be greater than zero",
         ));
     }
     let layout = {
@@ -445,8 +445,8 @@ pub(crate) fn edit_rar4(
     if deleted_count == archive.entries.len() {
         if force_rr.is_some() || force_sectors.is_some() || comment.is_some() || !renames.is_empty()
         {
-            return Err(RarError::InvalidOption(
-                "cannot combine comment, recovery-record or rename changes with deleting every member".into(),
+            return Err(RarError::invalid_option(
+                "cannot combine comment, recovery-record or rename changes with deleting every member",
             ));
         }
         return erase_rar4_archive(archive, deleted_count);
@@ -459,13 +459,13 @@ pub(crate) fn edit_rar4(
     // comment/recovery changes are refused clearly.
     if archive.volume_paths.len() > 1 || layout.main_flags & MHD_VOLUME != 0 {
         if deleted_count > 0 {
-            return Err(RarError::Unsupported(
-                "cannot delete members from a multi-volume RAR4 archive (volume rebalancing is required; official rar refuses too)".into(),
+            return Err(RarError::unsupported(
+                "cannot delete members from a multi-volume RAR4 archive (volume rebalancing is required; official rar refuses too)",
             ));
         }
         if force_rr.is_some() || force_sectors.is_some() || !member_comments.is_empty() {
-            return Err(RarError::Unsupported(
-                "recovery-record and per-member-comment edits on multi-volume RAR4 archives are not supported (a volume set uses .rev recovery volumes)".into(),
+            return Err(RarError::unsupported(
+                "recovery-record and per-member-comment edits on multi-volume RAR4 archives are not supported (a volume set uses .rev recovery volumes)",
             ));
         }
         let (rename_map, _) = crate::archive::rename::build_rename_map(&archive.entries, renames)?;
@@ -493,22 +493,20 @@ pub(crate) fn edit_rar4(
         crate::archive::rename::build_rename_map(&archive.entries, renames)?;
     for (idx, _) in renames {
         if deleted[*idx] {
-            return Err(RarError::InvalidOption(
-                "cannot rename a member that the same edit deletes".into(),
+            return Err(RarError::invalid_option(
+                "cannot rename a member that the same edit deletes",
             ));
         }
     }
     if layout.files.len() != archive.entries.len() {
-        return Err(RarError::Format(
-            "RAR4: member layout does not match the scan (unsupported archive shape)".into(),
+        return Err(RarError::format(
+            "RAR4: member layout does not match the scan (unsupported archive shape)",
         ));
     }
     if layout.files.is_empty()
         && (deleted_count > 0 || rename_map.keys().next().is_some() || force_rr.is_some())
     {
-        return Err(RarError::Format(
-            "RAR4: archive has no members to edit".into(),
-        ));
+        return Err(RarError::format("RAR4: archive has no members to edit"));
     }
 
     // Decide the recovery-record action. A RAR 2.5-era PROTECT_HEAD record
@@ -524,8 +522,8 @@ pub(crate) fn edit_rar4(
             Some((protect.block_offset, protect.data_end, protect.rec_sectors))
         }
         Some(_) => {
-            return Err(RarError::Unsupported(
-                "RAR4: archives with a PROTECT_HEAD recovery record cannot be edited in place; recreate the archive".into(),
+            return Err(RarError::unsupported(
+                "RAR4: archives with a PROTECT_HEAD recovery record cannot be edited in place; recreate the archive",
             ));
         }
         None => None,
@@ -588,7 +586,7 @@ pub(crate) fn edit_rar4(
         let mut drop_standalone_comment = false;
         while pos < region_end as u64 {
             let view = read_block(&mut src, hp_bytes.is_some(), hp_bytes, EnvelopePolicy::EDIT)?
-                .ok_or_else(|| RarError::Format("RAR4: truncated block stream".into()))?;
+                .ok_or_else(|| RarError::format("RAR4: truncated block stream"))?;
             if view.head_type == FILE_HEAD {
                 if deleted[file_index] {
                     // Drop the member's header and payload verbatim (and
@@ -653,8 +651,8 @@ pub(crate) fn edit_rar4(
             src.seek(SeekFrom::Start(pos)).map_err(RarError::Io)?;
         }
         if pos != region_end as u64 {
-            return Err(RarError::Format(
-                "RAR4: block walk ended before the expected region end".into(),
+            return Err(RarError::format(
+                "RAR4: block walk ended before the expected region end",
             ));
         }
 
@@ -665,11 +663,11 @@ pub(crate) fn edit_rar4(
         if wants_record {
             let out_len = out.stream_position().map_err(RarError::Io)? as usize;
             let prefix_len = out_len.checked_sub(layout.sfx_offset).ok_or_else(|| {
-                RarError::Format("RAR4: rewritten prefix is shorter than the archive start".into())
+                RarError::format("RAR4: rewritten prefix is shorter than the archive start")
             })?;
             if prefix_len == 0 {
-                return Err(RarError::Format(
-                    "RAR4: nothing to protect with a recovery record".into(),
+                return Err(RarError::format(
+                    "RAR4: nothing to protect with a recovery record",
                 ));
             }
             let mut prefix = vec![0u8; prefix_len];
@@ -703,8 +701,8 @@ pub(crate) fn edit_rar4(
         // bytes) verbatim.
         let file_len = src.metadata().map_err(RarError::Io)?.len();
         if tail_from as u64 > file_len {
-            return Err(RarError::Format(
-                "RAR4: recovery tail lies past the archive end".into(),
+            return Err(RarError::format(
+                "RAR4: recovery tail lies past the archive end",
             ));
         }
         copy_range(
@@ -768,7 +766,7 @@ fn append_volume_recovery_record(
 ) -> RarResult<()> {
     let prefix_len = out.stream_position().map_err(RarError::Io)?;
     let len = usize::try_from(prefix_len)
-        .map_err(|_| RarError::Format("volume prefix does not fit in usize".into()))?;
+        .map_err(|_| RarError::format("volume prefix does not fit in usize"))?;
     let mut prefix = vec![0u8; len];
     File::open(staged)
         .map_err(RarError::Io)?

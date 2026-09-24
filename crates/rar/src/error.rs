@@ -148,6 +148,91 @@ pub enum RarError {
     Io(io::Error),
 }
 
+/// Constructor functions: the single place that builds a [`RarError`].
+///
+/// Every fallible path should build its error through one of these rather
+/// than a variant literal, so message style stays uniform and a future
+/// change (a family prefix, a context field) lands once. Match arms and
+/// `matches!` keep using the variants directly — only *construction* goes
+/// through here.
+///
+/// Message style: lowercase, no trailing period, and a container-family
+/// prefix (`"RAR4: "`, `"RAR 1.3: "`, `"RAR5: "`, `"RARVM: "`) when the site
+/// is family-specific. Interpolating messages use `format!`.
+impl RarError {
+    /// Malformed archive bytes: a header, block or field the format cannot
+    /// produce.
+    pub fn format(message: impl Into<String>) -> Self {
+        Self::Format(message.into())
+    }
+
+    /// The call is invalid for the archive's current mode (writing a
+    /// read-only archive, finishing twice, ...).
+    pub fn invalid_state(message: impl Into<String>) -> Self {
+        Self::InvalidState(message.into())
+    }
+
+    /// An option value or combination the writer/reader refuses.
+    pub fn invalid_option(message: impl Into<String>) -> Self {
+        Self::InvalidOption(message.into())
+    }
+
+    /// Encrypted content was reached without a usable password.
+    pub fn encrypted(message: impl Into<String>) -> Self {
+        Self::Encrypted(message.into())
+    }
+
+    /// The archive uses a valid RAR feature this crate does not implement.
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::Unsupported(message.into())
+    }
+
+    /// A security policy refused the operation (path escape, unsafe link,
+    /// set-ID owner, ...).
+    pub fn security(message: impl Into<String>) -> Self {
+        Self::Security(message.into())
+    }
+
+    /// A stored CRC32 does not match the decoded bytes.
+    pub fn crc(expected: u32, actual: u32, context: impl Into<String>) -> Self {
+        Self::Crc {
+            expected,
+            actual,
+            context: context.into(),
+        }
+    }
+
+    /// A stored BLAKE2sp (or other file hash) does not match.
+    pub fn hash_mismatch(expected: [u8; 32], actual: [u8; 32], context: impl Into<String>) -> Self {
+        Self::HashMismatch {
+            expected,
+            actual,
+            context: context.into(),
+        }
+    }
+
+    /// A configured size, dictionary or resource limit was exceeded.
+    pub fn limit_exceeded(limit: u64, context: impl Into<String>) -> Self {
+        Self::LimitExceeded {
+            limit,
+            context: context.into(),
+        }
+    }
+
+    /// `unique_entry` (or an extractor selector) found no such member.
+    pub fn member_not_found(name: impl Into<String>) -> Self {
+        Self::MemberNotFound { name: name.into() }
+    }
+
+    /// A name expected to identify one member matched several entries.
+    pub fn ambiguous_member(name: impl Into<String>, matches: usize) -> Self {
+        Self::AmbiguousMember {
+            name: name.into(),
+            matches,
+        }
+    }
+}
+
 impl RarError {
     /// Return the stable machine-readable category for this error.
     pub const fn code(&self) -> ErrorCode {
@@ -252,10 +337,7 @@ mod tests {
         let cases = [
             (RarError::Format(String::new()), ErrorCode::Format, "format"),
             (
-                RarError::AmbiguousMember {
-                    name: "duplicate".into(),
-                    matches: 2,
-                },
+                RarError::ambiguous_member("duplicate", 2),
                 ErrorCode::AmbiguousMember,
                 "ambiguous_member",
             ),

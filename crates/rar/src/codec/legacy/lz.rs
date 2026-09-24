@@ -25,8 +25,8 @@ impl Error {
     /// name (`"RAR 2.0"`, `"RAR 2.9"`).
     pub(super) fn into_rar(self, stream: &'static str) -> RarError {
         match self {
-            Error::Bad(message) => RarError::Format(format!("{stream} stream: {message}")),
-            Error::Truncated => RarError::Format(format!("{stream} bitstream is truncated")),
+            Error::Bad(message) => RarError::format(format!("{stream} stream: {message}")),
+            Error::Truncated => RarError::format(format!("{stream} bitstream is truncated")),
         }
     }
 }

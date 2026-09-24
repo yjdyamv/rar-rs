@@ -22,26 +22,26 @@ pub(crate) struct Rar4WriteOptions {
 /// shared writer validation when the RAR4 format is selected.
 pub(crate) fn validate_rar4_only(options: Rar4WriteOptions) -> RarResult<()> {
     if options.quick_open {
-        return Err(RarError::InvalidOption(
-            "quick-open is not supported for RAR4 archives".into(),
+        return Err(RarError::invalid_option(
+            "quick-open is not supported for RAR4 archives",
         ));
     }
     if options.blake2 {
-        return Err(RarError::InvalidOption(
-            "BLAKE2sp hashes are not supported for RAR4 archives".into(),
+        return Err(RarError::invalid_option(
+            "BLAKE2sp hashes are not supported for RAR4 archives",
         ));
     }
     if options.save_owner || options.save_streams {
-        return Err(RarError::InvalidOption(
-            "owner and stream records are not supported for RAR4 archives".into(),
+        return Err(RarError::invalid_option(
+            "owner and stream records are not supported for RAR4 archives",
         ));
     }
     // The RAR4 writer selects its own per-member window (64 KiB - 4 MiB,
     // from the member size); it has no configurable dictionary, so a
     // requested size would be silently ignored by the legacy layer.
     if options.has_dictionary {
-        return Err(RarError::InvalidOption(
-            "RAR4 archives do not support configurable dictionary sizes".into(),
+        return Err(RarError::invalid_option(
+            "RAR4 archives do not support configurable dictionary sizes",
         ));
     }
     Ok(())
@@ -52,7 +52,7 @@ pub(crate) fn validate_rar4_only(options: Rar4WriteOptions) -> RarResult<()> {
 /// be written in full while its header declares a truncated length.
 pub(crate) fn ensure_member_size(unpacked: u64) -> RarResult<()> {
     if unpacked > u32::MAX as u64 {
-        return Err(RarError::InvalidOption(format!(
+        return Err(RarError::invalid_option(format!(
             "RAR4 members cannot exceed {} bytes (got {unpacked})",
             u32::MAX
         )));

@@ -218,14 +218,13 @@ impl Rar29Decoder {
     /// Vec holds only the member's own bytes, while the window inside this
     /// decoder retains up to [`MAX_HISTORY`] bytes of look-behind.
     pub(crate) fn decode_member(&mut self, packed: &[u8], output_size: u64) -> RarResult<Vec<u8>> {
-        let output_size = usize::try_from(output_size).map_err(|_| RarError::LimitExceeded {
-            limit: u64::MAX,
-            context: "RAR 2.9 member is too large for this platform".into(),
+        let output_size = usize::try_from(output_size).map_err(|_| {
+            RarError::limit_exceeded(u64::MAX, "RAR 2.9 member is too large for this platform")
         })?;
         let start = self.history.current_pos();
         let target = start
             .checked_add(output_size)
-            .ok_or_else(|| RarError::Format("RAR 2.9 output size overflows".into()))?;
+            .ok_or_else(|| RarError::format("RAR 2.9 output size overflows"))?;
         if !packed.is_empty() {
             self.bits = BitReader::new();
         }
@@ -253,14 +252,13 @@ impl Rar29Decoder {
         writer: &mut dyn std::io::Write,
     ) -> RarResult<()> {
         const FLUSH: usize = 1024 * 1024;
-        let output_size = usize::try_from(output_size).map_err(|_| RarError::LimitExceeded {
-            limit: u64::MAX,
-            context: "RAR 2.9 member is too large for this platform".into(),
+        let output_size = usize::try_from(output_size).map_err(|_| {
+            RarError::limit_exceeded(u64::MAX, "RAR 2.9 member is too large for this platform")
         })?;
         let member_start = self.history.current_pos();
         let target = member_start
             .checked_add(output_size)
-            .ok_or_else(|| RarError::Format("RAR 2.9 output size overflows".into()))?;
+            .ok_or_else(|| RarError::format("RAR 2.9 output size overflows"))?;
         if !packed.is_empty() {
             self.bits = BitReader::new();
         }

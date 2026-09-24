@@ -524,8 +524,8 @@ pub(crate) fn extract_redirection(
             }
             #[cfg(not(any(unix, windows)))]
             {
-                return Err(RarError::Unsupported(
-                    "symbolic links are not supported on this platform".into(),
+                return Err(RarError::unsupported(
+                    "symbolic links are not supported on this platform",
                 ));
             }
         }
@@ -622,7 +622,7 @@ pub(crate) fn safe_dest_path_with(
         let canon_dest = dest_dir.canonicalize()?;
         let canon_parent = canonicalize_with_tail(parent, dest_dir);
         if !canon_parent.starts_with(&canon_dest) {
-            return Err(RarError::Security(format!(
+            return Err(RarError::security(format!(
                 "entry {name:?} resolves outside the destination directory"
             )));
         }

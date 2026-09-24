@@ -263,7 +263,7 @@ pub(crate) fn add_batch_parallel_rar4(
             let pool = crate::parallel::compression_pool_for(threads);
             let unp_ver = cx.write_ctx().solid.rar4_unp_ver;
             let codec = LegacyCodec::from_unp_ver(unp_ver).ok_or_else(|| {
-                RarError::Unsupported(format!(
+                RarError::unsupported(format!(
                     "RAR4 write dispatch: unp_ver {unp_ver} has no encoder"
                 ))
             })?;

@@ -182,11 +182,11 @@ fn read_plain_block<R: Read + Seek>(
         return Ok(None);
     }
     if n < 7 {
-        return Err(RarError::Format("RAR4: truncated block header".into()));
+        return Err(RarError::format("RAR4: truncated block header"));
     }
     let head_size = u16::from_le_bytes([base[5], base[6]]);
     if head_size < 7 {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "RAR4: block head_size {head_size} too small"
         )));
     }
@@ -197,7 +197,7 @@ fn read_plain_block<R: Read + Seek>(
         let mut rest = vec![0u8; head_size as usize - 7];
         read_exact(stream, &mut rest).map_err(|err| match err {
             RarError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                RarError::Format("RAR4: truncated block header".into())
+                RarError::format("RAR4: truncated block header")
             }
             other => other,
         })?;
@@ -221,8 +221,8 @@ fn read_encrypted_block<R: Read + Seek>(
     policy: EnvelopePolicy,
 ) -> RarResult<Option<Rar4Block>> {
     let Some(password) = password else {
-        return Err(RarError::Encrypted(
-            "RAR4: header-encrypted archive, a password is required".into(),
+        return Err(RarError::encrypted(
+            "RAR4: header-encrypted archive, a password is required",
         ));
     };
     let Some((header, raw, on_disk_header)) = decrypt_header(stream, password)? else {
@@ -264,17 +264,15 @@ fn decrypt_header<R: Read>(stream: &mut R, password: &[u8]) -> RarResult<Option<
         return Ok(None);
     }
     if n < 24 {
-        return Err(RarError::Format(
-            "RAR4: truncated encrypted block header".into(),
-        ));
+        return Err(RarError::format("RAR4: truncated encrypted block header"));
     }
     let salt: [u8; 8] = first[..8].try_into().unwrap();
     let mut cipher = Rar30Cipher::new(password, Some(salt))
-        .map_err(|e| RarError::Format(format!("RAR4 header key setup: {e}")))?;
+        .map_err(|e| RarError::format(format!("RAR4 header key setup: {e}")))?;
     let mut block0: [u8; 16] = first[8..24].try_into().unwrap();
     cipher
         .decrypt_in_place(&mut block0)
-        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
+        .map_err(|e| RarError::format(format!("RAR4 header decrypt: {e}")))?;
     let head_size = u16::from_le_bytes([block0[5], block0[6]]);
     if head_size < 7 {
         // Garbage `head_size` from the first decrypted block: a wrong
@@ -296,7 +294,7 @@ fn decrypt_header<R: Read>(stream: &mut R, password: &[u8]) -> RarResult<Option<
     raw.extend_from_slice(&rest);
     cipher
         .decrypt_in_place(&mut rest)
-        .map_err(|e| RarError::Format(format!("RAR4 header decrypt: {e}")))?;
+        .map_err(|e| RarError::format(format!("RAR4 header decrypt: {e}")))?;
     let mut header = block0.to_vec();
     header.extend_from_slice(&rest);
     header.truncate(head_size as usize);
@@ -322,19 +320,19 @@ pub(crate) fn read_envelope(
     verify_crc: bool,
 ) -> RarResult<Rar4Block> {
     if header.len() < 7 {
-        return Err(RarError::Format("RAR4: truncated block header".into()));
+        return Err(RarError::format("RAR4: truncated block header"));
     }
     let head_crc = u16::from_le_bytes([header[0], header[1]]);
     let head_type = header[2];
     let flags = u16::from_le_bytes([header[3], header[4]]);
     let head_size = u16::from_le_bytes([header[5], header[6]]);
     if head_size < 7 {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "RAR4: block head_size {head_size} too small"
         )));
     }
     if header.len() < head_size as usize {
-        return Err(RarError::Format("RAR4: truncated block header".into()));
+        return Err(RarError::format("RAR4: truncated block header"));
     }
 
     // Validate header CRC (16-bit) over bytes[2..head_size], except for
@@ -346,20 +344,18 @@ pub(crate) fn read_envelope(
         if should_check {
             let actual = (crc32(&header[2..crc_end]) & 0xffff) as u16;
             if actual != head_crc {
-                return Err(RarError::Crc {
-                    expected: head_crc as u32,
-                    actual: actual as u32,
-                    context: format!("RAR4 block type {head_type:#x} header"),
-                });
+                return Err(RarError::crc(
+                    head_crc as u32,
+                    actual as u32,
+                    format!("RAR4 block type {head_type:#x} header"),
+                ));
             }
         }
     }
 
     let add_size = if flags & LONG_BLOCK != 0 {
         if header.len() < 11 {
-            return Err(RarError::Format(
-                "RAR4: header missing LONG_BLOCK size".into(),
-            ));
+            return Err(RarError::format("RAR4: header missing LONG_BLOCK size"));
         }
         u64::from(u32::from_le_bytes(header[7..11].try_into().unwrap()))
     } else {

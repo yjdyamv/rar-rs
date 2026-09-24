@@ -95,7 +95,7 @@ const OFFSET_BITS: [u8; OFFSET_COUNT] = [
 // ── Error helper ───────────────────────────────────────────────────────────
 
 fn enc_err(msg: &'static str) -> RarError {
-    RarError::Format(format!("RAR 2.9 encoder: {msg}"))
+    RarError::format(format!("RAR 2.9 encoder: {msg}"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1043,7 +1043,7 @@ fn encode_member_blocks_mt(
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn ppmd_err(e: crate::codec::legacy::ppmd::Error) -> RarError {
-    RarError::Format(format!("RAR 2.9 PPMd encode: {e}"))
+    RarError::format(format!("RAR 2.9 PPMd encode: {e}"))
 }
 
 /// One way of pricing an escape token: `length * literal_bits` is what the

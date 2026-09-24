@@ -43,13 +43,13 @@ fn ensure_rar5_volume_set(first_volume: &Path) -> RarResult<()> {
     let mut file = fs::File::open(first_volume)?;
     let read = file.read(&mut head)?;
     if read >= 7 && head[..7] == *crate::detect::RAR4_SIGNATURE {
-        return Err(RarError::Format(
-            "legacy recovery volumes are handled by the RAR 1.5-4.x codec".into(),
+        return Err(RarError::format(
+            "legacy recovery volumes are handled by the RAR 1.5-4.x codec",
         ));
     }
     if read >= 4 && head[..4] == *crate::detect::RAR13_SIGNATURE {
-        return Err(RarError::Unsupported(
-            "recovery volumes are not supported for RAR 1.3/1.4 archives".into(),
+        return Err(RarError::unsupported(
+            "recovery volumes are not supported for RAR 1.3/1.4 archives",
         ));
     }
     Ok(())
@@ -59,9 +59,7 @@ fn ensure_rar5_volume_set(first_volume: &Path) -> RarResult<()> {
 /// (0-100): `max(1, ceil(pct * ND / 100))`, capped at `ND`.
 pub fn plan_recovery_volume_count(data_count: usize, rec_percent: u64) -> RarResult<usize> {
     if data_count == 0 {
-        return Err(RarError::Format(
-            "no data volumes for recovery volumes".into(),
-        ));
+        return Err(RarError::format("no data volumes for recovery volumes"));
     }
     let nd = data_count as u64;
     let pct = rec_percent.min(100);
@@ -134,7 +132,7 @@ pub fn build_recovery_volume_file(
 /// and stores the CRC right after the signature (bytes `8..12`).
 fn verify_rev5_header(data: &[u8], path: &Path) -> RarResult<()> {
     if data.len() < 16 {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: truncated recovery volume header",
             path.display()
         )));
@@ -142,13 +140,13 @@ fn verify_rev5_header(data: &[u8], path: &Path) -> RarResult<()> {
     let stored = u32::from_le_bytes(data[8..12].try_into().unwrap());
     let hsize = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
     let Some(content) = 16usize.checked_add(hsize).and_then(|end| data.get(12..end)) else {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: truncated recovery volume header",
             path.display()
         )));
     };
     if crc32fast::hash(content) != stored {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: recovery volume header CRC mismatch",
             path.display()
         )));
@@ -170,7 +168,7 @@ struct Rev5Header {
 }
 
 fn truncated_header(path: &Path) -> RarError {
-    RarError::Format(format!(
+    RarError::format(format!(
         "{}: truncated recovery volume header",
         path.display()
     ))
@@ -183,7 +181,7 @@ fn read_rev5_header(file: &mut fs::File, path: &Path, len: u64) -> RarResult<Rev
     file.seek(SeekFrom::Start(0))?;
     let got = read_up_to(file, &mut fixed)?;
     if got < 12 || fixed[..8] != *REV5_SIGNATURE {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: not a RAR5 recovery volume",
             path.display()
         )));
@@ -216,7 +214,7 @@ fn read_rev5_header(file: &mut fs::File, path: &Path, len: u64) -> RarResult<Rev
     let max_hsize =
         REV5_BODY_FIXED_LEN + (table_count as u64).saturating_mul(12) + REV5_HEADER_SLACK;
     if hsize > max_hsize {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: recovery volume header size {hsize} exceeds its volume table",
             path.display()
         )));
@@ -234,9 +232,7 @@ fn read_rev5_header(file: &mut fs::File, path: &Path, len: u64) -> RarResult<Rev
         return Err(truncated_header(path));
     }
     if body[0] != 1 {
-        return Err(RarError::Format(
-            "unsupported recovery volume version".into(),
-        ));
+        return Err(RarError::format("unsupported recovery volume version"));
     }
     let data_count = usize::from(u16::from_le_bytes(body[1..3].try_into().unwrap()));
     let rec_count = usize::from(u16::from_le_bytes(body[3..5].try_into().unwrap()));
@@ -344,7 +340,7 @@ fn rebuild_missing_volumes_chunked(
         probe.exists().then_some((probe, width))
     });
     let Some((rev1, width)) = found else {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: no recovery volumes found",
             first_volume.display()
         )));
@@ -352,7 +348,7 @@ fn rebuild_missing_volumes_chunked(
     let mut rev1_file = fs::File::open(&rev1)?;
     let rev1_len = rev1_file.metadata()?.len();
     if rev1_len < REV5_FIXED_HEADER_LEN {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{}: not a RAR5 recovery volume",
             rev1.display()
         )));
@@ -361,9 +357,7 @@ fn rebuild_missing_volumes_chunked(
     let data_count = header.data_count;
     let rec_count = header.rec_count;
     if data_count == 0 || rec_count == 0 || rec_count > 65535 - data_count {
-        return Err(RarError::Format(
-            "implausible recovery volume parameters".into(),
-        ));
+        return Err(RarError::format("implausible recovery volume parameters"));
     }
     let volume_sizes = header.volume_sizes;
     let volume_crcs = header.volume_crcs;
@@ -383,13 +377,11 @@ fn rebuild_missing_volumes_chunked(
         rev1_file.seek(SeekFrom::Start(header.header_end))?;
         hash_exact(&mut rev1_file, first_payload_len, &mut hasher, &mut buf)?;
         if hasher.finalize() != header.payload_crc {
-            return Err(RarError::Format(
-                "recovery volume payload CRC mismatch".into(),
-            ));
+            return Err(RarError::format("recovery volume payload CRC mismatch"));
         }
     }
     if first_payload_len != padded_max {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "recovery volume payload size {} does not match the volume set ({padded_max})",
             first_payload_len
         )));
@@ -411,7 +403,7 @@ fn rebuild_missing_volumes_chunked(
         return Ok(Vec::new());
     }
     if missing.len() > rec_count {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "{} volume(s) missing but only {rec_count} recovery volume(s) available",
             missing.len()
         )));
@@ -492,7 +484,7 @@ fn rebuild_missing_volumes_chunked(
             let mut rev_bufs: Vec<Vec<u8>> = Vec::with_capacity(rec_count);
             for (k, rev) in rev_streams.iter_mut().enumerate() {
                 if offset + want as u64 > rev.payload_len {
-                    return Err(RarError::Format(format!(
+                    return Err(RarError::format(format!(
                         "recovery volume {} is shorter than the volume set it protects",
                         k + 1
                     )));
@@ -508,7 +500,7 @@ fn rebuild_missing_volumes_chunked(
                 .map(|(k, buf)| (k, buf.as_slice()))
                 .collect();
             let all = reconstruct_data_shards(&data_refs, &recovery_shards)
-                .map_err(|e| RarError::Format(format!("recovery volume reconstruction: {e}")))?;
+                .map_err(|e| RarError::format(format!("recovery volume reconstruction: {e}")))?;
             for (slot, &index) in missing.iter().enumerate() {
                 outputs[slot].file.write_all(&all[index])?;
                 outputs[slot].written += all[index].len() as u64;
@@ -541,7 +533,7 @@ fn rebuild_missing_volumes_chunked(
         let step = (move || -> RarResult<()> {
             check_cancel(cancel)?;
             if written < padded_max {
-                return Err(RarError::Format(format!(
+                return Err(RarError::format(format!(
                     "reconstructed volume {} is shorter than expected",
                     index + 1
                 )));
@@ -551,11 +543,11 @@ fn rebuild_missing_volumes_chunked(
             drop(file);
             let actual_crc = crc32_file(&tmp_for_check, size)?;
             if actual_crc != expected_crc {
-                return Err(RarError::Crc {
-                    expected: expected_crc,
-                    actual: actual_crc,
-                    context: format!("reconstructed volume {}", index + 1),
-                });
+                return Err(RarError::crc(
+                    expected_crc,
+                    actual_crc,
+                    format!("reconstructed volume {}", index + 1),
+                ));
             }
             Ok(())
         })();
@@ -597,7 +589,7 @@ fn build_recovery_volumes_for_set_chunked(
 ) -> RarResult<Vec<PathBuf>> {
     let nd = volume_paths.len();
     if nd == 0 {
-        return Err(RarError::Format("no volumes for recovery volumes".into()));
+        return Err(RarError::format("no volumes for recovery volumes"));
     }
     // Legacy RAR 1.5–4.x sets use their own recovery-volume codec.
     if crate::recovery::rev3::is_legacy_rev_set(&volume_paths[0])? {
@@ -605,13 +597,13 @@ fn build_recovery_volumes_for_set_chunked(
     }
     ensure_rar5_volume_set(&volume_paths[0])?;
     if nd > 65535 {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "too many volumes ({nd}) for recovery volumes; maximum is 65535"
         )));
     }
     let rec_count = rec_count.min(nd * 10).max(1);
     if nd + rec_count > 65535 {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "data ({nd}) + recovery ({rec_count}) volumes exceed the 65535 limit"
         )));
     }
@@ -698,7 +690,7 @@ fn build_recovery_volumes_for_set_chunked(
             }
             let refs: Vec<&[u8]> = chunk_bufs.iter().map(|b| b.as_slice()).collect();
             let parity = encode_parity_shards(&refs, rec_count)
-                .map_err(|e| RarError::Format(format!("recovery volumes encode: {e}")))?;
+                .map_err(|e| RarError::format(format!("recovery volumes encode: {e}")))?;
             for (output, bytes) in outputs.iter_mut().zip(parity.iter()) {
                 output.payload_crc.update(bytes);
                 output.file.write_all(bytes)?;

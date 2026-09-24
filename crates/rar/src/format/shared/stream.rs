@@ -7,9 +7,9 @@ use std::io::{Read, Seek, SeekFrom};
 pub(crate) fn stream_mut(
     stream: &mut Option<Box<dyn crate::engine::ArchiveStream>>,
 ) -> crate::error::RarResult<&mut Box<dyn crate::engine::ArchiveStream>> {
-    stream.as_mut().ok_or_else(|| {
-        crate::error::RarError::InvalidState("archive has no underlying stream".into())
-    })
+    stream
+        .as_mut()
+        .ok_or_else(|| crate::error::RarError::invalid_state("archive has no underlying stream"))
 }
 
 /// Length of a seekable reader, restoring its position. Works for concrete

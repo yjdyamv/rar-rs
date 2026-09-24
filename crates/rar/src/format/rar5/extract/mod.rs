@@ -36,13 +36,13 @@ pub(crate) fn capped_dict_bytes(hdr: &FileHeader, max_dict_size: Option<u64>) ->
     if let Some(cap) = max_dict_size
         && bytes > cap
     {
-        return Err(RarError::LimitExceeded {
-            limit: cap,
-            context: format!(
+        return Err(RarError::limit_exceeded(
+            cap,
+            format!(
                 "{}: dictionary size {bytes} bytes exceeds the extraction cap (use -mdx to raise it)",
                 hdr.name
             ),
-        });
+        ));
     }
     Ok(bytes)
 }

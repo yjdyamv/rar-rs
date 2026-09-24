@@ -114,14 +114,13 @@ impl Rar20Decoder {
     /// output. Solid callers reuse this decoder; the look-behind window
     /// (plus audio predictor state) persists across members.
     pub(crate) fn decode_member(&mut self, packed: &[u8], output_size: u64) -> RarResult<Vec<u8>> {
-        let output_size = usize::try_from(output_size).map_err(|_| RarError::LimitExceeded {
-            limit: u64::MAX,
-            context: "RAR 2.0 member is too large for this platform".into(),
+        let output_size = usize::try_from(output_size).map_err(|_| {
+            RarError::limit_exceeded(u64::MAX, "RAR 2.0 member is too large for this platform")
         })?;
         let start = self.history.current_pos();
         let target = start
             .checked_add(output_size)
-            .ok_or_else(|| RarError::Format("RAR 2.0 output size overflows".into()))?;
+            .ok_or_else(|| RarError::format("RAR 2.0 output size overflows"))?;
         if !packed.is_empty() {
             self.bits = BitReader::new();
         }
@@ -147,14 +146,13 @@ impl Rar20Decoder {
         writer: &mut dyn std::io::Write,
     ) -> RarResult<()> {
         const FLUSH: usize = 1024 * 1024;
-        let output_size = usize::try_from(output_size).map_err(|_| RarError::LimitExceeded {
-            limit: u64::MAX,
-            context: "RAR 2.0 member is too large for this platform".into(),
+        let output_size = usize::try_from(output_size).map_err(|_| {
+            RarError::limit_exceeded(u64::MAX, "RAR 2.0 member is too large for this platform")
         })?;
         let start = self.history.current_pos();
         let target = start
             .checked_add(output_size)
-            .ok_or_else(|| RarError::Format("RAR 2.0 output size overflows".into()))?;
+            .ok_or_else(|| RarError::format("RAR 2.0 output size overflows"))?;
         if !packed.is_empty() {
             self.bits = BitReader::new();
         }

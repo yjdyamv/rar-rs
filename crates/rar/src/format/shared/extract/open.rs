@@ -33,8 +33,8 @@ pub(crate) fn open_read_salvage(cx: &mut dyn Engine) -> RarResult<()> {
         }
         ArchiveFamily::Rar15To40 => crate::format::rar4::extract::open_read_rar4_salvage(cx)?,
         ArchiveFamily::Rar13 => {
-            return Err(RarError::Unsupported(
-                "salvage scan is not supported for RAR 1.3/1.4 archives".into(),
+            return Err(RarError::unsupported(
+                "salvage scan is not supported for RAR 1.3/1.4 archives",
             ));
         }
     }
@@ -80,7 +80,7 @@ fn verify_signature(cx: &mut dyn Engine) -> RarResult<()> {
         buf
     };
     let (family, sfx_offset) = crate::detect::find_archive_start(&buf, SFX_SCAN_LIMIT)
-        .ok_or_else(|| RarError::Format("not a RAR archive (signature not found)".into()))?;
+        .ok_or_else(|| RarError::format("not a RAR archive (signature not found)"))?;
     cx.set_sfx_offset(sfx_offset as u64);
     cx.set_family(family);
     let sig_len = match family {

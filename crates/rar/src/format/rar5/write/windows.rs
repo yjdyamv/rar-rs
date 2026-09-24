@@ -123,7 +123,7 @@ fn write_chunked(
 #[cfg(windows)]
 pub(crate) fn write_windows_stream(path: &Path, stream_name: &str, data: &[u8]) -> RarResult<()> {
     if !valid_stream_name(stream_name) {
-        return Err(RarError::Format(format!(
+        return Err(RarError::format(format!(
             "invalid NTFS stream name {stream_name:?}"
         )));
     }

@@ -31,7 +31,7 @@ pub(crate) fn archive_name_from_path(path: &Path) -> RarResult<String> {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .ok_or_else(|| {
-            RarError::InvalidOption(format!(
+            RarError::invalid_option(format!(
                 "cannot derive an archive name from {}; pass an explicit name",
                 path.display()
             ))

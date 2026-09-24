@@ -40,9 +40,7 @@ impl RarArchive {
         }
         if let Some(volume_size) = self.write_ctx().output.volume_size {
             if volume_size == 0 {
-                return Err(RarError::Format(
-                    "volume size must be greater than zero".into(),
-                ));
+                return Err(RarError::format("volume size must be greater than zero"));
             }
             let base = volume_base_of(&self.path);
             let parent = parent_dir(&self.path);
@@ -91,9 +89,10 @@ impl RarArchive {
             return Ok(());
         }
         if self.archive_encr.is_none() {
-            let password = self.password.as_ref().ok_or_else(|| {
-                RarError::Encrypted("header encryption requires a password".into())
-            })?;
+            let password = self
+                .password
+                .as_ref()
+                .ok_or_else(|| RarError::encrypted("header encryption requires a password"))?;
             let (encr, keys) =
                 crypto::EncryptionParams::generate_with_keys(password, ENCR_PBKDF2_ITER_LOG);
             self.archive_encr = Some(encr);
@@ -116,8 +115,8 @@ impl RarArchive {
         // the wrong offset. The flag is set before the first trailing write,
         // so neither path can re-enter it.
         if self.finalize_started {
-            return Err(RarError::InvalidState(
-                "archive finalization was already attempted".into(),
+            return Err(RarError::invalid_state(
+                "archive finalization was already attempted",
             ));
         }
         self.finish_writing()?;
@@ -138,8 +137,8 @@ impl RarArchive {
     /// it back afterwards (in-memory sink seam).
     pub(super) fn finish_writing(&mut self) -> RarResult<()> {
         if self.finalize_started {
-            return Err(RarError::InvalidState(
-                "archive finalization was already attempted".into(),
+            return Err(RarError::invalid_state(
+                "archive finalization was already attempted",
             ));
         }
         self.finalize_started = true;
@@ -197,7 +196,7 @@ impl RarArchive {
         self.finish_writing()?;
         self.stream
             .take()
-            .ok_or_else(|| RarError::Format("no archive stream to take".into()))
+            .ok_or_else(|| RarError::format("no archive stream to take"))
     }
 
     /// Generate the `.rev` recovery-volume files for a multi-volume archive
@@ -434,7 +433,7 @@ impl RarArchive {
                 None,
                 1,
             )
-            .map_err(|e| RarError::Format(format!("recovery record encode: {e}")))?
+            .map_err(|e| RarError::format(format!("recovery record encode: {e}")))?
         };
 
         // RR service header: type 3, name "RR", SubData = percent byte.
@@ -462,7 +461,7 @@ impl RarArchive {
         let mut payload = Vec::new();
         for (offset, header) in &self.write_ctx().locator.quick_open_entries {
             let rel = qo_pos.checked_sub(*offset).ok_or_else(|| {
-                RarError::Format("quick-open cached header is after the QO record".into())
+                RarError::format("quick-open cached header is after the QO record")
             })?;
             payload.extend(crate::format::rar5::headers::quick_open::encode_entry(
                 rel, header,
@@ -504,7 +503,7 @@ impl RarArchive {
             .write_ctx()
             .locator
             .main_header_start
-            .ok_or_else(|| RarError::Format("main header position unknown".into()))?;
+            .ok_or_else(|| RarError::format("main header position unknown"))?;
 
         // Rebuild the main header: read it back from the stream (plaintext
         // or decrypted), so the patch also works for in-memory sinks. The
@@ -525,7 +524,7 @@ impl RarArchive {
             stream.read_exact(&mut first)?;
             let first_pt = crypto::decrypt_data(&first, key, &iv)?;
             let (hsize, vint_len) = vint::decode_from_slice(&first_pt, 4)
-                .map_err(|e| RarError::Format(format!("main header vint: {e}")))?;
+                .map_err(|e| RarError::format(format!("main header vint: {e}")))?;
             let total_raw = 4 + vint_len + hsize as usize;
             let enc_size = total_raw.div_ceil(16) * 16;
             let mut full_ct = vec![0u8; enc_size];
@@ -542,7 +541,7 @@ impl RarArchive {
             let mut crc_hdr = [0u8; 5];
             stream.read_exact(&mut crc_hdr)?;
             let (hsize, vint_len) = vint::decode_from_slice(&crc_hdr, 4)
-                .map_err(|e| RarError::Format(format!("main header vint: {e}")))?;
+                .map_err(|e| RarError::format(format!("main header vint: {e}")))?;
             let total = 4 + vint_len + hsize as usize;
             let mut hdr = vec![0u8; total];
             hdr[..5].copy_from_slice(&crc_hdr);
@@ -708,9 +707,7 @@ impl RarArchive {
     fn open_write_rar13(&mut self) -> RarResult<()> {
         if let Some(volume_size) = self.write_ctx().output.volume_size {
             if volume_size == 0 {
-                return Err(RarError::Format(
-                    "volume size must be greater than zero".into(),
-                ));
+                return Err(RarError::format("volume size must be greater than zero"));
             }
             let base = volume_base_of(&self.path);
             let parent = parent_dir(&self.path);
@@ -754,9 +751,7 @@ impl RarArchive {
     fn open_write_rar4(&mut self) -> RarResult<()> {
         if let Some(volume_size) = self.write_ctx().output.volume_size {
             if volume_size == 0 {
-                return Err(RarError::Format(
-                    "volume size must be greater than zero".into(),
-                ));
+                return Err(RarError::format("volume size must be greater than zero"));
             }
             let base = volume_base_of(&self.path);
             let parent = parent_dir(&self.path);
@@ -911,7 +906,7 @@ impl RarArchive {
         // existing archive is rewritten, at its original strength).
         let rec_sectors = self
             .rar4_recovery_sectors(prefix_len)
-            .ok_or_else(|| RarError::Format("no recovery record was requested".into()))?;
+            .ok_or_else(|| RarError::format("no recovery record was requested"))?;
         let block = crate::recovery::legacy_rr::build_legacy_recovery_block(&prefix, rec_sectors)?;
         let stream = self.stream.as_mut().unwrap();
         if self.header_encryption {
@@ -919,9 +914,10 @@ impl RarArchive {
             // rule as FILE members); the tag table and parity sectors follow
             // as plaintext data, so readers advance past the block with the
             // decrypted head_size and the parity stays recoverable.
-            let password = self.password.as_deref().ok_or_else(|| {
-                RarError::Encrypted("header encryption requires a password".into())
-            })?;
+            let password = self
+                .password
+                .as_deref()
+                .ok_or_else(|| RarError::encrypted("header encryption requires a password"))?;
             let (ciphertext, on_disk) =
                 crate::format::rar4::write::encrypt_block_header(&block[..54], password)?;
             stream.write_all(&ciphertext)?;
@@ -1027,9 +1023,10 @@ impl RarArchive {
         if self.header_encryption {
             // `-hp`: the end-of-archive block is header-encrypted like every
             // other block after the main header.
-            let password = self.password.as_deref().ok_or_else(|| {
-                RarError::Encrypted("header encryption requires a password".into())
-            })?;
+            let password = self
+                .password
+                .as_deref()
+                .ok_or_else(|| RarError::encrypted("header encryption requires a password"))?;
             let (ciphertext, on_disk) =
                 crate::format::rar4::write::encrypt_block_header(&buf, password)?;
             stream.write_all(&ciphertext)?;
@@ -1043,7 +1040,7 @@ impl RarArchive {
 
     pub(super) fn start_next_volume_rar4(&mut self) -> RarResult<()> {
         if self.write_ctx().output.current_volume >= crate::fs::volume::LEGACY_VOLUME_MAX {
-            return Err(RarError::InvalidOption(format!(
+            return Err(RarError::invalid_option(format!(
                 "volume set exceeds the {}-volume legacy `.rNN` naming limit",
                 crate::fs::volume::LEGACY_VOLUME_MAX
             )));
@@ -1058,8 +1055,8 @@ impl RarArchive {
                 final_base,
             }) => (parent.clone(), tmp_base.clone(), final_base.clone()),
             _ => {
-                return Err(RarError::Format(
-                    "internal error: volume created without a staged volume set".into(),
+                return Err(RarError::format(
+                    "internal error: volume created without a staged volume set",
                 ));
             }
         };
@@ -1208,8 +1205,8 @@ pub(super) fn validate_write_options(
     // Parity sectors are the legacy RAR4 record's native unit; a RAR5 record is
     // sized by percent, so an exact count would otherwise be dropped silently.
     if flags.recovery_sectors.is_some() && !version.is_legacy() && !version.is_rar13() {
-        return Err(RarError::InvalidOption(
-            "an exact recovery-sector count is a legacy RAR4 option; a RAR5 recovery record is sized by percent".into(),
+        return Err(RarError::invalid_option(
+            "an exact recovery-sector count is a legacy RAR4 option; a RAR5 recovery record is sized by percent",
         ));
     }
     Ok(())

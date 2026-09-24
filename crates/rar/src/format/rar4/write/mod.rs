@@ -261,10 +261,10 @@ pub(crate) fn encrypt_block_header(header: &[u8], password: &str) -> RarResult<(
     let mut salt = [0u8; 8];
     rand::fill(&mut salt);
     let mut cipher = crate::crypto::Rar30Cipher::new(password.as_bytes(), Some(salt))
-        .map_err(|e| RarError::Format(format!("RAR4 header key setup: {e:?}")))?;
+        .map_err(|e| RarError::format(format!("RAR4 header key setup: {e:?}")))?;
     cipher
         .encrypt_in_place(&mut plain)
-        .map_err(|e| RarError::Format(format!("RAR4 header encrypt: {e:?}")))?;
+        .map_err(|e| RarError::format(format!("RAR4 header encrypt: {e:?}")))?;
     let mut out = Vec::with_capacity(8 + plain.len());
     out.extend_from_slice(&salt);
     out.extend_from_slice(&plain);
@@ -466,7 +466,7 @@ fn dictionary_flags(size: usize) -> RarResult<u16> {
         0x20_0000 => 5, // 2 MiB
         0x40_0000 => 6, // 4 MiB
         _ => {
-            return Err(RarError::Format(format!(
+            return Err(RarError::format(format!(
                 "unsupported RAR4 dictionary size: {size} bytes"
             )));
         }

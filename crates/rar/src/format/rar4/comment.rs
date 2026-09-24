@@ -114,8 +114,8 @@ pub(crate) fn decode_comment_stream(
     use crate::format::rar4::{MemberDecodeOptions, decode_member_bytes};
     use crate::model::{DataChunk, FileHeader};
     if !(0x31..=0x35).contains(&method) {
-        return Err(RarError::Format(
-            "RAR4: unsupported comment compression method".into(),
+        return Err(RarError::format(
+            "RAR4: unsupported comment compression method",
         ));
     }
     let hdr = FileHeader {

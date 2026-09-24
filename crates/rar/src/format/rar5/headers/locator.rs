@@ -155,7 +155,7 @@ pub(crate) fn patch_locator_fields(
             continue;
         };
         let width = placeholder_width(hdr, field)
-            .ok_or_else(|| RarError::Format("locator field out of bounds".into()))?;
+            .ok_or_else(|| RarError::format("locator field out of bounds"))?;
         let max = if width >= 10 {
             u64::MAX
         } else {

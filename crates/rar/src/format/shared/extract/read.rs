@@ -12,8 +12,8 @@ pub(crate) fn read_at_index_with_options(
     opts: crate::options::ExtractOptions,
 ) -> RarResult<Vec<u8>> {
     if target_idx >= cx.entries().len() {
-        return Err(RarError::InvalidState(
-            "entry index is outside the current catalog".into(),
+        return Err(RarError::invalid_state(
+            "entry index is outside the current catalog",
         ));
     }
     cx.read_ctx_mut().extract_options = opts;
@@ -29,8 +29,8 @@ pub(crate) fn read_to_writer_at_index_with_options(
     opts: crate::options::ExtractOptions,
 ) -> RarResult<u64> {
     if target_idx >= cx.entries().len() {
-        return Err(RarError::InvalidState(
-            "entry index is outside the current catalog".into(),
+        return Err(RarError::invalid_state(
+            "entry index is outside the current catalog",
         ));
     }
     cx.read_ctx_mut().extract_options = opts;
