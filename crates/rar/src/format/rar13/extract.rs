@@ -19,6 +19,9 @@ fn map_rar13_split_error(error: SplitMergeError) -> RarError {
         }
         SplitMergeError::MissingFinal { .. } => "RAR 1.3: split member is incomplete".into(),
         SplitMergeError::PackedSizeOverflow { .. } => "RAR 1.3: split packed size overflow".into(),
+        SplitMergeError::ChunkCountExceeded { max, .. } => {
+            format!("RAR 1.3: split member exceeds the {max}-chunk ceiling")
+        }
     })
 }
 
