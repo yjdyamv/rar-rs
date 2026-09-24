@@ -63,6 +63,9 @@ pub(crate) fn cmd_extract(
     if let Some(report) = ops::extract(&mut rar, &request)? {
         write_extract_logs(misc, &rar, args, &request.names)?;
         info!("{}", extract_summary(report.written_count(), &request.dest));
+        if args.delete_archive {
+            common::delete_archive_set(&args.archive)?;
+        }
         if report.written_count() == 0 && report.skipped_count() > 0 {
             // Like WinRAR/UnRAR: nothing was extracted because every selected
             // member was left untouched -> "No files to extract", exit 10.
@@ -158,6 +161,9 @@ pub(crate) fn cmd_extract_flat(
     if let Some(report) = ops::extract(&mut rar, &request)? {
         write_extract_logs(misc, &rar, args, &request.names)?;
         info!("{}", extract_summary(report.written_count(), &request.dest));
+        if args.delete_archive {
+            common::delete_archive_set(&args.archive)?;
+        }
         if report.written_count() == 0 && report.skipped_count() > 0 {
             return Err(error::CliError::silent(error::EXIT_NO_FILES));
         }

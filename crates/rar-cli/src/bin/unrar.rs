@@ -137,6 +137,9 @@ struct ExtractArgs {
     /// Keep broken extracted files (like `-kb`)
     #[arg(long = "keep-broken")]
     keep_broken: bool,
+    /// Delete the archive after a successful extraction (like `-da`)
+    #[arg(long = "delete-archive")]
+    delete_archive: bool,
     /// Extraction threads (like `rar -mt<N>`)
     #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
     threads: Option<usize>,
@@ -424,6 +427,9 @@ fn cmd_extract(
     };
     let mut rar = ops::open_reader(&args.archive, password)?;
     if let Some(report) = ops::extract(&mut rar, &request)? {
+        if args.delete_archive {
+            common::delete_archive_set(&args.archive)?;
+        }
         if report.written_count() == 0 && report.skipped_count() > 0 {
             // Like official UnRAR: every member was skipped -> "No files to
             // extract", exit 10 (the message is the whole report).
@@ -475,6 +481,9 @@ fn cmd_extract_flat(
     };
     let mut rar = ops::open_reader(&args.archive, password)?;
     if let Some(report) = ops::extract(&mut rar, &request)? {
+        if args.delete_archive {
+            common::delete_archive_set(&args.archive)?;
+        }
         if report.written_count() == 0 && report.skipped_count() > 0 {
             info!("No files to extract");
             return Err(error::CliError::silent(error::EXIT_NO_FILES));

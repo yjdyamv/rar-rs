@@ -44,7 +44,7 @@ fn cli_size_and_empty_dir_filters() {
     assert!(status.success());
     assert_eq!(cli_names(&archive), ["big.txt", "emptydir", "fulldir"]);
 
-    // -ed: empty directories are not stored.
+    // -ed: no directory records at all (verified against WinRAR 7.30).
     let archive = dir.path().join("ed.rar");
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-ed", "-idq"])
@@ -56,8 +56,78 @@ fn cli_size_and_empty_dir_filters() {
     assert!(status.success());
     assert_eq!(
         cli_names(&archive),
+        ["big.txt", "fulldir/inner.txt", "small.txt"]
+    );
+
+    // -ed1: only the directories holding no files are dropped, so `fulldir`
+    // keeps its record (and its times/attributes) while `emptydir` goes.
+    let archive = dir.path().join("ed1.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ed1", "-idq"])
+        .arg(&archive)
+        .args(["emptydir", "fulldir", "small.txt", "big.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        cli_names(&archive),
         ["big.txt", "fulldir", "fulldir/inner.txt", "small.txt"]
     );
+}
+
+/// `-da` (WinRAR 7.30): remove the archive after a successful extraction — the
+/// whole volume set and its `.rev` recovery volumes included — and leave it in
+/// place when the extraction fails.
+#[test]
+fn cli_da_deletes_the_archive_after_extraction() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let archive = dir.path().join("one.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma5", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-da", "-o+", "-idq"])
+        .arg(&archive)
+        .args(["--dest"])
+        .arg(&out)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(out.join("a.txt").exists(), "the member must be extracted");
+    assert!(!archive.exists(), "-da removes the archive");
+
+    // A failed extraction (wrong password) must keep the archive.
+    let locked = dir.path().join("locked.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-hpsecret", "-idq"])
+        .arg(&locked)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-da", "-pwrong", "-o+", "-idq"])
+        .arg(&locked)
+        .args(["--dest"])
+        .arg(&out)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(!status.success());
+    assert!(locked.exists(), "a failed extraction keeps the archive");
 }
 
 #[test]
