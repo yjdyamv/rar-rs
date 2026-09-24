@@ -1948,3 +1948,84 @@ fn rar4_solid_survives_store_and_directory_members() {
         }
     }
 }
+
+/// Editing a RAR4 volume set rebuilds its legacy `.rev` files: a rebuilt
+/// FILE_HEAD changes the volume bytes, and the old parity (an XOR over them)
+/// would no longer match, so a later `rc` would reconstruct a wrong volume.
+#[test]
+fn rar4_volume_edit_rebuilds_the_legacy_recovery_volumes() {
+    let dir = make_temp_dir();
+    let mut content = vec![0u8; 400_000];
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for b in &mut content {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+    }
+    let src = dir.path().join("rnd.bin");
+    std::fs::write(&src, &content).unwrap();
+    let arc = dir.path().join("er4.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .volume_size(100_000)
+            .recovery_volume_count(1),
+    )
+    .expect("create");
+    archive.add_path(&src, ewo(0)).expect("add");
+    archive.finish().expect("close");
+
+    let rev_paths = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rev"))
+            .collect();
+        paths.sort();
+        paths
+    };
+
+    let volumes = discover_volumes(&arc);
+    assert!(volumes.len() >= 2, "expected a volume set");
+    let before = rev_paths(dir.path());
+    assert_eq!(before.len(), 1, "create must write the `.rev` set");
+    let before_bytes = std::fs::read(&before[0]).unwrap();
+
+    let mut editor = rar_rs::ArchiveEditor::open(&volumes[0]).expect("editor");
+    let id = editor.unique_entry("rnd.bin").expect("member");
+    editor
+        .apply(rar_rs::EditPlan::new().rename(id, "renamed.bin"))
+        .expect("rename");
+
+    let after = rev_paths(dir.path());
+    assert_eq!(after.len(), 1, "the parity set is rebuilt, not doubled");
+    assert_ne!(
+        std::fs::read(&after[0]).unwrap(),
+        before_bytes,
+        "the parity is rebuilt over the rewritten volumes"
+    );
+    // A parity file that kept its name is replaced in place; one whose name
+    // shape changed (the counts are encoded in it) must not linger.
+    for path in &before {
+        assert!(
+            after.iter().any(|new| new == path) || !path.exists(),
+            "stale parity {} must be retired",
+            path.display()
+        );
+    }
+
+    // The rebuilt parity is live: a deleted volume comes back from it.
+    let victim = volumes[1].clone();
+    std::fs::remove_file(&victim).unwrap();
+    let rebuilt = rar_rs::rebuild_missing_volumes(&volumes[0]).unwrap();
+    assert!(
+        rebuilt.contains(&victim),
+        "rc must restore {victim:?}, rebuilt {rebuilt:?}"
+    );
+    let mut reader = rar_rs::ArchiveReader::open(&volumes[0]).unwrap();
+    let id = reader.unique_entry("renamed.bin").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), content);
+}

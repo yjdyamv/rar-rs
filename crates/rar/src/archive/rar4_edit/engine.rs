@@ -179,11 +179,57 @@ fn apply_multivolume_edits(
         .unwrap_or(Path::new("."))
         .to_path_buf();
     let base = volume_base_of(&archive.path);
+    // A legacy `.rev` is parity over the volume bytes, so a rebuilt header
+    // (rename) invalidates it: collect the set's parity files before the
+    // volumes are replaced and rebuild them from the new ones below. The data
+    // volumes are kept out of the list, so only `.rev` files are collected.
+    let existing_revs = stale_volume_paths(
+        &parent,
+        &base,
+        true,
+        &archive.volume_paths,
+        &crate::recovery::rev3::rev_name_belongs_to_set,
+    );
     if let Err(error) = commit_files(&parent, &base, &install, &[]) {
         for (tmp, _) in &install {
             let _ = fs::remove_file(tmp);
         }
         return Err(error);
+    }
+    if !existing_revs.is_empty() {
+        let volumes: Vec<PathBuf> = install
+            .iter()
+            .map(|(_, final_path)| final_path.clone())
+            .collect();
+        match crate::recovery::rev3::build_recovery_volumes_for_set(&volumes, existing_revs.len()) {
+            Ok(written) => {
+                // Parity files whose name shape or counts changed are retired
+                // in the same step, so no stale sibling is left behind (the
+                // data volumes are not candidates: only the parity set is
+                // compared here).
+                let retire: Vec<PathBuf> = existing_revs
+                    .iter()
+                    .filter(|path| {
+                        !written
+                            .iter()
+                            .any(|new| new.file_name() == path.file_name())
+                    })
+                    .cloned()
+                    .collect();
+                if !retire.is_empty() {
+                    commit_files(&parent, &base, &[], &retire)?;
+                }
+            }
+            Err(error) => {
+                // The volumes are already installed, so the old parity can
+                // never match them again: drop it rather than leave a `.rev`
+                // that a later `rc` would rebuild a wrong volume from.
+                for path in &existing_revs {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        }
     }
     // Re-scan the committed set so the in-memory catalog and every rebuilt
     // header CRC reflect the new bytes.
