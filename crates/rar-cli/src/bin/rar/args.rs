@@ -452,6 +452,11 @@ pub(crate) struct CreateArgs {
     /// Cancel volume creation (WinRAR `-v-`)
     #[arg(long = "no-volumes", overrides_with = "volume_size")]
     pub(crate) no_volumes: bool,
+    /// Use old-style volume names (WinRAR `-vn`): `{base}.rar`/`{base}.rNN`
+    /// instead of the zero-padded `{base}.partNN.rar` (RAR 1.5–4.x only;
+    /// ignored for other container families)
+    #[arg(long = "old-numbering")]
+    pub(crate) old_numbering: bool,
     /// Solid archive
     #[arg(short = 's', long, overrides_with = "solid")]
     pub(crate) solid: bool,
