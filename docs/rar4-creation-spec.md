@@ -85,6 +85,11 @@ ArchiveWriter::close()
   ENDARC_HEAD(0x7b)
 - flags：低位=块标志，高位=字典大小（压缩块）或额外标志
 - head_size：包含 CRC + type + flags + size 自身的总头大小
+- ENDARC（0x7b）：单卷归档 7 字节（flags `0x4000`、head_size `0x0007`）；**多卷
+  集**每卷 20 字节（flags `0x400e | 0x0001`（非末卷）、head_size `0x0014`、
+  ENDARC 之前**整卷字节**的 CRC-32、从 0 起的卷号、7 个零字节）。多卷集用 零填充
+  `.partNN.rar` 命名并给主头置 `MHD_NEWNUMBERING`（`-vn` 回旧式 `.rar`/`.rNN`
+  且不置该位）；20 字节形式的零尾正是 `.rev` 选 trailer 布局的 判据
 
 ### FILE_HEAD 序列化
 

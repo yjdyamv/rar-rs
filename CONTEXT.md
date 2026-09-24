@@ -140,8 +140,9 @@
   不能（官方工具在 POSIX 同样不配）；base 以数字结尾的歧义（`set44_2_1.rev` →
   `set`+44 或 `set4`+4）按现存数据卷评分消解，stale 清理复用同一判定）与 legacy
   全量奇偶布局（`base<data>_<rec>_<idx>.rev`，新命名带 `.part` 中缀）；WinRAR
-  按卷尾是否为零字节选择布局，我们逐字节一致；损坏卷用 syndrome+Berlekamp-Massey
-  定位后改名 `*.bad` 重建。
+  按卷尾是否为零字节选择布局，我们逐字节一致（我们创建的多卷集以 20 字节
+  `ENDARC` 的零尾收尾，故默认落 trailer 布局）；损坏卷用
+  syndrome+Berlekamp-Massey 定位后改名 `*.bad` 重建。
 - **ParitySet（`recovery/parity.rs`）** — `.rev`/重建卷的 staged
   安装值：`stage(final)` 建 temp sibling + 写句柄、`commit()` 一次 journaled
   安装（拒非文件 final、失败自动 sweep、成功返回 final 路径）；REV5
@@ -265,9 +266,14 @@
   非 solid 多文件并行 batch（字节与顺序一致）、v15/v20 老编码器（`-p` 按版本分派
   RAR15 流 XOR / RAR20 块密码，**均无盐**）。**solid 重置**：`-se` 仅 v29 保留；
   pre-RAR3 的 `-se` 与全 legacy 的 `-sv` 由 `validate_solid_reset`
-  拒绝。多卷发现 `discover_volumes` 支持 `.partN.rar`（新命名）与
-  `.rar/.rNN`（老命名，任意卷 入口）；solid repack 重发成员时**保留原 DOS
-  属性字节**。
+  拒绝。**多卷**（2026-09-24 对拍官方 6.23 逐字节）：创建默认 WinRAR 新式
+  ——零填充 `base.partNN.rar`（宽度 = 总卷数位数）+ 每卷主头 `MHD_NEWNUMBERING`
+  - 每卷 20 字节 `ENDARC`（`0x400e`、`head_size 0x0014`、ENDARC 之前整卷的
+    CRC-32、 0 起卷号、7 零尾；单卷归档仍 7
+    字节）；`-vn`（`old_numbering`）回旧式 `.rar/.rNN` 且不置位；RAR13
+    一律旧式。`discover_volumes` 两族都认（任意卷入口），
+    新式集运行期（`rv`/`rc`/编辑）用**首卷**寻址（官方同）。solid repack
+    重发成员时 **保留原 DOS 属性字节**。
 - **RAR4 block envelope（`format/rar4/envelope.rs`）** — RAR 1.5–4.x
   块头的**唯一 读取器**（2026-09）。`EnvelopePolicy` 四态：`SCAN`（校验
   CRC、不留原始字节：列表
