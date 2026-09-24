@@ -4,6 +4,10 @@
 //! RAR 1.5–4.x repeats it for a split member's intermediate fragments. Both
 //! families therefore need it, and neither should own it: it lives here so
 //! `rar4` does not reach into `rar13` (or the reverse) for one loop.
+//!
+//! The RAR 1.5–4.x header CRC (standard CRC-32 truncated to 16 bits) is the
+//! other legacy checksum both the `rar4` writer and the legacy editor need;
+//! it lives here too so the two cannot drift.
 
 /// The legacy 16-bit rolling checksum (`sum + rotate-left 1` per byte).
 pub(crate) fn rolling_sum_u16(data: &[u8]) -> u16 {
@@ -12,6 +16,11 @@ pub(crate) fn rolling_sum_u16(data: &[u8]) -> u16 {
         value = value.wrapping_add(u16::from(byte)).rotate_left(1);
     }
     value
+}
+
+/// Compute the RAR4 header CRC: standard CRC-32 truncated to 16 bits.
+pub(crate) fn header_crc16(body: &[u8]) -> u16 {
+    (crate::crc32::crc32(body) & 0xffff) as u16
 }
 
 #[cfg(test)]

@@ -18,11 +18,11 @@ pub(crate) mod encode;
 pub(crate) mod member;
 pub(crate) mod stream;
 
-use crate::crc32;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::{
     COMM_HEAD, ENDARC_HEAD, FHD_UNICODE, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, RAR4_METHOD_STORE,
 };
+use crate::format::shared::checksum::header_crc16;
 use crate::format::shared::legacy_time::epoch_to_local_civil;
 
 /// Fixed main header size (CRC + type + flags + size + 2 reserved fields).
@@ -43,11 +43,6 @@ const ENDARC_VOLUME_HEADER_SIZE: u16 = 20;
 const ENDARC_VOLUME_FLAGS: u16 = 0x400e;
 
 // ── CRC16 helper ────────────────────────────────────────────────────────────
-
-/// Compute the RAR4 header CRC: standard CRC-32 truncated to 16 bits.
-pub(crate) fn header_crc16(body: &[u8]) -> u16 {
-    (crc32::crc32(body) & 0xFFFF) as u16
-}
 
 /// Patch the CRC16 at position `start` in `buf`, covering bytes `[start+2..]`.
 fn patch_crc16(buf: &mut [u8], start: usize) {

@@ -62,8 +62,7 @@ pub(crate) use repack::repack_solid_archive;
 /// the tag table and parity sectors follow as data.
 pub(crate) const RECOVERY_HEAD_SIZE: usize = 54;
 
-/// RAR4 header CRC16: standard CRC-32 truncated to 16 bits over
-/// `bytes[2..]` (the body after the CRC field).
-fn header_crc16(body: &[u8]) -> u16 {
-    (crate::crc32::crc32(body) & 0xffff) as u16
-}
+/// RAR4 header CRC16 (standard CRC-32 truncated to 16 bits over `bytes[2..]`,
+/// the body after the CRC field). Re-exported from the shared legacy checksum
+/// module so the submodules keep reaching it through `super::header_crc16`.
+pub(crate) use crate::format::shared::checksum::header_crc16;

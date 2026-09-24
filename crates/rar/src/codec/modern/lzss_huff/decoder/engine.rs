@@ -295,8 +295,7 @@ impl<'a> OutputSink<'a> {
                 region,
                 filt.channels,
                 filt.block_start - self.member_start,
-            )
-            .map_err(RarError::Format)?;
+            )?;
             if filtered.len() != region.len() {
                 return Err(RarError::Format("RAR5 filter changed output length".into()));
             }
