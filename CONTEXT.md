@@ -123,9 +123,12 @@
   一次 KDF 派生的 `DerivedKeys`；`mac_crc32`/`mac_hash32`/`encrypt`/`key_iv`
   复用同一份密钥（此前每成员派生 3–4 次），STM 服务记录走
   `generate_with_flags(.., ENCR_FLAG_CHECKSUM)`（2026-09）。
-- **Recovery record（恢复记录）** — 单卷内联 "RR"
-  服务块，奇偶校验保护归档前缀（GF(2^16) Cauchy 矩阵，见
-  `recovery/rar50/`：`plan`/`gf16`/`encode`/`repair`/`stream` 角色模块）。
+- **Recovery record（恢复记录）** — 内联 "RR" 服务块，奇偶校验保护归档前缀
+  （GF(2^16) Cauchy 矩阵，见 `recovery/rar50/`：`plan`/`gf16`/`encode`/`repair`/
+  `stream` 角色模块）。**分卷时每卷各带一份**（2026-09-24 对拍官方 7.23： `-rr`
+  配 `-v`，每卷记录只保护该卷自己的前缀，且卷内预留其字节以保证不超过
+  `volume_size`）；创建与分卷重写共用卷收尾 `create.rs::finish_volume`。legacy
+  RAR4 同形（每卷一条 NEWSUB `Protect+`）。
 - **Recovery volumes（.rev 恢复卷）** — 分卷集的 Reed-Solomon
   奇偶校验卷，可重建缺失/损坏卷（`rar rv`/`rc`）。RAR5 用 REV5
   容器（`recovery/rev50.rs`，GF(2^16) Cauchy + 每卷 CRC/大小表）；RAR 1.5–4.x 用
@@ -157,9 +160,10 @@
   redirect（不跟随目标），Windows 写 2/3 型（symlink/junction）与官方一致；官方
   `-sfx` 前置于 RAR 1.3/1.4 会被拒绝（官方只认 DOS stub）。
 - **SFX** — 归档前带 stub 的自解压文件；`detect::sfx_offset_of` 定位归档起点。
-- **Locator（定位器）** — 主头中的 QO/RR 偏移记录，close 时回填。**恒写**
-  （2026-09-23 起，与官方一致）：无 QO 记录时 QO 字段照样发、偏移写 0 占位，RR
-  只在 有恢复记录时出现；读侧（`split_main_extra`、QO 快路径）把 **0
+- **Locator（定位器）** — 主头中的 QO/RR 偏移记录，close
+  时回填。**官方默认模式下 恒写**（2026-09-23 起我们照此）：无 QO 记录时 QO
+  字段照样发、偏移写 0 占位，RR 只在
+  有恢复记录时出现；读侧（`split_main_extra`、QO 快路径）把 **0
   偏移**当「无记录」。 主头唯一构造者
   `headers/locator.rs::build_main_header`（把 locator 追加到调用方 extra 后、经
   `ArchiveHeader::to_bytes` 发射，并返回 QO/RR 字段的 header
