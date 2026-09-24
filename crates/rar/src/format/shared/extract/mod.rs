@@ -33,6 +33,24 @@ pub(crate) fn check_entry_cap(count: usize, max: usize) -> RarResult<()> {
     Ok(())
 }
 
+/// Ceiling on how many data chunks one continuing member may accumulate
+/// across volumes. A real set contributes at most one chunk per volume, so
+/// the bound sits far above any archival use; without it a crafted set of
+/// tiny continuation headers grows one member's chunk vector (and the
+/// cloned extra records it holds) without bound. Enforced by the RAR5
+/// catalog builder and the shared legacy split merge alike.
+pub(crate) const MAX_MEMBER_CHUNKS: usize = 1_000_000;
+
+/// Reject a continuing member that would grow past `max` chunks.
+pub(crate) fn check_chunk_cap(count: usize, max: usize, member: &str) -> RarResult<()> {
+    if count >= max {
+        return Err(RarError::Format(format!(
+            "member {member} exceeds the {max}-chunk ceiling"
+        )));
+    }
+    Ok(())
+}
+
 /// Whether the parallel extraction path may decode this archive. The
 /// parallel phase decodes with the RAR5 codec and uses the RAR5 solid
 /// rule, so legacy families always stream sequentially.

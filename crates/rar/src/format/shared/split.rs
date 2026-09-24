@@ -9,6 +9,7 @@
 //! [`SplitMergeError`] to its own message.
 
 use crate::engine::ArchiveEntry;
+use crate::format::shared::extract::MAX_MEMBER_CHUNKS;
 
 /// Why a fragment could not be merged.
 #[derive(Debug, PartialEq, Eq)]
@@ -25,12 +26,27 @@ pub(crate) enum SplitMergeError {
     MissingFinal { pending: String },
     /// The summed fragment sizes overflow `u64`.
     PackedSizeOverflow { pending: String },
+    /// A continuing member grew past the shared chunk ceiling (a crafted set
+    /// of tiny continuation headers).
+    ChunkCountExceeded { pending: String, max: usize },
 }
 
 /// Merge state for one volume-set scan.
-#[derive(Default)]
 pub(crate) struct SplitMerge {
     pending: Option<ArchiveEntry>,
+    /// Ceiling on the chunks one member may accumulate (see
+    /// [`MAX_MEMBER_CHUNKS`]). A field rather than the constant directly so a
+    /// test can drive the bound without materialising a million fragments.
+    max_chunks: usize,
+}
+
+impl Default for SplitMerge {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            max_chunks: MAX_MEMBER_CHUNKS,
+        }
+    }
 }
 
 impl SplitMerge {
@@ -62,6 +78,12 @@ impl SplitMerge {
                 .ok_or_else(|| SplitMergeError::PackedSizeOverflow {
                     pending: pending.header.name.clone(),
                 })?;
+            if pending.chunks.len() >= self.max_chunks {
+                return Err(SplitMergeError::ChunkCountExceeded {
+                    pending: pending.header.name.clone(),
+                    max: self.max_chunks,
+                });
+            }
             pending.header.packed_size = total;
             pending.chunks.extend(entry.chunks);
             if split_after {
@@ -269,6 +291,34 @@ mod tests {
             merge.pending_mut().unwrap().header.packed_size,
             u64::MAX,
             "a rejected fragment leaves the pending member untouched"
+        );
+    }
+
+    /// A continuation fragment that would push a member past the chunk
+    /// ceiling is rejected: a crafted set of tiny continuation headers must
+    /// not grow one member's chunk vector without bound.
+    #[test]
+    fn a_continuation_past_the_chunk_ceiling_is_rejected() {
+        let mut merge = SplitMerge {
+            max_chunks: 2,
+            ..Default::default()
+        };
+        merge.push(fragment("m", 0, 1, 0, 0), false, true).unwrap();
+        merge.push(fragment("m", 1, 1, 0, 0), true, true).unwrap();
+        assert_eq!(merge.pending_mut().unwrap().chunks.len(), 2);
+        assert_eq!(
+            merge
+                .push(fragment("m", 2, 1, 0, 0), true, false)
+                .unwrap_err(),
+            SplitMergeError::ChunkCountExceeded {
+                pending: "m".into(),
+                max: 2,
+            }
+        );
+        assert_eq!(
+            merge.pending_mut().unwrap().chunks.len(),
+            2,
+            "the rejected fragment is not appended"
         );
     }
 }

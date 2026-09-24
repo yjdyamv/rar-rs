@@ -13,25 +13,10 @@ use crate::format::rar5::{
     BLOCK_TYPE_ENCRYPT_HEADER, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
     BLOCK_TYPE_SERVICE_HEADER, MAX_METADATA_BYTES, RAR5_SIGNATURE,
 };
-use crate::format::shared::extract::{MAX_CATALOG_ENTRIES, check_entry_cap};
+use crate::format::shared::extract::{
+    MAX_CATALOG_ENTRIES, MAX_MEMBER_CHUNKS, check_chunk_cap, check_entry_cap,
+};
 use crate::model::{DataChunk, FileHeader};
-
-/// Ceiling on how many data chunks one continuing member may accumulate
-/// across volumes. A real set contributes at most one chunk per volume, so
-/// the bound sits far above any archival use; without it a crafted set of
-/// tiny continuation headers grows one member's chunk vector (and the
-/// cloned extra records it holds) without bound.
-const MAX_MEMBER_CHUNKS: usize = 1_000_000;
-
-/// Reject a continuing member that would grow past `max` chunks.
-fn check_chunk_cap(count: usize, max: usize, member: &str) -> RarResult<()> {
-    if count >= max {
-        return Err(RarError::Format(format!(
-            "member {member} exceeds the {max}-chunk ceiling"
-        )));
-    }
-    Ok(())
-}
 
 /// Builds the member catalog from one or more volume sources.
 ///

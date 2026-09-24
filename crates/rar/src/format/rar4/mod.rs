@@ -148,6 +148,9 @@ fn map_rar4_split_error(error: SplitMergeError) -> RarError {
         SplitMergeError::PackedSizeOverflow { pending } => {
             format!("RAR4: {pending}: split packed size overflow")
         }
+        SplitMergeError::ChunkCountExceeded { pending, max } => {
+            format!("RAR4: {pending}: split member exceeds the {max}-chunk ceiling")
+        }
     })
 }
 
