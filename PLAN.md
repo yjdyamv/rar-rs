@@ -134,9 +134,12 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `k`/`c` 从原集合 carry 强度并重建逐卷记录（显式 `-rr` 覆盖），`rar rr`
   亦可作用 于已有卷集；RAR4 分卷改名/注释路径丢弃旧记录后在 ENDARC
   前按原强度重建（否则 改名让旧记录失配，`rar r` 会用错 parity
-  改坏数据）。**已知残余**：官方 `-qo-` 下无 RR 时不写 locator、只有 RR 时
-  locator flags 仅 0x02（无 QO 字段），我们按 官方**默认**模式的形状恒写 QO
-  占位，故逐卷 RR 的字节在 QO 偏移那几字节上仍不同 （`CONTEXT.md` 的 Locator
+  改坏数据），并在装好新卷后**从新卷重建 legacy `.rev`**（`.rev` 是卷字节的 XOR
+  parity，改名后旧 parity 必然失配；旧名形状/计数变了的一并
+  retire，重建失败时删掉 旧 parity，而不是留下一个会修出坏卷的
+  `.rev`）。**已知残余**：官方 `-qo-` 下无 RR 时不写 locator、只有 RR 时 locator
+  flags 仅 0x02（无 QO 字段），我们按 官方**默认**模式的形状恒写 QO 占位，故逐卷
+  RR 的字节在 QO 偏移那几字节上仍不同 （`CONTEXT.md` 的 Locator
   词条同此）。**不追平**：官方对自己的卷集一律
   `Cannot modify volume`，`rar rr <set>` 只改被点名的卷并把该卷撑过
   `volume_size` （102400→111902）。
