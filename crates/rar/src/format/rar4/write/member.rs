@@ -347,7 +347,11 @@ pub(crate) fn add_rar4_data(
     // in lockstep.
     let solid_continuation = track_rar4_solid_member(cx, method, unpacked_size);
 
-    let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
+    let ext_time = crate::format::rar4::write::build_member_ext_time(
+        cx.write_ctx().solid.rar4_unp_ver,
+        mtime,
+        Some(mtime_ns),
+    );
 
     // Member-level encryption (WinRAR `-p`), dispatched on the cipher
     // generation (see `rar4_member_encrypt`). The header carries the
@@ -474,13 +478,18 @@ pub(crate) fn write_rar4_dir_entry(
     mtime_ns: u32,
 ) -> RarResult<()> {
     use crate::format::rar4::write::{
-        FileHeaderParams, build_ext_time, build_file_header, encode_file_name, unix_to_dos_time,
+        FileHeaderParams, build_file_header, build_member_ext_time, encode_file_name,
+        unix_to_dos_time,
     };
     // A queued archive comment must precede the first member, whichever
     // kind it is; directories reached before any file flush it here.
     emit_pending_rar4_comment(cx)?;
     let (encoded_name, name_flags) = encode_file_name(name);
-    let ext_time = build_ext_time(mtime_secs, Some(mtime_ns));
+    let ext_time = build_member_ext_time(
+        cx.write_ctx().solid.rar4_unp_ver,
+        mtime_secs,
+        Some(mtime_ns),
+    );
     let mut flags = name_flags;
     if ext_time.is_some() {
         flags |= crate::format::rar4::FHD_EXTTIME;

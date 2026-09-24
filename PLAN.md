@@ -198,6 +198,17 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `rev3::tests::trailer_rev_with_narrower_padding_rebuilds_with_the_data_sets_width`
   钉住。
 
+- **RAR 1.5/2.x 成员不再带 ext-time 记录**（2026-09-24 对拍官方 2.90）：RAR
+  1.5/2.x （`unp_ver` 15/20）的读取器把普通文件头当 `32 + name` 定长，多发一条
+  `FHD_EXTTIME` 记录会把数据偏移顶开、头 CRC 不再覆盖它期望的范围——实测官方
+  UnRAR/Rar 2.90 `t` 报 `the file header is corrupt`（exit 1），v29
+  读取器则正常。 现写侧新增
+  `build_member_ext_time(unp_ver, …)`（`write/mod.rs`），只有 v29 成员
+  才发记录（v26 折到 RAR20，同 v20）；batch / 顺序成员 / 目录条目 / 流式四条发射
+  路径都改走它。契约由
+  `rar4_create::create_rar4_pre_rar3_members_carry_no_exttime_record` 与
+  `write::tests::member_ext_time_is_v29_only` 钉住。
+
 - **RAR5 成员/服务头的尺寸字段补到官方宽度**（2026-09-23 对拍官方 7.23）：官方把
   `data_size`（块信封的 Data Size）、`unpacked_size`、`comp_info` 三个 vint 一律
   写到**至少 2 字节**（值 11 写作 `8b 00`，我们此前写 `0b`），`-m0` 档实测每个
