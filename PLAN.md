@@ -235,6 +235,19 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   正确。契约由
   `rar4_edit::tests::basic::scan_layout_accepts_an_archive_without_endarc`
   钉住。
+- **对齐 WinRAR 7.30 beta 1 的两个开关**（2026-09-24 对拍官方 7.30 beta 1）：①
+  **`-ed` 修正 + 新增 `-ed1`**：官方 `-ed`
+  是「完全不写目录记录」（非空目录靠成员 路径重建、属性丢失），`-ed1`
+  才是「只排除不含文件的目录」（其**子树**有文件的目录
+  保留，时间/属性得以保留——实测 `t\sub` 只含子目录也留下）。此前我们 `-ed`
+  实现的其实是 `-ed1` 的语义（错），`-ed1` 被静默丢弃；现在 `-ed`
+  一个目录记录都不 写、`-ed1` 按子树递归判定。② **新增 `-da`**（`rar` 与 `unrar`
+  都有）：`x`/`e` 成功后删除归档，分卷连整套与 `.rev`
+  一起删（实测官方即使全部成员被跳过、exit 10 也照删；解压失败不删）。契约由
+  `cli_behavior::switches::{cli_size_and_empty_dir_filters,
+  cli_da_deletes_the_archive_after_extraction}`
+  钉住。**已知残余**：`-da` 删除失败时官方报 exit 14，我们暂映射到
+  fatal(2)；`-dr`（进回收站）仍未实现。
 
 - **RAR5 成员/服务头的尺寸字段补到官方宽度**（2026-09-23 对拍官方 7.23）：官方把
   `data_size`（块信封的 Data Size）、`unpacked_size`、`comp_info` 三个 vint 一律

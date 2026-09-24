@@ -632,6 +632,9 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-ms") {
         return format!("--store-types={rest}");
     }
+    if arg == "-da" {
+        return "--delete-archive".into();
+    }
     if arg == "-df" {
         return "--delete-after".into();
     }
@@ -999,6 +1002,9 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-sm") {
         return format!("--size-more={rest}");
     }
+    if arg == "-ed1" {
+        return "--no-empty-dirs1".into();
+    }
     if arg == "-ed" {
         return "--no-empty-dirs".into();
     }
@@ -1079,6 +1085,79 @@ macro_rules! info {
             }
         }
     };
+}
+
+/// `-da`: remove the archive after extraction, WinRAR 7.30 style — the whole
+/// volume set plus the `.rev` recovery volumes of the set. It runs once the
+/// extraction completed (WinRAR deletes even when every member was skipped); a
+/// failed extraction returns early and never reaches it.
+pub fn delete_archive_set(archive: &str) -> crate::error::CliResult<()> {
+    let path = std::path::Path::new(archive);
+    let mut victims: Vec<std::path::PathBuf> = rar_rs::discover_volumes(path);
+    if victims.is_empty() {
+        victims.push(path.to_path_buf());
+    }
+    // `.rev` recovery volumes share the set's base name: derive it from the
+    // first volume (`arc.part01.rar` / `arc.rar` / `arc.r00` -> `arc`) and take
+    // only names continuing it with `.` or a digit, so an unrelated
+    // `arc_other.rev` is left alone.
+    if let (Some(parent), Some(name)) = (victims[0].parent(), victims[0].file_name())
+        && let Some(base) = volume_base(&name.to_string_lossy())
+        && let Ok(entries) = std::fs::read_dir(if parent.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent
+        })
+    {
+        let lower_base = base.to_ascii_lowercase();
+        for entry in entries.flatten() {
+            let stem = entry.file_name().to_string_lossy().into_owned();
+            let lower = stem.to_ascii_lowercase();
+            if !lower.ends_with(".rev") || !lower.starts_with(&lower_base) {
+                continue;
+            }
+            let rest = &stem[base.len()..];
+            if rest.starts_with('.') || rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                victims.push(entry.path());
+            }
+        }
+    }
+    victims.sort();
+    victims.dedup();
+    for victim in &victims {
+        std::fs::remove_file(victim).map_err(|error| {
+            crate::error::CliError::with_code(
+                format!("-da: cannot delete {}: {error}", victim.display()),
+                crate::error::EXIT_FATAL,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Volume base name of `arc.part01.rar` / `arc.rar` / `arc.r00`, or `None` when
+/// the name is none of the set-naming shapes.
+fn volume_base(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_suffix(".rar") {
+        if let Some(part) = rest.rfind(".part") {
+            let digits = &rest[part + 5..];
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Some(name[..part].to_string());
+            }
+        }
+        return Some(name[..rest.len()].to_string());
+    }
+    let bytes = lower.as_bytes();
+    if bytes.len() >= 5
+        && bytes[bytes.len() - 4] == b'.'
+        && (b'r'..=b'z').contains(&bytes[bytes.len() - 3])
+        && bytes[bytes.len() - 2].is_ascii_digit()
+        && bytes[bytes.len() - 1].is_ascii_digit()
+    {
+        return Some(name[..name.len() - 4].to_string());
+    }
+    None
 }
 
 #[cfg(test)]

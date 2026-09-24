@@ -310,15 +310,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         }
     }
 
-    // -sl / -sm / -ed: size filters and skip-empty-directories.
-    if args.size_less.is_some() || args.size_more.is_some() || args.no_empty_dirs {
+    // -sl / -sm: size filters (files only; directories pass).
+    if args.size_less.is_some() || args.size_more.is_some() {
         collected.retain(|c| {
             if c.is_dir {
-                if args.no_empty_dirs {
-                    return std::fs::read_dir(&c.path)
-                        .map(|mut it| it.next().is_some())
-                        .unwrap_or(true);
-                }
                 return true;
             }
             let size = std::fs::metadata(&c.path).map(|m| m.len()).unwrap_or(0);
@@ -326,6 +321,19 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             let more_ok = args.size_more.is_none_or(|s| size > s);
             less_ok && more_ok
         });
+    }
+    // `-ed` stores no directory records at all; `-ed1` drops only the
+    // directories whose subtree holds no (surviving) file — a directory with
+    // files keeps its record, so its times/attributes survive (WinRAR 7.30).
+    if args.no_empty_dirs {
+        collected.retain(|c| !c.is_dir);
+    } else if args.no_empty_dirs1 {
+        let files: Vec<std::path::PathBuf> = collected
+            .iter()
+            .filter(|c| !c.is_dir)
+            .map(|c| c.path.clone())
+            .collect();
+        collected.retain(|c| !c.is_dir || files.iter().any(|file| file.starts_with(&c.path)));
     }
     // Time filters (-ta / -tb absolute dates, -tn / -to relative periods):
     // only members whose time falls in the window are added (directories

@@ -135,7 +135,8 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 - `-ep` / `-ep1` / `-ep2` / `-ep3` / `-ep4<path>` — path strip
 - `-ap<path>` — archive path prefix
 - `-x` / `-x@<list>` — exclude; `-n` / `-n@<list>` — include
-- `-ed` / `-as` — empty dirs / sync
+- `-ed` / `-ed1` / `-as` — store no directory records at all / skip only empty
+  directories / sync
 - `-ad` / `-ad1` / `-ad2` / `-am` — append the archive name to the destination;
   extract into each archive's own directory (with / without a per-archive
   subdirectory); archive metadata
@@ -178,7 +179,9 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 
 **Misc**
 
-- `-df` / `-kb` / `-si<name>` — delete sources / keep broken / stdin member
+- `-da` / `-df` / `-kb` / `-si<name>` — delete the archive after a successful
+  extraction (volumes and `.rev` included) / delete sources / keep broken /
+  stdin member
 - `-ver[n]` / `-ag[fmt]` — versioning / auto-name (local time)
 - `-y` / `-o±` — yes / overwrite mode. On a console (stdin is a terminal),
   extraction without `-y`/`-o±`/`-or` asks before replacing each existing file

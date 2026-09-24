@@ -279,6 +279,10 @@ pub(crate) struct ExtractArgs {
     /// (like `-kb`; the default deletes them)
     #[arg(long = "keep-broken")]
     pub(crate) keep_broken: bool,
+    /// Delete the archive after a successful extraction — the whole volume
+    /// set and its `.rev` recovery volumes included (like `-da`)
+    #[arg(long = "delete-archive")]
+    pub(crate) delete_archive: bool,
     /// Rename the destination automatically when it already exists
     /// (like `-or`): `name.ext` becomes `name(1).ext`, ...
     #[arg(long = "auto-rename")]
@@ -622,9 +626,14 @@ pub(crate) struct CreateArgs {
     /// Only process files larger than this size (like `-sm<size>`)
     #[arg(long = "size-more", value_name = "SIZE", value_parser = parse_size)]
     pub(crate) size_more: Option<u64>,
-    /// Do not add empty directories (like `-ed`)
+    /// Do not store directory records at all (like `-ed`; non-empty folders
+    /// are recreated from member paths, but their times/attributes are lost)
     #[arg(long = "no-empty-dirs")]
     pub(crate) no_empty_dirs: bool,
+    /// Exclude only empty directories (like `-ed1`; directories containing
+    /// files keep their record, so their times/attributes are preserved)
+    #[arg(long = "no-empty-dirs1")]
+    pub(crate) no_empty_dirs1: bool,
     /// Accepted for compatibility (like `-c-`); table listings never show
     /// archive comments — only `cw` prints them — so this has no effect
     #[arg(long = "no-comment", global = true)]
