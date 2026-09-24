@@ -737,6 +737,13 @@ pub fn normalize_switch(arg: &str) -> String {
     if arg == "-vd" {
         return "--erase-disk".into();
     }
+    if arg == "-vn" {
+        // WinRAR `-vn`: name a RAR4 volume set the old way
+        // (`{base}.rar`/`{base}.rNN`) instead of the zero-padded
+        // `.partNN.rar`. Checked before the `-v<size>` arm below, which
+        // would otherwise read it as `--volume-size=n`.
+        return "--old-numbering".into();
+    }
     if arg == "-v-" {
         // WinRAR cancels volume creation with `-v-`; volumes are off by
         // default here, so this only has to clear a requested size.

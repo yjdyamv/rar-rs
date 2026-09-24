@@ -204,6 +204,59 @@ fn cli_ma4_create_with_rv_creates_recovery_volumes() {
     assert_eq!(std::fs::read(&victim).unwrap(), saved);
 }
 
+/// `-vn` names a RAR4 set the old way (`.rar`/`.rNN`) with `{base}N.rev`
+/// trailer recovery files, and `rc` (addressed by the first volume) rebuilds
+/// a deleted volume byte-identically.
+#[test]
+fn cli_vn_creates_old_style_rar4_volume_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut big = vec![0u8; 400_000];
+    let mut x: u64 = 0x0123_4567_89AB_CDEF;
+    for b in &mut big {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+    }
+    let src = dir.path().join("rnd.bin");
+    std::fs::write(&src, &big).unwrap();
+    let base = dir.path().join("vn.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-m0", "-vn", "-v100k", "-rv2", "-idq"])
+        .arg(&base)
+        .arg(&src)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        dir.path().join("vn.rar").exists(),
+        "old-naming first volume"
+    );
+    assert!(
+        dir.path().join("vn.r00").exists(),
+        "old-naming second volume"
+    );
+    assert!(
+        dir.path().join("vn1.rev").exists(),
+        "old-naming trailer .rev"
+    );
+    assert!(dir.path().join("vn2.rev").exists());
+
+    // `rc` sees `.rar`/`.rNN` shapes and rebuilds a deleted volume.
+    let victim = dir.path().join("vn.r01");
+    let saved = std::fs::read(&victim).unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["rc", "-idq"])
+        .arg(&base)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rar rc must rebuild an old-naming set");
+    assert_eq!(std::fs::read(&victim).unwrap(), saved);
+}
+
 /// Legacy `.partN.rar` sets print `volume N` in the totals row, like WinRAR.
 #[test]
 fn cli_legacy_new_numbering_totals_show_the_volume() {

@@ -212,6 +212,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     } else {
         opts
     };
+    let opts = if args.old_numbering {
+        opts.old_numbering(true)
+    } else {
+        opts
+    };
     let opts = if let Some(size) = dictionary {
         opts.dictionary_size(size)
     } else {
