@@ -52,7 +52,9 @@ pub struct CreateArchiveOptions {
   /// Also encrypt the archive structure (file names). Requires `password`.
   pub encrypt_headers: Option<bool>,
   /// Add a WinRAR-compatible inline recovery record protecting this percent
-  /// (0-100) of the archive. Incompatible with multi-volume.
+  /// (0-100) of the archive. With `volume_size`, every data volume carries
+  /// its own record protecting that volume (WinRAR's `-rr` with `-v`), and
+  /// `.rev` recovery volumes may be combined with it.
   pub recovery_percent: Option<f64>,
   /// Add an inline recovery record with exactly this many parity sectors
   /// (the legacy RAR4 record's native unit, like a bare `-rr<N>`).

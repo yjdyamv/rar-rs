@@ -101,7 +101,10 @@ impl RarArchive {
             self.write_ctx_mut().solid.encoder_state = None;
             self.write_ctx_mut().solid.last_ext = None;
         }
-        self.write_end_block_flags(true)?;
+        // Finish this volume's trailing records before closing it: with `-rr`
+        // that writes the volume's own inline recovery record, which protects
+        // everything written so far (its patched main header included).
+        self.finish_volume(true)?;
         // Close current volume
         self.stream = None;
         self.write_ctx_mut().output.current_volume += 1;

@@ -130,7 +130,9 @@ impl RarArchive {
     /// at the volume size limit (the official `rar` CLI refuses to modify
     /// multi-volume archives at all; this matches WinRAR's rebuild
     /// behavior). Solid chains are decoded and recompressed like in the
-    /// single-volume path. Trailing QO/RR service records are dropped and
+    /// single-volume path. Trailing QO service records are dropped; each
+    /// volume's inline recovery record is rebuilt over the volume it ends,
+    /// from `self.recovery_percent` (see `carry_multivolume_recovery`), and
     /// `.rev` recovery volumes are regenerated.
     pub(super) fn rewrite_multivolume(
         &mut self,
@@ -253,7 +255,8 @@ impl RarArchive {
             let comment_on_disk =
                 self.on_disk_header_len(block.len() as u64) + comment.len() as u64;
             let eoa_size = self.on_disk_header_len(8);
-            if self.write_ctx().output.bytes_written + comment_on_disk + eoa_size > volume_size {
+            let prefix = self.write_ctx().output.bytes_written + comment_on_disk;
+            if prefix + eoa_size + self.recovery_volume_reserve(prefix) > volume_size {
                 return Err(RarError::Unsupported(
                     "rewriting a multi-volume archive whose comment does not fit in one volume is not supported"
                         .into(),
@@ -377,7 +380,9 @@ impl RarArchive {
         if self.progress.is_some() {
             self.report_progress(processed, total_bytes);
         }
-        self.write_end_block()?;
+        // The last volume finishes like every other one: its per-volume
+        // recovery record (when the set carries one) is written here.
+        self.finish_volume(false)?;
         self.stream = None;
         self.write_ctx_mut().output.volume_size = None;
         self.path = saved_path.to_path_buf();

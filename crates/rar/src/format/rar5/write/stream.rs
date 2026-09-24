@@ -218,15 +218,11 @@ fn write_streamed_payload(
 
     // ── Multi-volume splitting ──
     let volume_size = cx.write_ctx().output.volume_size.unwrap();
-    // End-of-archive block: 8 plaintext bytes, or `[IV][padded]` when
-    // header encryption wraps every block.
-    let eoa_size: u64 = cx.on_disk_header_len(8);
     super::emit::write_split_member(
         cx,
         packed_size,
         plan,
         volume_size,
-        eoa_size,
         fh_base,
         |this, phase, offset, chunk_size, is_last| match phase {
             SplitPhase::Crc => {

@@ -575,17 +575,20 @@ pub(crate) fn add_file_rar5(
     Ok(())
 }
 
-/// Roll to a fresh volume until `needed` on-disk bytes fit; `needed`
-/// already includes the end-of-archive reserve. No-op for single-volume
-/// archives, and a volume too small for one header errors instead of
-/// rolling forever (matching the file-member splitter).
-pub(super) fn ensure_rar5_volume_space(cx: &mut dyn Engine, needed: u64) -> RarResult<()> {
+/// Roll to a fresh volume until `added` further bytes fit; `added` is what the
+/// operation will append to the volume (its header, plus any payload). The
+/// end-of-archive block and this volume's inline recovery record are reserved
+/// on top, the latter sized from the prefix it protects. No-op for
+/// single-volume archives, and a volume too small for one header errors
+/// instead of rolling forever (matching the file-member splitter).
+pub(super) fn ensure_rar5_volume_space(cx: &mut dyn Engine, added: u64) -> RarResult<()> {
     let Some(volume_size) = cx.write_ctx().output.volume_size else {
         return Ok(());
     };
     let mut rolled = false;
     loop {
         let used = cx.bytes_written();
+        let needed = super::emit::volume_tail_reserve(cx, used + added) + added;
         if volume_size.saturating_sub(used) >= needed {
             return Ok(());
         }
@@ -717,8 +720,7 @@ pub(crate) fn add_redirect_with_time(
     };
     let hdr_bytes = fh.to_bytes();
     let hdr_on_disk = cx.on_disk_header_len(hdr_bytes.len() as u64);
-    let eoa_size = cx.on_disk_header_len(8);
-    ensure_rar5_volume_space(cx, hdr_on_disk + eoa_size)?;
+    ensure_rar5_volume_space(cx, hdr_on_disk)?;
     cx.record_quick_open_entry(&hdr_bytes)?;
     cx.write_block_header(&hdr_bytes)?;
     cx.add_bytes_written(hdr_on_disk);
@@ -754,8 +756,7 @@ pub(crate) fn write_rar5_dir_entry(
 
     let hdr_bytes = fh.to_bytes();
     let hdr_on_disk = cx.on_disk_header_len(hdr_bytes.len() as u64);
-    let eoa_size = cx.on_disk_header_len(8);
-    ensure_rar5_volume_space(cx, hdr_on_disk + eoa_size)?;
+    ensure_rar5_volume_space(cx, hdr_on_disk)?;
     cx.record_quick_open_entry(&hdr_bytes)?;
     cx.write_block_header(&hdr_bytes)?;
     cx.add_bytes_written(hdr_on_disk);

@@ -296,25 +296,47 @@ fn cli_ma2_ma15_multivolume_members_keep_version() {
 /// the RAR4 container cannot express them. `-hp` and `-rr` are now supported
 /// on RAR4 too, so they are verified positively instead.
 #[test]
-fn cli_ma4_rejects_rar5_only_switches() {
+fn cli_ma4_accepts_header_encryption_and_recovery_records() {
     let dir = make_temp_dir();
     let f = dir.path().join("f.txt");
     std::fs::write(&f, b"payload").unwrap();
-    let arc = dir.path().join("ma4x.rar");
 
-    // Multi-volume + recovery record stays rejected for RAR4 (WinRAR
-    // forbids inline recovery records on volume sets there too).
-    let status = std::process::Command::new(RAR_CLI)
-        .args(["a", "-ma4", "-rr10%", "--volume-size=100k"])
-        .arg(&arc)
-        .arg("f.txt")
+    // Multi-volume + recovery record is supported for RAR4 too (WinRAR's
+    // RAR4 writer records every volume of a set).
+    let big = dir.path().join("big.txt");
+    std::fs::write(&big, vec![b'x'; 120 * 1024]).unwrap();
+    let arc_mv = dir.path().join("ma4mv.rar");
+    let ok = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-m0", "-rr10%", "--volume-size=40k", "-idq"])
+        .arg(&arc_mv)
+        .arg("big.txt")
         .current_dir(dir.path())
         .status()
-        .unwrap();
+        .unwrap()
+        .success();
     assert!(
-        !status.success(),
-        "-ma4 -rr10% with volumes must be rejected"
+        ok,
+        "-ma4 -rr10% with volumes must be accepted (per-volume recovery record)"
     );
+    let volumes: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().contains("ma4mv"))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(volumes.len() >= 2, "expected a multi-volume set");
+    for volume in &volumes {
+        let raw = std::fs::read(volume).unwrap();
+        assert!(
+            raw.windows(10).any(|w| w == b"RRProtect+"),
+            "{} carries no NEWSUB recovery record",
+            volume.display()
+        );
+    }
 
     // `-hp` header encryption is supported on RAR4; the CLI must accept it.
     let arc2 = dir.path().join("ma4hp.rar");

@@ -515,7 +515,11 @@ pub(crate) fn write_rar4_dir_entry(
         let mut rolled = false;
         loop {
             let used = cx.bytes_written();
-            if volume_size.saturating_sub(used) > 7 + hdr.len() as u64 {
+            // The directory header is what the record will protect.
+            let prefix = used + hdr.len() as u64;
+            if volume_size.saturating_sub(used)
+                > 7 + hdr.len() as u64 + cx.recovery_volume_reserve(prefix)
+            {
                 break;
             }
             if rolled {

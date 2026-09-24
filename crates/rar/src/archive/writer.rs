@@ -251,9 +251,11 @@ impl WriterOptions {
 
     /// Add an inline recovery record using the given percentage.
     ///
-    /// Validation rejects the combination with [`Self::volume_size`] and
-    /// formats without recovery records (`v14`, and the RAR5-only fields on
-    /// legacy writers) with `InvalidOption`.
+    /// With [`Self::volume_size`] every data volume carries its own record
+    /// protecting that volume (WinRAR's `-rr` with `-v`), so it can be
+    /// combined with `.rev` recovery volumes. Validation still rejects formats
+    /// without recovery records (`v14`, and the RAR5-only fields on legacy
+    /// writers) with `InvalidOption`.
     #[must_use]
     pub fn recovery_percent(mut self, percent: u8) -> Self {
         self.recovery_percent = Some(percent);
@@ -263,7 +265,8 @@ impl WriterOptions {
     /// Add an inline recovery record of exactly `sectors` parity sectors
     /// (WinRAR RAR4 `-rr<N>`; the RAR4 record's native unit). Mutually
     /// exclusive with [`Self::recovery_percent`]. RAR5 records are sized by
-    /// percent only, so validation rejects this for a RAR5 writer.
+    /// percent only, so validation rejects this for a RAR5 writer. With
+    /// [`Self::volume_size`] each volume gets its own `sectors`-sector record.
     #[must_use]
     pub fn recovery_sectors(mut self, sectors: u32) -> Self {
         self.recovery_sectors = Some(sectors);

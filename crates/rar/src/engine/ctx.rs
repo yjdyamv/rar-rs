@@ -199,6 +199,11 @@ pub(crate) trait VolumeOps {
     /// Bytes already written to the current volume (the budget the family
     /// writers measure their next header/payload against).
     fn bytes_written(&self) -> u64;
+    /// Bytes the inline recovery record will occupy at the tail of a volume
+    /// whose protected prefix spans `prefix_len` bytes (`0` when no record is
+    /// requested). Geometry only, so the family writers reserve room for the
+    /// record on top of the end block and keep the volume within `volume_size`.
+    fn recovery_volume_reserve(&self, prefix_len: u64) -> u64;
     /// Account `bytes` written to the current volume.
     fn add_bytes_written(&mut self, bytes: u64);
     /// Zero-based index of the volume currently being written.

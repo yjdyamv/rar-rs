@@ -54,6 +54,15 @@ pub fn plan_inline_recovery(
     })
 }
 
+/// Length of the parity payload the record protecting a `prefix_len`-byte
+/// archive at `recovery_percent` will carry.
+///
+/// Geometry only — no parity is computed — so the volume writers can reserve
+/// room for the record before filling a volume.
+pub(crate) fn inline_recovery_payload_len(prefix_len: u64, recovery_percent: u64) -> Result<u64> {
+    plan_inline_recovery(prefix_len, recovery_percent)?.payload_size()
+}
+
 /// CRC-64/XZ over `data`, the checksum the RAR5 recovery record header stores.
 pub fn crc64_xz(data: &[u8]) -> u64 {
     crc64_update(data, CRC64_XZ_INIT) ^ CRC64_XZ_INIT

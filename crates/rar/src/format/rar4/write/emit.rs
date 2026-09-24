@@ -227,6 +227,42 @@ pub(super) struct Rar4SplitParams<'a> {
     pub(super) comment: Option<Vec<u8>>,
 }
 
+/// Largest segment size that fits the current volume behind a
+/// `segment_reserve`-byte header, the `eoa`-byte end-of-archive block and this
+/// volume's NEWSUB recovery record.
+///
+/// The record's size follows the prefix it protects, which the segment is
+/// being sized to fill, so the budget is bisected for the exact fill (see the
+/// RAR5 splitter's `data_budget`).
+fn legacy_data_budget(
+    cx: &dyn Engine,
+    used: u64,
+    segment_reserve: u64,
+    eoa: u64,
+    volume_size: u64,
+) -> u64 {
+    let fits = |data: u64| {
+        segment_reserve + data + cx.recovery_volume_reserve(used + segment_reserve + data) + eoa
+            <= volume_size.saturating_sub(used)
+    };
+    let mut lo = 0u64;
+    let mut hi = volume_size
+        .saturating_sub(used)
+        .saturating_sub(segment_reserve + eoa);
+    if fits(hi) {
+        return hi;
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
 /// Split `packed_size` on-disk bytes across volumes: one FILE_HEAD plus one
 /// segment per volume, using the RAR4 split convention (a non-final head
 /// carries its own segment's CRC, the final head the whole-file CRC; the
@@ -240,22 +276,27 @@ pub(super) fn emit_rar4_split<'a>(
     packed_size: u64,
     mut segment: impl FnMut(&mut dyn Engine, u64, u64) -> RarResult<Cow<'a, [u8]>>,
 ) -> RarResult<Vec<crate::model::DataChunk>> {
-    let needed = 7 + rar4_segment_header_reserve(
+    let segment_reserve = rar4_segment_header_reserve(
         params.encoded_name,
         params.salt.is_some(),
         params.ext_time,
         this.header_encryption(),
     );
+    // The end-of-archive block keeps its own 7 plaintext bytes; this volume's
+    // NEWSUB recovery record (0 without `-rr`) sits in front of it and
+    // protects everything written before it.
+    let eoa: u64 = 7;
     let mut chunks = Vec::new();
     let mut sent = 0u64;
     let mut vol_index = this.current_volume_index();
     let mut split_before = false;
     while sent < packed_size {
-        // Roll to a volume with room for the header and the EOA.
+        // Roll to a volume with room for a header, the tail reserve and at
+        // least one byte of segment data.
         let mut rolled = false;
         loop {
             let used = this.bytes_written();
-            if volume_size.saturating_sub(used) > needed {
+            if legacy_data_budget(this, used, segment_reserve, eoa, volume_size) >= 1 {
                 break;
             }
             if rolled {
@@ -268,7 +309,7 @@ pub(super) fn emit_rar4_split<'a>(
             rolled = true;
         }
         let used = this.bytes_written();
-        let available = volume_size - used - needed;
+        let available = legacy_data_budget(this, used, segment_reserve, eoa, volume_size);
         let chunk_size = (packed_size - sent).min(available);
         let split_after = sent + chunk_size < packed_size;
         let data = segment(this, sent, chunk_size)?;

@@ -150,29 +150,44 @@ impl RarArchive {
             return self.finish_writing_rar4();
         }
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
-            let qo_offset = if self.write_ctx().locator.quick_open {
-                Some(self.write_quick_open_record()?)
-            } else {
-                None
-            };
-            let rr_offset = if self.recovery_percent.is_some() {
-                Some(self.stream.as_mut().unwrap().stream_position()?)
-            } else {
-                None
-            };
-            if rr_offset.is_some() {
-                // The final main header (with the real QO/RR offsets) must
-                // be in place before the parity is computed: the RR
-                // protects the raw archive bytes including the main header.
-                self.patch_main_header_locator(qo_offset, rr_offset)?;
-                self.write_recovery_record()?;
-            } else if self.write_ctx().locator.quick_open {
-                self.patch_main_header_locator(qo_offset, None)?;
-            }
-            self.write_end_block()?;
+            self.finish_volume(false)?;
             self.mode = Mode::Read; // prevent double-write
         }
         Ok(())
+    }
+
+    /// Write the trailing records and the end block of the volume currently
+    /// being written: the quick-open record (single-volume archives only), the
+    /// inline recovery record and the end-of-archive block, in that order.
+    ///
+    /// Every volume finishes through here — [`Self::start_next_volume`] for the
+    /// volumes that fill up, [`Self::finish_writing`] for the last one — so a
+    /// multi-volume set carries one inline recovery record *per volume*,
+    /// matching WinRAR's `-rr` (each volume's record protects that volume's own
+    /// prefix, its freshly patched main header included). The archive rewrite
+    /// path reuses the same rules by simply setting `recovery_percent`.
+    pub(super) fn finish_volume(&mut self, next_volume: bool) -> RarResult<()> {
+        let quick_open = self.write_ctx().locator.quick_open;
+        let qo_offset = if quick_open {
+            Some(self.write_quick_open_record()?)
+        } else {
+            None
+        };
+        let rr_offset = if self.recovery_percent.is_some() {
+            Some(self.stream.as_mut().unwrap().stream_position()?)
+        } else {
+            None
+        };
+        if rr_offset.is_some() || quick_open {
+            // The header of THIS volume (with its real QO/RR offsets) must be
+            // in place before the parity is computed: the record protects the
+            // raw volume bytes, its own main header included.
+            self.patch_main_header_locator(qo_offset, rr_offset)?;
+        }
+        if rr_offset.is_some() {
+            self.write_recovery_record()?;
+        }
+        self.write_end_block_flags(next_volume)
     }
 
     /// Finish writing and hand the underlying stream back (test seam for
@@ -218,17 +233,57 @@ impl RarArchive {
     /// and append the `"RR"` service header. The main header locator was
     /// already patched by [`Self::close`].
     pub(super) fn write_recovery_record(&mut self) -> RarResult<()> {
-        let path = self.write_file_path().to_path_buf();
+        let path = self.write_file_path();
         self.write_recovery_record_from(&path)
     }
 
-    /// The file currently being written: the staged temporary sibling
-    /// during an uncommitted create/append, the final path otherwise.
-    pub(super) fn write_file_path(&self) -> &Path {
+    /// The file currently being written: the staged temporary sibling during
+    /// an uncommitted create/append, the **staged volume** being filled for an
+    /// uncommitted multi-volume set, the final path otherwise.
+    ///
+    /// A multi-volume create stages every volume under a temporary base, so
+    /// `self.path` is the final (not yet written) first volume — the
+    /// per-volume recovery record has to read the volume that is actually on
+    /// disk, which is `volume_path(parent, tmp_base, current_volume)`.
+    pub(super) fn write_file_path(&self) -> PathBuf {
         match &self.write_ctx().output.pending {
-            Some(PendingCommit::Single(tmp)) => tmp,
-            _ => &self.path,
+            Some(PendingCommit::Single(tmp)) => tmp.clone(),
+            Some(PendingCommit::Volumes {
+                parent, tmp_base, ..
+            }) => volume_path(parent, tmp_base, self.write_ctx().output.current_volume),
+            _ => self.path.clone(),
         }
+    }
+
+    /// Bytes the inline recovery record will occupy at the tail of a volume
+    /// whose protected prefix spans `prefix_len` bytes — `0` when no record is
+    /// requested or the container has no inline record.
+    ///
+    /// Pure geometry (no parity is computed), so the family writers budget a
+    /// volume against it and keep every volume within its `volume_size`: a
+    /// per-volume record protects the bytes written before it, so it has to
+    /// fit inside the same budget as the end block.
+    pub(super) fn recovery_volume_reserve(&self, prefix_len: u64) -> u64 {
+        if self.is_legacy() {
+            // The legacy record's strength may be an exact `-rr<N>` sector
+            // count rather than a percent, so it is resolved separately.
+            return self.recovery_volume_reserve_legacy(prefix_len);
+        }
+        let Some(percent) = self.recovery_percent else {
+            return 0;
+        };
+        let Ok(payload) =
+            crate::recovery::rar50::inline_recovery_payload_len(prefix_len, u64::from(percent))
+        else {
+            return 0;
+        };
+        let hdr = crate::format::rar5::headers::build_service_block(
+            "RR",
+            &recovery_record_subdata(percent),
+            payload,
+            crate::format::rar5::BLOCK_FLAG_SKIP_IF_UNKNOWN,
+        );
+        self.on_disk_header_len(hdr.len() as u64) + payload
     }
 
     /// Move the staged write files over their final paths. Called on
@@ -369,14 +424,7 @@ impl RarArchive {
         };
 
         // RR service header: type 3, name "RR", SubData = percent byte.
-        let subdata = {
-            let rec = vec![percent as u8]; // recovery percent (single byte, <= 100)
-            let mut extra = Vec::new();
-            extra.extend(vint::encode((1 + rec.len()) as u64)); // record size: type + data
-            extra.extend(vint::encode(0x07u64)); // service data record type
-            extra.extend(rec);
-            extra
-        };
+        let subdata = recovery_record_subdata(percent as u8);
         let hdr = crate::format::rar5::headers::build_service_block(
             "RR",
             &subdata,
@@ -596,16 +644,32 @@ impl RarArchive {
         Ok(())
     }
 
+    /// Write a non-first volume's main header (volume flag + number) with its
+    /// own locator record when this archive carries an inline recovery
+    /// record: WinRAR protects **every** volume of a set with one of its own,
+    /// so each volume's header advertises `ARCHIVE_FLAG_RECOVERY` and carries
+    /// the RR offset field that [`Self::finish_volume`] patches at close.
     pub(super) fn write_archive_header_vol(&mut self, volume_number: Option<u64>) -> RarResult<()> {
-        let (hdr, _, _) = crate::format::rar5::headers::locator::build_main_header(
-            ARCHIVE_FLAG_VOLUME,
+        let recovery = self.recovery_percent.is_some();
+        let mut arch_flags = ARCHIVE_FLAG_VOLUME;
+        if recovery {
+            arch_flags |= ARCHIVE_FLAG_RECOVERY;
+        }
+        let (hdr, qo_field, rr_field) = crate::format::rar5::headers::locator::build_main_header(
+            arch_flags,
             &[],
             false,
-            false,
+            recovery,
             volume_number,
             self.locator_offset_width(),
         );
-        self.write_block_header(&hdr)
+        let main_header_start = self.stream.as_mut().unwrap().stream_position()?;
+        self.write_block_header(&hdr)?;
+        let ctx = self.write_ctx_mut();
+        ctx.locator.main_header_start = Some(main_header_start);
+        ctx.locator.qo_offset_field_pos = qo_field.map(|p| p as u64);
+        ctx.locator.rr_offset_field_pos = rr_field.map(|p| p as u64);
+        Ok(())
     }
 
     pub(super) fn write_end_block(&mut self) -> RarResult<()> {
@@ -775,20 +839,31 @@ impl RarArchive {
         }
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
             // `-rr`: the legacy NEWSUB (0x7a) recovery record goes between
-            // the last member and the end-of-archive block (single-volume
-            // only, matching WinRAR's RAR4 writer). Appending to an
-            // archive that carried a record rebuilds it over the whole new
-            // prefix at its original parity strength.
-            if self.recovery_percent.is_some()
-                || self.recovery_sectors.is_some()
-                || self.write_ctx().rar4.rr_sectors.is_some()
-            {
-                self.write_rar4_recovery_block()?;
-            }
-            self.write_rar4_end_block()?;
+            // the last member and the end-of-archive block, in every volume of
+            // a set (matching WinRAR's RAR4 writer). Appending to an archive
+            // that carried a record rebuilds it over the whole new prefix at
+            // its original parity strength.
+            self.finish_volume_rar4()?;
             self.mode = Mode::Read;
         }
         Ok(())
+    }
+
+    /// Legacy equivalent of [`Self::finish_volume`]: append this volume's
+    /// NEWSUB recovery record and its end-of-archive block.
+    fn finish_volume_rar4(&mut self) -> RarResult<()> {
+        if self.rar4_recovery_requested() {
+            self.write_rar4_recovery_block()?;
+        }
+        self.write_rar4_end_block()
+    }
+
+    /// Whether a legacy recovery record was requested (`-rr` in any form, or
+    /// carried over from the archive being rewritten).
+    fn rar4_recovery_requested(&self) -> bool {
+        self.recovery_percent.is_some()
+            || self.recovery_sectors.is_some()
+            || self.write_ctx().rar4.rr_sectors.is_some()
     }
 
     /// Build and append the RAR 3.x/4.x NEWSUB recovery block protecting
@@ -812,13 +887,9 @@ impl RarArchive {
         // An explicit parity-sector count (WinRAR RAR4 `-rr<N>`) is used
         // verbatim; otherwise the record is sized by percent (or, when an
         // existing archive is rewritten, at its original strength).
-        let rec_sectors = match self.recovery_sectors.or(self.write_ctx().rar4.rr_sectors) {
-            Some(rec) => rec,
-            None => {
-                let percent = self.recovery_percent.unwrap_or(0);
-                crate::recovery::legacy_rr::recovery_sector_count(prefix_len, percent)
-            }
-        };
+        let rec_sectors = self
+            .rar4_recovery_sectors(prefix_len)
+            .ok_or_else(|| RarError::Format("no recovery record was requested".into()))?;
         let block = crate::recovery::legacy_rr::build_legacy_recovery_block(&prefix, rec_sectors)?;
         let stream = self.stream.as_mut().unwrap();
         if self.header_encryption {
@@ -839,6 +910,37 @@ impl RarArchive {
             self.write_ctx_mut().output.bytes_written += block.len() as u64;
         }
         Ok(())
+    }
+
+    /// Legacy (RAR 1.5–4.x) counterpart of [`Self::recovery_volume_reserve`]:
+    /// the 54-byte NEWSUB header (header-encrypted under `-hp`), the
+    /// two-byte-per-sector tag table and the parity sectors, all sized from
+    /// the volume's own prefix.
+    fn recovery_volume_reserve_legacy(&self, prefix_len: u64) -> u64 {
+        let Some(rec_sectors) = self.rar4_recovery_sectors(prefix_len as usize) else {
+            return 0;
+        };
+        let total_blocks = prefix_len.div_ceil(512);
+        self.on_disk_header_len(54) + total_blocks * 2 + u64::from(rec_sectors) * 512
+    }
+
+    /// Parity-sector strength for a legacy recovery record over a
+    /// `prefix_len`-byte prefix: an explicit `-rr<N>` (or the strength carried
+    /// over from the archive being rewritten) verbatim, otherwise the
+    /// `-rr<N>%` percent, rounded up to whole 512-byte sectors. `None` when no
+    /// record is requested.
+    fn rar4_recovery_sectors(&self, prefix_len: usize) -> Option<u32> {
+        let carried = self.write_ctx().rar4.rr_sectors;
+        if !self.rar4_recovery_requested() {
+            return None;
+        }
+        Some(match self.recovery_sectors.or(carried) {
+            Some(rec) => rec,
+            None => crate::recovery::legacy_rr::recovery_sector_count(
+                prefix_len,
+                self.recovery_percent.unwrap_or(0),
+            ),
+        })
     }
 
     fn write_rar4_end_block(&mut self) -> RarResult<()> {
@@ -868,7 +970,7 @@ impl RarArchive {
                 crate::fs::volume::LEGACY_VOLUME_MAX
             )));
         }
-        self.write_rar4_end_block()?;
+        self.finish_volume_rar4()?;
         self.stream = None;
         self.write_ctx_mut().output.current_volume += 1;
         let (parent, tmp_base, final_base) = match &self.write_ctx().output.pending {
@@ -895,6 +997,17 @@ impl RarArchive {
             self.stream.as_mut().unwrap().stream_position()?;
         Ok(())
     }
+}
+
+/// Extra area of the RAR5 recovery-record ("RR") service header: one
+/// service-data record (type `0x07`) carrying the requested percent as a
+/// single byte.
+fn recovery_record_subdata(percent: u8) -> Vec<u8> {
+    let mut extra = Vec::new();
+    extra.extend(vint::encode(2u64)); // record size: type vint + 1 data byte
+    extra.extend(vint::encode(0x07u64)); // service data record type
+    extra.push(percent);
+    extra
 }
 
 /// Map the staged `.rev` files returned by the recovery-volume builder (named

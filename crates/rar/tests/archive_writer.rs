@@ -77,10 +77,13 @@ fn validated_value_types_enforce_boundaries_and_mappings() {
 fn writer_options_validate_combinations_before_staging_and_redact_passwords() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid.rar");
+    // Quick-open still cannot be combined with data volumes; the check runs
+    // before anything is staged (a recovery record, by contrast, is now legal
+    // alongside volumes and writes one record per volume).
     let options = WriterOptions::new()
         .password("do-not-print")
         .encrypt_headers(true)
-        .recovery_percent(10)
+        .quick_open(true)
         .volume_size(32 * 1024);
     let debug = format!("{options:?}");
     assert!(debug.contains("<redacted>"));
