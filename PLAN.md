@@ -1,33 +1,46 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-23 @ `4620434`（本轮：**RAR5 头字节对齐官方**——成员头与
-> QO/RR/CMT 服务块的 `data_size`/`unpacked_size`/`comp_info` 改写到官方的最小 2
-> 字节、STM 服务块按官方的 `vint_size(unpacked_size << 12)` 预留（此前三者全是
-> 最小编码，−3 字节/成员）；**Unix 时间载体去重**，头内 mtime 与 FILE_TIME 记录
-> 二选一（此前两者都写））。另记 Windows 属性位子集、`-ts` 数字组合两处差异。
-> 前轮：**主头 locator 恒写**（含 QO 0 占位、主头块 flags 0x5），并顺带修
-> `split_main_extra` 只看标志位 就重建 QO 记录的真 bug；locator
-> 的偏移**宽度**仍是我们定长 5 字节 vs 官方按预计 大小 3–6
-> 字节）。更前轮：**元数据改为按宿主平台写** ——新增 `platform.rs` 统一
-> `host_os`/属性/时间载体，Windows 上写 `host_os`=0 + DOS 属性 + FILE_TIME
-> 记录的 Windows FILETIME，WinRAR/我们都恢复只读/隐藏/系统位、也不再被 NFC
-> 归一化成员名；RAR4 顺带落 DOS 属性位（直拷，含 `0x00` 那个官方用例）。另修
-> 抽取侧「带 DIRECTORY 位的重定向被当目录」与 `-si`/`add_bytes` 在 Windows 丢
-> mtime 两处缺陷）；更前轮：**真实用户语料 × 多文件类型的双向对拍** ——新增
-> `winrar_interop::scenarios`（空文件/无扩展名/点文件/含空格引号井号的名字/ CJK
-> 与 emoji 名/200 字节长名/多级目录/空目录/大量小文件/文本与随机与结构化数据，
-> 默认/m0/m5/solid/分卷 五个开关档 × 两种创建 × 两种读取，另加 unicode
-> 归档注释与 NFD 名往返）；并把「Windows 上写 Unix
-> 元数据」的两处**可见**后果（成员名被 WinRAR 读取器 NFC
-> 归一化、只读/隐藏/系统属性丢失）测清后记入「已知小差异」）。
-> 前轮：文档失效引用清理 + WinRAR 对齐路线图； P1 退出码、P2 交互式覆盖询问、P3
-> `rar r` 无记录重建（含 RAR5/RAR4 头损坏打捞、 legacy RR
-> 定位加固、全扇区检测/修复 + 逐扇区报告 + 询问）、 P4 RAR5 `-hp`
-> 编辑均已落地；另对齐 `-htb` 语义、`-rr`/`rr` 的强度口径（百分比只向上取整）、
-> 开关解析宽松度（官方缺陷处按「丢数据即非零」报退出码）、抽取/写入两侧的线程与
-> MOTW 设置对称、`missing_docs` 文档闸门、绑定 crate 的 MSVC 构建要求、列目录 QO
-> 快路径、RAR13 修复行为、静默模式按 二进制的覆盖语义， 并记录 RAR5 元数据的字节
-> 差异（对拍官方 Windows 与 Linux 两个 构建）； 实现细节以源码为准。
+> 最后核对：2026-09-24（本轮：**RAR4 分卷创建对齐官方新式命名 + `.rev` trailer
+> 布局**——创建默认改 `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
+>
+> - 官方 20 字节 `ENDARC`（其后 7 零字节），`.rev` 随之自动落 trailer 布局、
+>   名字自动成 `base.partNN.rev`；新增 `-vn`（`old_numbering`）回旧式
+>   `.rar`/`.rNN` 命名。官方 6.23 `t` 读我们产的新式集与 `.rev` 报
+>   `All OK`、`rc` 重建缺失卷 **逐字节还原**，`.rev` 与官方逐字节相同；RAR13
+>   仍旧式命名。**已知残余**：RAR4 成员头的三个字节字段（主头
+>   `LONG_BLOCK`、窗口位、store 的 `unp_ver`）仍未对齐
+>   官方，属既有纯字节外观差异，见「已知小差异」。 前轮：**RAR5
+>   头字节对齐官方**——成员头与 QO/RR/CMT 服务块的
+>   `data_size`/`unpacked_size`/`comp_info` 改写到官方的最小 2 字节、STM
+>   服务块按官方的 `vint_size(unpacked_size << 12)` 预留（此前三者全是
+>   最小编码，−3 字节/成员）；**Unix 时间载体去重**，头内 mtime 与 FILE_TIME
+>   记录 二选一（此前两者都写））。另记 Windows 属性位子集、`-ts`
+>   数字组合两处差异。 前轮：**主头 locator 恒写**（含 QO 0 占位、主头块 flags
+>   0x5），并顺带修 `split_main_extra` 只看标志位 就重建 QO 记录的真
+>   bug；locator 的偏移**宽度**仍是我们定长 5 字节 vs 官方按预计 大小 3–6
+>   字节）。更前轮：**元数据改为按宿主平台写** ——新增 `platform.rs` 统一
+>   `host_os`/属性/时间载体，Windows 上写 `host_os`=0 + DOS 属性 + FILE_TIME
+>   记录的 Windows FILETIME，WinRAR/我们都恢复只读/隐藏/系统位、也不再被 NFC
+>   归一化成员名；RAR4 顺带落 DOS 属性位（直拷，含 `0x00` 那个官方用例）。另修
+>   抽取侧「带 DIRECTORY 位的重定向被当目录」与 `-si`/`add_bytes` 在 Windows 丢
+>   mtime 两处缺陷）；更前轮：**真实用户语料 × 多文件类型的双向对拍** ——新增
+>   `winrar_interop::scenarios`（空文件/无扩展名/点文件/含空格引号井号的名字/
+>   CJK 与 emoji 名/200
+>   字节长名/多级目录/空目录/大量小文件/文本与随机与结构化数据，
+>   默认/m0/m5/solid/分卷 五个开关档 × 两种创建 × 两种读取，另加 unicode
+>   归档注释与 NFD 名往返）；并把「Windows 上写 Unix
+>   元数据」的两处**可见**后果（成员名被 WinRAR 读取器 NFC
+>   归一化、只读/隐藏/系统属性丢失）测清后记入「已知小差异」）。
+>   前轮：文档失效引用清理 + WinRAR 对齐路线图； P1 退出码、P2
+>   交互式覆盖询问、P3 `rar r` 无记录重建（含 RAR5/RAR4 头损坏打捞、 legacy RR
+>   定位加固、全扇区检测/修复 + 逐扇区报告 + 询问）、 P4 RAR5 `-hp`
+>   编辑均已落地；另对齐 `-htb` 语义、`-rr`/`rr`
+>   的强度口径（百分比只向上取整）、
+>   开关解析宽松度（官方缺陷处按「丢数据即非零」报退出码）、抽取/写入两侧的线程与
+>   MOTW 设置对称、`missing_docs` 文档闸门、绑定 crate 的 MSVC 构建要求、列目录
+>   QO 快路径、RAR13 修复行为、静默模式按 二进制的覆盖语义， 并记录 RAR5
+>   元数据的字节 差异（对拍官方 Windows 与 Linux 两个 构建）；
+>   实现细节以源码为准。
 
 本文件只留**结论**与**下一步**：过程与逐批验证记录在 git 历史
 （旧版详单：`git show c2c43d4:PLAN.md`），本文件不维护 CHANGELOG。
@@ -53,27 +66,6 @@
 
 - [ ] **RAR4 solid 归档 MT**：legacy solid 链保持串行；成员级并行需跨成员共享
       窗口，属结构性代价（RAR5 的 chunk 级 MT 已兑现）。
-- [ ] **RAR4 分卷创建对齐官方新式命名 + `.rev` trailer 布局**（2026-09-24 查清，
-      未实施）：口径「**创建用新式，修复必须同时支持老式与新式**」。实测 5.91 与
-      6.23（7.23 已无 `-ma4`）产出的 RAR4 分卷是 `base.partNN.rar`（零填充）、
-      `.rev` 是 `base.partNN.rev` 且为 **trailer 布局**（末 7 字节
-      `data-1, rec-1,
-      index, CRC32`，实测计数正确）；我们产旧式
-      `base.rar`/`base.rNN` + **legacy 全量奇偶布局**（计数写进文件名），官方
-      `t` 因此报 `Unknown method in …rev`、 `rc` 用不上。**根因三层**：①
-      命名（我们旧式、未置 `MHD_NEWNUMBERING`）； ②
-      `rev3/layout.rs::use_trailer_format` 判据是「**每个卷最后 7 字节全为 0**」
-      ——官方含末卷 tail7 都是 0，我们以「活的 ENDARC」收尾故被判 Legacy； ③ 官方
-      ENDARC 是 **20 字节**（head_size 0x0014）且**其后补零填卷**（中间卷正好
-      `volume_size`、末卷补到如 2385），我们的 ENDARC 只 7 字节且不补零。
-      实施顺序：dump 定出 ENDARC+补零精确规则 → 改 ENDARC 形状与补零 → `.partNN`
-      命名 + 置 `MHD_NEWNUMBERING` → `.rev` 自然落 trailer + `base.partNN.rev` →
-      修 `canonical_recovery_names` 歧义候选 bug（取首个候选把 `…part25_3_1`
-      读成 data=5，应按数据卷评分选）→ 补两条 `rc`
-      往返测试（老式/新式各一，读取与修复 两侧都保留）→
-      更新受影响用例（`cli_behavior/recovery.rs` 的 `mv4.r00`、 `rar4_create.rs`
-      多卷用户名等）→ 以 6.23 逐字节 + 官方 `t`/`rc` 验收。 **待定**：是否补
-      `-vn`（官方默认新式、`-vn` 旧式；我们目前没有旧式创建出口）。
 
 **有意不做（设计决定，别当缺口修）：**
 
@@ -164,6 +156,34 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   词条同此）。**不追平**：官方对自己的卷集一律
   `Cannot modify volume`，`rar rr <set>` 只改被点名的卷并把该卷撑过
   `volume_size` （102400→111902）。
+
+- **RAR4 分卷创建对齐官方新式命名 + `.rev` trailer 布局**（2026-09-24 逐字节对拍
+  官方 5.91/6.23）。口径「**创建用新式，修复同时支持老式与新式**」。① **命名**：
+  创建 RAR4 分卷改用 WinRAR 默认的零填充 `base.partNN.rar`（宽度 =
+  总卷数位数）， 并给**每一卷**主头置 `MHD_NEWNUMBERING`；RAR13 保持
+  `base.rar`/`base.rNN`。 ② **ENDARC**：多卷每卷收尾改官方 20
+  字节形式（`HEAD_CRC(2) 0x7b(1)
+  HEAD_FLAGS(2)=0x400e|0x0001(非末卷) HEAD_SIZE(2)=0x0014 prefix_crc32(4)
+  volume_index(2) 0×7`）：`prefix_crc32`
+  是 ENDARC 之前**整个卷字节**的 CRC-32、 `volume_index` 从 0 起；**单卷归档仍用
+  7 字节旧形式**（flags `0x4000`）。官方 没有「其后补零填卷」（实测每卷都正好
+  ENDARC 收尾，末卷也短），故只改形状不改 补零；卷预算按 20 字节（`-hp` 为
+  40）预留。③ **`.rev` 自动落 trailer**：tail7 变 0 后 `use_trailer_format`
+  自动选 Trailer，名字自动成 `base.partNN.rev`
+  （新式）/`baseN.rev`（`-vn`）——官方 `t` 现在读我们的 `.rev` 报 `All OK` （此前
+  `Unknown method`），`rc` 重建缺失卷**逐字节还原**，`.rev` 与官方
+  **逐字节相同**。④ **`-vn`**：新增 `WriterOptions::old_numbering`（CLI `-vn`）
+  回到旧式命名且不置 `MHD_NEWNUMBERING`。⑤ **寻址**：新式集（`rv`/`rc`/编辑）
+  用**首卷** `base.part1.rar` 寻址，官方亦然（官方 `rc base.rar` 报
+  `Cannot open`）。⑥ `stale_volume_paths` 的 RAR4 分支现在同时认两族命名与
+  `.rev`，覆盖切换命名的重写。`canonical_recovery_names` 的歧义候选 bug 因
+  trailer 名不含计数而**失效**（无需再按数据卷评分）。契约由
+  `rar4_create::rar4_multivolume_uses_new_numbering_and_the_volume_endarc`、
+  `rar4_rev3::{legacy_build_and_rebuild_each_missing_volume,
+  old_numbering_layout_builds_and_rebuilds}`
+  与
+  `winrar_interop::recovery::rar4_recovery_volumes_match_winrar_byte_for_byte`
+  钉住。
 
 - **RAR5 成员/服务头的尺寸字段补到官方宽度**（2026-09-23 对拍官方 7.23）：官方把
   `data_size`（块信封的 Data Size）、`unpacked_size`、`comp_info` 三个 vint 一律
@@ -559,6 +579,20 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   因为那个开关的成本大于收益。）
 
 ## 已知小差异（记录，互操作无碍）
+
+- **RAR4 成员头的三个字节字段未对齐官方**（2026-09-24 对拍 6.23）：`-ma4 -m0`
+  单卷/多卷逐字节对拍后，除下列 6 字节外**全部相同**（卷尺寸、载荷、20 字节
+  `ENDARC`、`.rev` 均一致）：① 主头 `HEAD_FLAGS` 我们多置
+  `LONG_BLOCK`（`0x8000`）， 官方不置（`-ma4` 单卷 `0x0000`、分卷 `0x0111`）；②
+  FILE_HEAD 窗口位 （flags 位 5–7）我们恒写 6（4 MiB），官方按成员定尺——store 恒
+  1（128 KiB）、 压缩为 `min(4MiB, max(128KiB, next_pow2(size)))`（实测 5 K/50
+  K→1、500 K→3、 5 M/50 M→6）；③ FILE_HEAD `unp_ver` 我们按容器写 29，官方对
+  `-m0`（请求 level 0）写 20（即便成员因不可压而 store，只要请求 level ≥3 仍是
+  29）。三处是 **纯字节外观**差异：双向读写正常、官方 `t`/`rc`
+  无碍，且是**既有**行为（与分卷 无关，单卷同样如此，本轮未改动）。对齐 ②
+  需要改成员发射器的字典口径（solid
+  链尤需谨慎，声明过小会损坏解码），属独立一轮，故按「已知小差异」记录，不改
+  代码。
 
 - **`-rr<N>%` 的百分比取整**：官方 6.23 的百分比形式不是干净的 P%。已量清的结构
   （细扫 20–100 KB、步进 4096 字节）：**斜率精确等于 P%**（边界严格相隔 5120
