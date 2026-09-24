@@ -28,8 +28,8 @@ use crate::format::rar4::comment::{
     build_comment_block, comment_block_name_is_cmt, encode_comment_text,
 };
 use crate::format::rar4::{
-    COMM_HEAD, EnvelopePolicy, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD, MHD_RECOVERY,
-    MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD, read_block,
+    COMM_HEAD, ENDARC_HEAD, EnvelopePolicy, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD,
+    MHD_RECOVERY, MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD, read_block,
 };
 use crate::fs::atomic::{commit_files, install_durable, read_write_create, temp_sibling_path};
 use crate::fs::volume::{stale_volume_paths, volume_base_of};
@@ -89,6 +89,11 @@ fn apply_multivolume_edits(
             // was supplied for the edit: only `MHD_PASSWORD` turns headers
             // into ciphertext.
             let mut hp_password: Option<&str> = None;
+            // Parity strength of this volume's NEWSUB recovery record, when it
+            // carries one: the copied record stops matching the moment a
+            // member header changes, so it is dropped here and rebuilt over
+            // the rewritten volume (in front of the end block).
+            let mut rr_sectors: Option<u32> = None;
             while pos < file_len {
                 let view = read_block(&mut src, hp.is_some(), hp, EnvelopePolicy::EDIT)?
                     .ok_or_else(|| RarError::Format("RAR4: truncated block stream".into()))?;
@@ -137,6 +142,18 @@ fn apply_multivolume_edits(
                 {
                     // Dropped: the replacement was emitted after the main
                     // header.
+                } else if view.head_type == ENDARC_HEAD {
+                    // The rebuilt recovery record sits in front of the end
+                    // block, between it and the last member.
+                    if let Some(rec_sectors) = rr_sectors {
+                        append_volume_recovery_record(&tmp, &mut out, rec_sectors, hp_password)?;
+                    }
+                    out.write_all(view.raw_header()).map_err(RarError::Io)?;
+                    copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
+                } else if view.head_type == NEWSUB_HEAD && is_rr_record(&view.header) {
+                    // Dropped: rebuilt in front of the end block instead, over
+                    // the rewritten volume.
+                    rr_sectors = rr_record_sectors(&view.header);
                 } else {
                     out.write_all(view.raw_header()).map_err(RarError::Io)?;
                     copy_range(&mut src, &mut out, view.data_offset(), view.add_size)?;
@@ -680,4 +697,44 @@ pub(crate) fn edit_rar4(
         deleted: deleted_count,
         renamed,
     })
+}
+
+/// Whether a NEWSUB block is a `"RR"` / `"Protect+"` recovery record.
+fn is_rr_record(header: &[u8]) -> bool {
+    header.len() >= 42 && &header[32..34] == b"RR" && &header[34..42] == b"Protect+"
+}
+
+/// Parity-sector count stored in a NEWSUB recovery-record header.
+fn rr_record_sectors(header: &[u8]) -> Option<u32> {
+    header
+        .get(42..46)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+/// Append a NEWSUB recovery record over everything written to the staged
+/// volume so far (translating the 54-byte header to ciphertext under `-hp`,
+/// like `write_rar4_recovery_block`).
+fn append_volume_recovery_record(
+    staged: &Path,
+    out: &mut File,
+    rec_sectors: u32,
+    hp_password: Option<&str>,
+) -> RarResult<()> {
+    let prefix_len = out.stream_position().map_err(RarError::Io)?;
+    let len = usize::try_from(prefix_len)
+        .map_err(|_| RarError::Format("volume prefix does not fit in usize".into()))?;
+    let mut prefix = vec![0u8; len];
+    File::open(staged)
+        .map_err(RarError::Io)?
+        .read_exact(&mut prefix)
+        .map_err(RarError::Io)?;
+    let block = build_legacy_recovery_block(&prefix, rec_sectors)?;
+    let mut emitted = Vec::new();
+    emit_block(
+        &mut emitted,
+        &block[..RECOVERY_HEAD_SIZE],
+        &block[RECOVERY_HEAD_SIZE..],
+        hp_password,
+    )?;
+    out.write_all(&emitted).map_err(RarError::Io)
 }

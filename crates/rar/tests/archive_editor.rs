@@ -757,10 +757,6 @@ fn comment_and_recovery_ops_refuse_multivolume_archives() {
         editor.apply(EditPlan::new().set_comment(b"x".to_vec())),
         Err(RarError::Unsupported(_))
     ));
-    assert!(matches!(
-        editor.apply(EditPlan::new().set_recovery(10)),
-        Err(RarError::Unsupported(_))
-    ));
     let after: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|entry| entry.ok())
@@ -769,6 +765,33 @@ fn comment_and_recovery_ops_refuse_multivolume_archives() {
         .map(|(name, path)| (name, std::fs::read(path).unwrap()))
         .collect();
     assert_eq!(after, snapshot, "refused ops must not touch any volume");
+
+    // A recovery record, on the other hand, is legal on a set: `-rr` with `-v`
+    // gives every volume its own record (WinRAR's shape), so the rewrite
+    // leaves each volume protected and none of them over the volume size.
+    let mut editor = ArchiveEditor::open(&first).unwrap();
+    editor.apply(EditPlan::new().set_recovery(10)).unwrap();
+    let mut volumes: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rar"))
+        .collect();
+    volumes.sort();
+    assert!(volumes.len() >= 2, "expected a multi-volume set");
+    for volume in &volumes {
+        let bytes = std::fs::read(volume).unwrap();
+        assert!(
+            bytes.windows(4).any(|window| window == b"RR\x02\x07"),
+            "{} carries no inline recovery record",
+            volume.display()
+        );
+        assert!(
+            bytes.len() <= 32 * 1024,
+            "{} exceeds the volume size",
+            volume.display()
+        );
+    }
 }
 
 // ── RAR4 header-level edits (ADR 0005, stage A) ────────────────────────────
