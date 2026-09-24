@@ -9,7 +9,9 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::super::{Mode, RarArchive};
 use crate::error::{RarError, RarResult};
-use crate::format::rar5::headers::{BlockCursor, parse_service_block_name};
+use crate::format::rar5::headers::{
+    BlockCursor, parse_service_block_name, parse_service_recovery_percent,
+};
 use crate::format::rar5::{ARCHIVE_FLAG_LOCKED, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_SERVICE_HEADER};
 
 impl RarArchive {
@@ -42,10 +44,9 @@ impl RarArchive {
                 "recovery percent must be in 0..=100".into(),
             ));
         }
-        if self.volume_paths.len() > 1 && (force_rr.is_some() || comment.is_some()) {
+        if self.volume_paths.len() > 1 && comment.is_some() {
             return Err(RarError::Unsupported(
-                "comment and recovery-record changes are not supported for multi-volume archives"
-                    .into(),
+                "comment changes are not supported for multi-volume archives".into(),
             ));
         }
         self.ensure_write_ctx();
@@ -181,6 +182,53 @@ impl RarArchive {
         crate::fs::atomic::commit_files(&parent, &base, &[], &victims)
     }
 
+    /// Set `recovery_percent` for a multi-volume rewrite: an explicit `-rr`
+    /// wins, otherwise the strength the set's own per-volume records carry is
+    /// preserved, so editing a protected set rebuilds its records instead of
+    /// silently dropping them (the same advantage the single-volume path has;
+    /// the official `rar` CLI drops the record unless `-rr` is repeated).
+    fn carry_multivolume_recovery(&mut self, force_rr: Option<u8>) -> RarResult<()> {
+        self.recovery_percent = match force_rr {
+            Some(percent) => Some(percent),
+            None => self.volume_recovery_percent()?,
+        };
+        Ok(())
+    }
+
+    /// The recovery percent carried by a multi-volume set's own records
+    /// (WinRAR writes the same strength into every volume), or `None` when
+    /// the set has no inline recovery record.
+    fn volume_recovery_percent(&mut self) -> RarResult<Option<u8>> {
+        let first = self
+            .volume_paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.path.clone());
+        let mut reader = File::open(&first)?;
+        // The scan needs the archive-level encryption state (a `-hp` set's
+        // service headers are ciphertext), which a plain open does not cache.
+        self.clear_archive_encryption();
+        let _ = crate::format::rar5::extract::open::read_main_header(self, &mut reader)?;
+        let file_len = reader.metadata().map_err(RarError::Io)?.len();
+        let mut blocks = BlockCursor::new(
+            file_len,
+            crate::format::rar5::extract::verify::archive_block_key(self)?,
+        );
+        while let Some(meta) = blocks.next(&mut reader)? {
+            match meta.block_type {
+                BLOCK_TYPE_END_ARCHIVE => break,
+                BLOCK_TYPE_SERVICE_HEADER
+                    if parse_service_block_name(&meta.raw.header_data)?.as_deref()
+                        == Some("RR") =>
+                {
+                    return Ok(parse_service_recovery_percent(&meta.raw.header_data));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
     /// Run one staged edit rewrite (delete mask + rename map) against the
     /// original archive and reload the catalog. Single-volume archives are
     /// rewritten through a sibling file that replaces the original only on
@@ -195,11 +243,11 @@ impl RarArchive {
         comment: Option<&[u8]>,
     ) -> RarResult<()> {
         let rename_map = (!map.is_empty()).then_some(map);
-        // Comment and recovery-record changes are validated out of the
-        // multi-volume path above (rewrite_multivolume cannot carry them).
+        // Comment changes are validated out of the multi-volume path above
+        // (`rewrite_multivolume` cannot carry them).
         debug_assert!(
-            self.volume_paths.len() <= 1 || (force_rr.is_none() && comment.is_none()),
-            "comment/recovery edits must be single-volume"
+            self.volume_paths.len() <= 1 || comment.is_none(),
+            "comment edits must be single-volume"
         );
         if self.volume_paths.len() > 1 {
             // Probe the main header before the multi-volume rewrite. The
@@ -210,6 +258,7 @@ impl RarArchive {
             if self.main_header_is_locked()? {
                 return Err(RarError::ArchiveLocked);
             }
+            self.carry_multivolume_recovery(force_rr)?;
             self.rewrite_multivolume(&deleted, chains, rename_map)?;
         } else {
             let src_path = self.path.clone();
