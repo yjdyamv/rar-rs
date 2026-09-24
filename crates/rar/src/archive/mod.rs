@@ -855,6 +855,7 @@ impl RarArchive {
                 output: OutputState {
                     pending: None,
                     volume_size: opts.volume_size,
+                    old_numbering: opts.old_numbering,
                     current_volume: 0,
                     bytes_written: 0,
                     rar13_header_pending: false,

@@ -20,12 +20,19 @@ fn payload() -> Vec<u8> {
 }
 
 fn create_set(dir: &Path, name: &str, volume_size: u64) -> Vec<PathBuf> {
+    create_set_with(dir, name, volume_size, false)
+}
+
+/// [`create_set`] with WinRAR's `-vn` old volume naming (`.rar`/`.rNN`)
+/// when `old` is set, instead of the default `.partNN.rar` scheme.
+fn create_set_with(dir: &Path, name: &str, volume_size: u64, old: bool) -> Vec<PathBuf> {
     let path = dir.join(format!("{name}.rar"));
     let mut writer = ArchiveWriter::create_with(
         &path,
         WriterOptions::new()
             .compression(ArchiveVersion::V29)
-            .volume_size(volume_size),
+            .volume_size(volume_size)
+            .old_numbering(old),
     )
     .unwrap();
     writer
@@ -53,10 +60,9 @@ fn legacy_build_and_rebuild_each_missing_volume() {
 
     let revs = rar_rs::build_recovery_volumes_for_set(&volumes, 1).unwrap();
     assert_eq!(revs.len(), 1);
-    // Our volumes end with a live ENDARC, so WinRAR's choice (and ours) is
-    // the legacy full-parity layout with the counts in the file name.
-    let expected = format!("set{}_1_1.rev", volumes.len());
-    assert_eq!(volume_name(&revs[0]), expected);
+    // Our volumes end with WinRAR's 20-byte `ENDARC` (a zero tail), so the
+    // modern `.partNN.rev` trailer layout is chosen, matching WinRAR.
+    assert_eq!(volume_name(&revs[0]), "set.part1.rev");
 
     for victim in [0usize, 1, volumes.len() - 1] {
         let saved = originals[victim].clone();
@@ -89,10 +95,7 @@ fn two_missing_volumes_with_two_recovery_volumes() {
     let revs = rar_rs::build_recovery_volumes_for_set(&volumes, 2).unwrap();
     assert_eq!(
         revs.iter().map(|p| volume_name(p)).collect::<Vec<_>>(),
-        vec![
-            format!("pair{}_2_1.rev", volumes.len()),
-            format!("pair{}_2_2.rev", volumes.len())
-        ]
+        vec!["pair.part1.rev", "pair.part2.rev"]
     );
 
     fs::remove_file(&volumes[0]).unwrap();
@@ -104,40 +107,34 @@ fn two_missing_volumes_with_two_recovery_volumes() {
 }
 
 #[test]
-fn trailer_layout_builds_and_rebuilds() {
+fn old_numbering_layout_builds_and_rebuilds() {
     let dir = tempfile::tempdir().unwrap();
-    let volumes = create_set(dir.path(), "pad", 64 * 1024);
-    // Give every volume WinRAR's zero tail (its 20-byte ENDARC layout ends
-    // in eight zero bytes), which selects the trailer layout.
-    for path in &volumes {
-        let mut bytes = fs::read(path).unwrap();
-        bytes.extend_from_slice(&[0u8; 7]);
-        fs::write(path, &bytes).unwrap();
-    }
+    // `-vn`: old-style `.rar`/`.rNN` volume names with `{base}N.rev` trailer
+    // recovery files (WinRAR's `-vn` output shape).
+    let volumes = create_set_with(dir.path(), "vn", 64 * 1024, true);
+    assert_eq!(volume_name(&volumes[0]), "vn.rar");
+    assert_eq!(volume_name(&volumes[1]), "vn.r00");
     let originals: Vec<Vec<u8>> = volumes.iter().map(|p| fs::read(p).unwrap()).collect();
 
     let revs = rar_rs::build_recovery_volumes_for_set(&volumes, 1).unwrap();
     assert_eq!(
         revs.iter().map(|p| volume_name(p)).collect::<Vec<_>>(),
-        vec!["pad1.rev".to_string()]
+        vec!["vn1.rev".to_string()]
     );
     for rev in &revs {
         let bytes = fs::read(rev).unwrap();
         assert_eq!(bytes.len(), originals[0].len());
     }
 
-    // Missing middle: the zero tail is preserved exactly.
+    // Missing middle: rebuilds byte-identically from the trailer parity.
     fs::remove_file(&volumes[1]).unwrap();
     rar_rs::rebuild_missing_volumes(&volumes[0]).unwrap();
     assert_eq!(fs::read(&volumes[1]).unwrap(), originals[1]);
 
-    // Missing last: the rebuilt volume is truncated back to its live
-    // `ENDARC` block (the synthetic seven-byte pad is not part of it).
+    // Missing last: the rebuilt volume keeps its own 20-byte `ENDARC`.
     fs::remove_file(&volumes[3]).unwrap();
     rar_rs::rebuild_missing_volumes(&volumes[0]).unwrap();
-    let rebuilt = fs::read(&volumes[3]).unwrap();
-    let endarc = originals[3].len() - 7;
-    assert_eq!(rebuilt, originals[3][..endarc]);
+    assert_eq!(fs::read(&volumes[3]).unwrap(), originals[3]);
 }
 
 #[test]
@@ -157,7 +154,9 @@ fn damaged_volume_is_rebuilt_and_kept_as_bad() {
     let rebuilt = rar_rs::rebuild_missing_volumes(&volumes[0]).unwrap();
     assert_eq!(rebuilt, vec![victim.clone()]);
     assert_eq!(fs::read(victim).unwrap(), originals[1]);
-    let bad = victim.with_extension("r00.bad");
+    // The damaged original is parked as its `*.bad` sibling
+    // (`dmg.part2.rar` → `dmg.part2.rar.bad`).
+    let bad = dir.path().join(format!("{}.bad", volume_name(victim)));
     assert_eq!(fs::read(&bad).unwrap(), damaged);
 }
 

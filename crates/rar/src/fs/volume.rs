@@ -198,9 +198,15 @@ pub(crate) fn stale_volume_paths(
             continue;
         };
         let matches = if rar4 {
-            // Legacy data volumes plus their `.rev` recovery volumes: an
-            // overwrite that drops `-rv` must retire the old parity files.
-            legacy_volume_base(name).as_deref() == Some(base) || legacy_rev_owned(dir, base, name)
+            // A RAR 1.5–4.x set is named either the modern `.partNN.rar` way
+            // (the default) or the old `.rar`/`.rNN` way (`-vn`), so an
+            // overwrite must retire leftovers of *both* families, plus their
+            // `.rev` recovery volumes (an overwrite that drops `-rv` must not
+            // leave the old parity files behind).
+            legacy_volume_base(name).as_deref() == Some(base)
+                || part_volume_base(name) == Some(base)
+                || part_recovery_base(name) == Some(base)
+                || legacy_rev_owned(dir, base, name)
         } else {
             // The old set's `.rev` recovery volumes go with it: they are
             // regenerated after the new data volumes commit.

@@ -6,7 +6,7 @@ use crate::format::rar4::comment::{decode_comment_payload, encode_comment_text};
 use crate::archive::RarArchive;
 use crate::format::rar4::RAR4_METHOD_STORE;
 use crate::format::rar4::write::{
-    FileHeaderParams, build_endarc, build_file_header, encode_file_name,
+    FileHeaderParams, build_endarc_single, build_file_header, encode_file_name,
 };
 use crate::format::rar4::{COMM_HEAD, FHD_COMMENT, FHD_UNICODE, MHD_LOCK, MHD_RECOVERY};
 use crate::recovery::legacy_rr::{
@@ -41,7 +41,7 @@ fn archive_bytes(member_blocks: &[Vec<u8>]) -> Vec<u8> {
     for block in member_blocks {
         out.extend_from_slice(block);
     }
-    out.extend_from_slice(&build_endarc(0));
+    out.extend_from_slice(&build_endarc_single());
     out
 }
 
@@ -101,7 +101,7 @@ fn recovery_and_delete_keep_an_embedded_main_comment() {
     // The fixture predates the optional end-of-archive marker; the editor
     // requires one.
     let mut bytes = fixture.clone();
-    bytes.extend_from_slice(&build_endarc(0));
+    bytes.extend_from_slice(&build_endarc_single());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rar2_cmt.rar");
     std::fs::write(&path, &bytes).unwrap();
@@ -197,7 +197,7 @@ fn layout_scan_rejects_short_long_block() {
     bad[3..5].copy_from_slice(&0x8000u16.to_le_bytes()); // LONG_BLOCK
     bad[5..7].copy_from_slice(&7u16.to_le_bytes());
     bytes.extend_from_slice(&bad);
-    bytes.extend_from_slice(&build_endarc(0));
+    bytes.extend_from_slice(&build_endarc_single());
 
     let err = match scan_layout(&bytes, 0, None) {
         Err(err) => err,
@@ -332,7 +332,7 @@ fn dir_rename_expands_to_descendants_and_rebuilds_rr() {
     let rr_block = build_legacy_recovery_block(&prefix, rec).unwrap();
     let mut full = prefix;
     full.extend_from_slice(&rr_block);
-    full.extend_from_slice(&build_endarc(0));
+    full.extend_from_slice(&build_endarc_single());
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dirs.rar");

@@ -282,10 +282,10 @@ pub(super) fn emit_rar4_split<'a>(
         params.ext_time,
         this.header_encryption(),
     );
-    // The end-of-archive block keeps its own 7 plaintext bytes; this volume's
-    // NEWSUB recovery record (0 without `-rr`) sits in front of it and
-    // protects everything written before it.
-    let eoa: u64 = 7;
+    // The volume-set end-of-archive block (20 plaintext bytes, or its `-hp`
+    // encrypted envelope); this volume's NEWSUB recovery record (0 without
+    // `-rr`) sits in front of it and protects everything written before it.
+    let eoa: u64 = crate::format::rar4::write::endarc_volume_reserve(this.header_encryption());
     let mut chunks = Vec::new();
     let mut sent = 0u64;
     let mut vol_index = this.current_volume_index();

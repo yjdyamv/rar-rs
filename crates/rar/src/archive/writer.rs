@@ -124,6 +124,7 @@ pub struct WriterOptions {
     pub(super) recovery_volumes_percent: Option<u8>,
     pub(super) recovery_volume_count: Option<u32>,
     volume_size: Option<u64>,
+    pub(super) old_numbering: bool,
     pub(super) dictionary_size: Option<DictionarySize>,
     save_ctime: bool,
     save_atime: bool,
@@ -150,6 +151,7 @@ impl Default for WriterOptions {
             recovery_volumes_percent: None,
             recovery_volume_count: None,
             volume_size: None,
+            old_numbering: false,
             dictionary_size: None,
             save_ctime: false,
             save_atime: false,
@@ -298,6 +300,16 @@ impl WriterOptions {
         self
     }
 
+    /// Name a RAR4 volume set the old way (WinRAR `-vn`): `{base}.rar`,
+    /// `{base}.r00`, … and no `MHD_NEWNUMBERING`, instead of the default
+    /// zero-padded `{base}.partNN.rar` naming. Ignored by RAR 1.3/1.4 (always
+    /// old naming) and RAR5 (single new naming).
+    #[must_use]
+    pub fn old_numbering(mut self, enabled: bool) -> Self {
+        self.old_numbering = enabled;
+        self
+    }
+
     /// Set the requested compression dictionary size. On v50 compression a
     /// size above 4 GiB keeps the auto v50/v70 semantics (see
     /// [`DictionarySize`]); on v70 every member is v70 with this size
@@ -438,6 +450,7 @@ impl WriterOptions {
             recovery_volumes_percent: self.recovery_volumes_percent,
             recovery_volume_count: self.recovery_volume_count,
             volume_size: self.volume_size,
+            old_numbering: self.old_numbering,
             dict_size_log: dictionary_log,
             dict_size_bytes: dictionary_bytes,
             force_v70: self.compression == ArchiveVersion::V70,
@@ -466,6 +479,7 @@ impl fmt::Debug for WriterOptions {
             .field("recovery_volumes_percent", &self.recovery_volumes_percent)
             .field("recovery_volume_count", &self.recovery_volume_count)
             .field("volume_size", &self.volume_size)
+            .field("old_numbering", &self.old_numbering)
             .field("dictionary_size", &self.dictionary_size)
             .field("save_ctime", &self.save_ctime)
             .field("save_atime", &self.save_atime)

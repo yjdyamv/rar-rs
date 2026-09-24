@@ -2,7 +2,7 @@ use crate::archive::RarArchive;
 use crate::error::RarError;
 use crate::format::rar4::RAR4_METHOD_STORE;
 use crate::format::rar4::write::{
-    FileHeaderParams, build_endarc, build_file_header, encode_file_name,
+    FileHeaderParams, build_endarc_single, build_file_header, encode_file_name,
 };
 use crate::recovery::legacy_rr::{
     build_legacy_recovery_block, recovery_sector_count, scan_protect,
@@ -42,7 +42,7 @@ fn archive_bytes(member_blocks: &[Vec<u8>], with_rr: bool) -> Vec<u8> {
         let rr = build_legacy_recovery_block(&out, rec).unwrap();
         out.extend_from_slice(&rr);
     }
-    out.extend_from_slice(&build_endarc(0));
+    out.extend_from_slice(&build_endarc_single());
     out
 }
 

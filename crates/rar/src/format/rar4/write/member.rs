@@ -508,17 +508,18 @@ pub(crate) fn write_rar4_dir_entry(
     };
     let hdr = build_file_header(&params)?;
     // Multi-volume: roll to a volume with room for this head plus the
-    // 7-byte end-of-archive block (same rule as file members). A volume
+    // volume-set end-of-archive block (same rule as file members). A volume
     // too small for even a fresh header must error instead of rolling
     // forever.
     if let Some(volume_size) = cx.write_ctx().output.volume_size {
+        let endarc = crate::format::rar4::write::endarc_volume_reserve(cx.header_encryption());
         let mut rolled = false;
         loop {
             let used = cx.bytes_written();
             // The directory header is what the record will protect.
             let prefix = used + hdr.len() as u64;
             if volume_size.saturating_sub(used)
-                > 7 + hdr.len() as u64 + cx.recovery_volume_reserve(prefix)
+                > endarc + hdr.len() as u64 + cx.recovery_volume_reserve(prefix)
             {
                 break;
             }

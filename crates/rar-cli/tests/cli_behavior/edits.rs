@@ -14,20 +14,22 @@ fn cli_rar4_multivolume_rename_and_lock() {
     std::fs::write(dir.path().join("a.bin"), &content).unwrap();
     std::fs::write(dir.path().join("b.bin"), vec![0x5Au8; 30_000]).unwrap();
 
-    // Our RAR4 writer names the set `.rar`/`.r00`/... .
-    let first = dir.path().join("mv.rar");
+    // Our RAR4 writer names the set `.partNN.rar` (WinRAR's default).
+    let base = dir.path().join("mv.rar");
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-ma4", "-v20k", "-idq"])
-        .arg(&first)
+        .arg(&base)
         .args(["a.bin", "b.bin"])
         .current_dir(dir.path())
         .status()
         .unwrap();
     assert!(status.success(), "create a RAR4 volume set");
     assert!(
-        dir.path().join("mv.r00").exists(),
+        dir.path().join("mv.part2.rar").exists(),
         "expected a second volume"
     );
+    // Edits address the set's first volume, like WinRAR.
+    let first = dir.path().join("mv.part1.rar");
 
     // Rename: the set must stay readable under the new name.
     let status = std::process::Command::new(RAR_CLI)
@@ -84,19 +86,21 @@ fn cli_rar4_multivolume_archive_comment_roundtrips() {
     for i in 1u8..=3 {
         std::fs::write(dir.path().join(format!("t{i}.txt")), vec![b'a' + i; 9000]).unwrap();
     }
-    let first = dir.path().join("cmt.rar");
+    let base = dir.path().join("cmt.rar");
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-ma4", "-m0", "-v20k", "-idq"])
-        .arg(&first)
+        .arg(&base)
         .args(["t1.txt", "t2.txt", "t3.txt"])
         .current_dir(dir.path())
         .status()
         .unwrap();
     assert!(status.success(), "create a RAR4 volume set");
     assert!(
-        dir.path().join("cmt.r00").exists(),
+        dir.path().join("cmt.part2.rar").exists(),
         "expected a second volume"
     );
+    // Edits address the set's first volume, like WinRAR.
+    let first = dir.path().join("cmt.part1.rar");
 
     let comment = dir.path().join("comment.txt");
     let set_comment = |body: &[u8]| {
