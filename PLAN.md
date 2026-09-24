@@ -120,6 +120,27 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **逐卷内联恢复记录**（2026-09-24 对拍官方 7.23 + 6.23）：`-rr` 配 `-v`
+  时**每卷 各带一份**内联记录（官方 `rar l` 逐卷显示
+  `recovery record`），每卷只保护该卷 自己的前缀（`-rr<N>%` =
+  该卷前缀的百分比；题外：RAR5 记录只按百分比定尺、 legacy 裸 `-rr<N>` 是该卷的
+  parity 扇区数），`-rr` 与 `-rv` 可共用。创建与分卷 重写**共用**卷收尾
+  `create.rs::finish_volume(next_volume)`（RAR4 为 `finish_volume_rar4`）：先
+  patch 该卷主头 locator 的 RR 偏移、再写记录、最后
+  ENDARC；`write_archive_header_vol` 置 `ARCHIVE_FLAG_RECOVERY` 并预留 RR 偏移
+  字段。**卷预算**：`recovery_volume_reserve(prefix_len)` 给纯几何的记录长度，
+  分卷预算按**候选前缀二分**求最大 chunk（记录大小随前缀变；先「收窄到刚放得下」
+  每卷会白扔约 2 KB）——卷不再超过 `volume_size`。**编辑**：分卷 `d`/`rn`/`ch`/
+  `k`/`c` 从原集合 carry 强度并重建逐卷记录（显式 `-rr` 覆盖），`rar rr`
+  亦可作用 于已有卷集；RAR4 分卷改名/注释路径丢弃旧记录后在 ENDARC
+  前按原强度重建（否则 改名让旧记录失配，`rar r` 会用错 parity
+  改坏数据）。**已知残余**：官方 `-qo-` 下无 RR 时不写 locator、只有 RR 时
+  locator flags 仅 0x02（无 QO 字段），我们按 官方**默认**模式的形状恒写 QO
+  占位，故逐卷 RR 的字节在 QO 偏移那几字节上仍不同 （`CONTEXT.md` 的 Locator
+  词条同此）。**不追平**：官方对自己的卷集一律
+  `Cannot modify volume`，`rar rr <set>` 只改被点名的卷并把该卷撑过
+  `volume_size` （102400→111902）。
+
 - **RAR5 成员/服务头的尺寸字段补到官方宽度**（2026-09-23 对拍官方 7.23）：官方把
   `data_size`（块信封的 Data Size）、`unpacked_size`、`comp_info` 三个 vint 一律
   写到**至少 2 字节**（值 11 写作 `8b 00`，我们此前写 `0b`），`-m0` 档实测每个
@@ -497,9 +518,9 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 ## 一致拒绝（别"修"）
 
-- **分卷 + 内联恢复记录（`-rr`）**：WinRAR 分卷只能用 `.rev`；官方 6.23 自己的
-  `rar r` 在带内联 RR 的分卷集上挂死（产出 0 字节 fixed），所以分卷 RR 编辑也
-  保持拒绝。
+- **分卷 + 内联恢复记录（`-rr`）**：**已实现**（2026-09-24，创建 + `rar rr` +
+  分卷编辑，RAR5 与 legacy RAR4 同形），结论见「已修」；此前的拒绝与 依据（6.23
+  的挂死）已作废。
 - **分卷 append / 分卷删除**：官方 `rar` 同样拒绝（"Cannot modify volume"）。
   分卷的 `rn` / `ch`、`k` 与归档注释**不是**拒绝项：官方支持，我们也支持（逐卷
   重写 / 注释插在首卷主头后）。
