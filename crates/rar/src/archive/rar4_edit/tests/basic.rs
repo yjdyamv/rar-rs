@@ -58,6 +58,24 @@ fn patch_main_header_sets_bits_and_keeps_crc_valid() {
     assert_eq!(&patched[5..], &main[5..]);
 }
 
+/// A RAR 2.9-era archive carries no ENDARC block; the layout scan must still
+/// accept it, reporting the last block's end as the rebuild insertion point
+/// (a fresh end block is appended there) instead of refusing to edit.
+#[test]
+fn scan_layout_accepts_an_archive_without_endarc() {
+    let mut bytes = crate::detect::RAR4_SIGNATURE.to_vec();
+    bytes.extend_from_slice(&crate::format::rar4::write::build_main_header(0));
+    bytes.extend_from_slice(&file_block("a.bin", b"payload"));
+    // No ENDARC (RAR 2.9 layout).
+    let layout = scan_layout(&bytes, 0, None).unwrap();
+    assert_eq!(layout.files.len(), 1);
+    assert_eq!(
+        layout.endarc_offset,
+        bytes.len(),
+        "the rebuild appends the end block after the last member"
+    );
+}
+
 /// A RAR 1.5–2.9 main header whose archive comment is embedded after the
 /// fixed 13 bytes must survive a flag patch whole: truncating it used to
 /// shift every following block by the comment length. The CRC keeps

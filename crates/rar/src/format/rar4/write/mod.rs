@@ -60,14 +60,14 @@ fn patch_crc16(buf: &mut [u8], start: usize) {
 /// Build a 13-byte MAIN_HEAD block.
 ///
 /// `flags` carries the MHD_* bits (e.g. `MHD_SOLID | MHD_PASSWORD | MHD_VOLUME`).
-/// The `LONG_BLOCK` bit is always set (required for readers to parse the
-/// head_size field).
+/// WinRAR does **not** set `LONG_BLOCK` on the main header (the block has no
+/// data area and its `head_size` sits at a fixed offset) — verified byte-for-byte
+/// against WinRAR 3.00–6.23 `-ma4`; we match that.
 pub(crate) fn build_main_header(flags: u16) -> [u8; 13] {
     let mut buf = [0u8; 13];
     // CRC filled last.
     buf[2] = MAIN_HEAD;
-    let flags_with_long = flags | LONG_BLOCK;
-    buf[3..5].copy_from_slice(&flags_with_long.to_le_bytes());
+    buf[3..5].copy_from_slice(&flags.to_le_bytes());
     buf[5..7].copy_from_slice(&MAIN_HEADER_SIZE.to_le_bytes());
     // reserved1 (2 bytes) + reserved2 (4 bytes) stay zero.
     patch_crc16(&mut buf, 0);
@@ -409,6 +409,39 @@ pub(crate) fn build_member_ext_time(
     build_ext_time(mtime, mtime_ns)
 }
 
+/// The member `unp_ver` a RAR4 FILE_HEAD carries for `requested_level`: WinRAR
+/// writes a RAR 2.x member (`20`) when the requested level is 0 and the
+/// archive's own version (`29`) otherwise — even when a level ≥ 1 member ends
+/// up STORE, and even inside a `v29` container. An **encrypted** member keeps
+/// `29`: its `-p` layout (the RAR29 salt + block cipher) is the v29 one, so a
+/// `20` header would make readers dispatch the wrong cipher. Verified against
+/// WinRAR 6.23 `-ma4` (`-m0` writes 20, `-m1`..`-m5` and `-m0 -p` write 29).
+pub(crate) fn member_unp_ver(archive_unp_ver: u8, requested_level: u8, encrypted: bool) -> u8 {
+    if requested_level == 0 && !encrypted && archive_unp_ver >= 29 {
+        20
+    } else {
+        archive_unp_ver
+    }
+}
+
+/// WinRAR's `FHD` dictionary/window bits for a RAR4 archive whose largest
+/// member (non-solid) or whole run (solid) spans `size` uncompressed bytes:
+/// `clamp(ceil_log2(size) - 16, min, 6)`, `min` 1 (128 KiB) non-solid and 4
+/// (1 MiB) solid. The bits are archive-wide, not per member — verified against
+/// WinRAR 6.23 `-ma4`: non-solid 60000→1, 200000→2, 500000→3, 2M→5, 8M→6 and
+/// an 8 MiB + 10 KiB pair gets 6 for both; solid 60000/200000/500000→4, 2M→5,
+/// 8M→6. The declared window never falls below the member (or run) size, so it
+/// can never be smaller than the window the encoder actually references.
+pub(crate) fn dict_bits(size: u64, solid: bool) -> u8 {
+    let ceil_log2 = if size == 0 {
+        0
+    } else {
+        64 - (size - 1).leading_zeros()
+    };
+    let min = if solid { 4 } else { 1 };
+    ceil_log2.saturating_sub(16).clamp(min, 6) as u8
+}
+
 /// Encode a dictionary size (in bytes) into the upper bits of the FILE_HEAD
 /// flags word (bits 5–7). Test-only: production code passes the 3-bit
 /// `window_bits` straight to [`build_file_header`], so this pins the
@@ -455,9 +488,10 @@ mod tests {
         assert_eq!(hdr.len(), 13);
         // Type byte at offset 2.
         assert_eq!(hdr[2], MAIN_HEAD);
-        // Flags at offset 3-4 (LONG_BLOCK always set).
+        // Flags at offset 3-4: WinRAR never sets LONG_BLOCK on the main
+        // header (it has no data area).
         let flags = u16::from_le_bytes([hdr[3], hdr[4]]);
-        assert_ne!(flags & LONG_BLOCK, 0);
+        assert_eq!(flags & LONG_BLOCK, 0);
         // head_size at offset 5-6.
         let head_size = u16::from_le_bytes([hdr[5], hdr[6]]);
         assert_eq!(head_size, MAIN_HEADER_SIZE);
@@ -619,6 +653,36 @@ mod tests {
                 "unp_ver {unp_ver} must not carry a record"
             );
         }
+    }
+
+    /// WinRAR's archive-wide `FHD` window bits (verified against 6.23 `-ma4`).
+    #[test]
+    fn dict_bits_follow_winrar() {
+        for (size, solid, bits) in [
+            (0u64, false, 1),
+            (60_000, false, 1),
+            (200_000, false, 2),
+            (500_000, false, 3),
+            (2_000_000, false, 5),
+            (8_000_000, false, 6),
+            (60_000, true, 4),
+            (500_000, true, 4),
+            (2_000_000, true, 5),
+            (8_000_000, true, 6),
+        ] {
+            assert_eq!(dict_bits(size, solid), bits, "size={size} solid={solid}");
+        }
+    }
+
+    /// Level 0 writes a RAR 2.x member in a v29 container, unless encrypted
+    /// (the `-p` layout is the v29 one) or the container itself is older.
+    #[test]
+    fn member_unp_ver_turns_level0_into_20_only_for_v29() {
+        assert_eq!(member_unp_ver(29, 0, false), 20);
+        assert_eq!(member_unp_ver(29, 0, true), 29);
+        assert_eq!(member_unp_ver(29, 3, false), 29);
+        assert_eq!(member_unp_ver(15, 0, false), 15);
+        assert_eq!(member_unp_ver(20, 0, false), 20);
     }
 
     #[test]

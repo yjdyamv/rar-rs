@@ -826,6 +826,7 @@ impl RarArchive {
                         0
                     },
                     rar4_run_has_member: false,
+                    rar4_dict_bits: None,
                 },
                 rar4: Rar4Append::default(),
                 compression: CompressionSettings {

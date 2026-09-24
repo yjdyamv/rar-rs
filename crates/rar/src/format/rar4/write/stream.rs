@@ -264,11 +264,13 @@ pub(super) fn add_rar4_file_streaming(
     // run (and drops the encoder state the trial may have advanced).
     let solid_continuation = track_rar4_solid_member(cx, method, file_size);
 
-    let ext_time = crate::format::rar4::write::build_member_ext_time(
+    let member_unp_ver = crate::format::rar4::write::member_unp_ver(
         cx.write_ctx().solid.rar4_unp_ver,
-        mtime,
-        Some(mtime_ns),
+        level,
+        password,
     );
+    let ext_time =
+        crate::format::rar4::write::build_member_ext_time(member_unp_ver, mtime, Some(mtime_ns));
     let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
     let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(name);
     let unpacked_size = file_size;
@@ -296,6 +298,7 @@ pub(super) fn add_rar4_file_streaming(
                 None,
                 false,
                 false,
+                member_unp_ver,
             )?;
             const COPY: u64 = 1 << 20;
             let mut pos = 0u64;
@@ -332,6 +335,7 @@ pub(super) fn add_rar4_file_streaming(
                     solid_continuation,
                     attr,
                     comment: None,
+                    unp_ver: member_unp_ver,
                 };
                 emit_rar4_split(
                     cx,
@@ -365,6 +369,7 @@ pub(super) fn add_rar4_file_streaming(
         attr,
         0,
         chunks,
+        member_unp_ver,
     );
     cx.report_progress(file_size, file_size);
     Ok(())

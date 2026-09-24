@@ -212,6 +212,13 @@ pub(crate) struct SolidChain {
     /// True once the current RAR4 solid run has emitted a member, so the next
     /// compressed member is flagged as a chain continuation (`FHD_SOLID`).
     pub rar4_run_has_member: bool,
+    /// WinRAR's archive-wide `FHD` dictionary/window bits for a RAR4 archive
+    /// (see `format::rar4::write::dict_bits`), computed once a batch of
+    /// members is known (`add_batch`) so every FILE_HEAD declares the same
+    /// window WinRAR would. `None` when the member set is not known upfront
+    /// (single-add streaming); emission then falls back to a per-member safe
+    /// value.
+    pub rar4_dict_bits: Option<u8>,
 }
 
 impl Default for SolidChain {
@@ -226,6 +233,7 @@ impl Default for SolidChain {
             legacy_encoder: None,
             rar4_unp_ver: 29,
             rar4_run_has_member: false,
+            rar4_dict_bits: None,
         }
     }
 }

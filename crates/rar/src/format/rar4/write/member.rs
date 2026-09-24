@@ -77,8 +77,8 @@ pub(super) fn push_rar4_entry(
     attr: u32,
     data_offset: u64,
     chunks: Vec<crate::model::DataChunk>,
+    unp_ver: u8,
 ) {
-    let unp_ver = cx.write_ctx().solid.rar4_unp_ver;
     cx.push_entry(crate::engine::ArchiveEntry {
         header: crate::model::FileHeader {
             name,
@@ -347,11 +347,13 @@ pub(crate) fn add_rar4_data(
     // in lockstep.
     let solid_continuation = track_rar4_solid_member(cx, method, unpacked_size);
 
-    let ext_time = crate::format::rar4::write::build_member_ext_time(
+    let member_unp_ver = crate::format::rar4::write::member_unp_ver(
         cx.write_ctx().solid.rar4_unp_ver,
-        mtime,
-        Some(mtime_ns),
+        level,
+        cx.password().is_some_and(|pw| !pw.is_empty()),
     );
+    let ext_time =
+        crate::format::rar4::write::build_member_ext_time(member_unp_ver, mtime, Some(mtime_ns));
 
     // Member-level encryption (WinRAR `-p`), dispatched on the cipher
     // generation (see `rar4_member_encrypt`). The header carries the
@@ -390,6 +392,7 @@ pub(crate) fn add_rar4_data(
                 comment.clone(),
                 false,
                 false,
+                member_unp_ver,
             )?;
             push_rar4_entry(
                 cx,
@@ -415,6 +418,7 @@ pub(crate) fn add_rar4_data(
                     is_final: true,
                     extra_data: Vec::new(),
                 }],
+                member_unp_ver,
             );
             cx.report_progress(file_size, file_size);
             Ok(())
@@ -435,6 +439,7 @@ pub(crate) fn add_rar4_data(
                     solid_continuation,
                     attr,
                     comment: comment.clone(),
+                    unp_ver: member_unp_ver,
                 };
                 emit_rar4_split(cx, &params, volume_size, packed_size, |_, offset, len| {
                     Ok(Cow::Borrowed(
@@ -459,6 +464,7 @@ pub(crate) fn add_rar4_data(
                 attr,
                 0,
                 chunks,
+                member_unp_ver,
             );
             cx.report_progress(file_size, file_size);
             Ok(())

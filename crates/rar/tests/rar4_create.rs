@@ -9,7 +9,7 @@ use support::*;
 
 use rar_rs::{
     ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EntryWriteOptions,
-    ExtractOptions, OpenOptions, SolidMode, WriterOptions, discover_volumes,
+    ExtractOptions, OpenOptions, SolidMode, WriteEntry, WriterOptions, discover_volumes,
 };
 use std::io::Write;
 
@@ -118,7 +118,9 @@ fn create_rar4_store_single_roundtrip() {
     assert_eq!(entries[0].name(), "hello.txt");
     assert_eq!(entries[0].size(), content.len() as u64);
     assert_eq!(entries[0].crc32(), Some(crate_crc(content)));
-    assert_eq!(entries[0].version(), ArchiveVersion::V29);
+    // Level 0 ("STORE") writes a RAR 2.x member inside the v29 container,
+    // exactly like WinRAR's -m0.
+    assert_eq!(entries[0].version(), ArchiveVersion::V20);
 
     let out = archive
         .read_entry(archive.unique_entry("hello.txt").unwrap())
@@ -1103,7 +1105,7 @@ fn create_rar4_exttime_mtime_ns_roundtrip() {
         WriterOptions::default().compression(ArchiveVersion::V29),
     )
     .expect("create");
-    archive.add_path(&src, ewo(0)).expect("add"); // STORE keeps the member trivially small
+    archive.add_path(&src, ewo(3)).expect("add"); // level ≥1 keeps unp_ver 29 (the ext-time carrier)
     archive.finish().expect("close");
 
     // The FILE_HEAD must carry FHD_EXTTIME (0x1000).
@@ -1134,6 +1136,103 @@ fn create_rar4_exttime_mtime_ns_roundtrip() {
     );
 }
 
+/// A RAR4 archive's members as `(name, dict bits, unp_ver)`, walked from the
+/// signature past the 13-byte main header.
+fn rar4_member_shape(raw: &[u8]) -> Vec<(String, u16, u8)> {
+    let mut out = Vec::new();
+    let mut pos = 7 + 13;
+    while pos + 32 <= raw.len() && raw[pos + 2] == 0x74 {
+        let flags = u16::from_le_bytes([raw[pos + 3], raw[pos + 4]]);
+        let hs = u16::from_le_bytes([raw[pos + 5], raw[pos + 6]]) as usize;
+        let packed = u32::from_le_bytes(raw[pos + 7..pos + 11].try_into().unwrap()) as usize;
+        let ns = u16::from_le_bytes([raw[pos + 26], raw[pos + 27]]) as usize;
+        let name = String::from_utf8_lossy(&raw[pos + 32..pos + 32 + ns]).into_owned();
+        out.push((name, (flags >> 5) & 7, raw[pos + 24]));
+        pos += hs + packed;
+    }
+    out
+}
+
+/// RAR4 `-m0` header shape, byte-identical to WinRAR 3.00–6.23 `-ma4`: the main
+/// header sets no `LONG_BLOCK`, each member declares `unp_ver` 20 and the
+/// archive-wide `FHD` window bits for the largest member (1 for ≤128 KiB).
+#[test]
+fn create_rar4_m0_headers_match_winrar() {
+    let dir = make_temp_dir();
+    let arc = dir.path().join("m0.rar");
+    let a = vec![7u8; 60_000];
+    let b = vec![9u8; 40_000];
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default().compression(ArchiveVersion::V29),
+    )
+    .unwrap();
+    archive
+        .add_batch(&[
+            WriteEntry::Bytes {
+                name: "a.bin",
+                data: &a,
+                options: ewo(0),
+            },
+            WriteEntry::Bytes {
+                name: "b.bin",
+                data: &b,
+                options: ewo(0),
+            },
+        ])
+        .unwrap();
+    archive.finish().unwrap();
+
+    let raw = std::fs::read(&arc).unwrap();
+    assert_eq!(
+        u16::from_le_bytes([raw[10], raw[11]]),
+        0,
+        "the main header must not set LONG_BLOCK"
+    );
+    assert_eq!(
+        rar4_member_shape(&raw),
+        vec![("a.bin".to_string(), 1, 20), ("b.bin".to_string(), 1, 20)]
+    );
+}
+
+/// The `FHD` window bits are archive-wide (the *largest* member), not per
+/// member: an 8 MiB + 10 KiB pair declares 6 for both, matching WinRAR.
+#[test]
+fn create_rar4_dict_bits_follow_the_largest_member() {
+    let dir = make_temp_dir();
+    let arc = dir.path().join("big.rar");
+    let big = vec![7u8; 8 * 1024 * 1024];
+    let small = vec![9u8; 10_000];
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default().compression(ArchiveVersion::V29),
+    )
+    .unwrap();
+    archive
+        .add_batch(&[
+            WriteEntry::Bytes {
+                name: "big.bin",
+                data: &big,
+                options: ewo(5),
+            },
+            WriteEntry::Bytes {
+                name: "small.bin",
+                data: &small,
+                options: ewo(5),
+            },
+        ])
+        .unwrap();
+    archive.finish().unwrap();
+
+    let shape = rar4_member_shape(&std::fs::read(&arc).unwrap());
+    assert_eq!(shape.len(), 2);
+    assert_eq!(shape[0], ("big.bin".to_string(), 6, 29), "big member");
+    assert_eq!(
+        shape[1].1, 6,
+        "the small member shares the archive-wide bits"
+    );
+}
+
 /// RAR 1.5/2.x members (`-ma15`/`-ma2`, `unp_ver` 15/20) predate the FILE_HEAD
 /// extended-time area; emitting one shifts the data offset their readers
 /// expect and breaks the header CRC (UnRAR 2.90: "the file header is
@@ -1161,7 +1260,7 @@ fn create_rar4_pre_rar3_members_carry_no_exttime_record() {
         let mut archive =
             ArchiveWriter::create_with(&arc, WriterOptions::default().compression(version))
                 .unwrap();
-        archive.add_path(&src, ewo(0)).unwrap();
+        archive.add_path(&src, ewo(3)).unwrap();
         archive.finish().unwrap();
 
         let raw = std::fs::read(&arc).unwrap();
