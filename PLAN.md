@@ -399,6 +399,14 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **工程**
 
+- **`reconstruct` 的 legacy 源重建为 RAR4 容器、成员是 STORE（`-m0`）**
+  （2026-09-24）：`reconstruct_rebuilds_a_legacy_archive_as_rar4`
+  此前断言重建成员 的 `version()` 为 `V29`，与 `-m0` 契约（v29 容器里 level-0
+  成员写 `unp_ver` 20）冲突而长期红——测试不在 CI，自 `50720c9`（RAR4
+  头对齐）起未更新。库行为 **正确**（对拍官方 5.91 `-m0` fixture：其成员头
+  `unp_ver=20`）；现改为断言 **容器**是 RAR4（`detect::RAR4_SIGNATURE`）且成员为
+  `V20`，并点明「`reconstruct` 保留的是容器族，不是成员 codec」。**别把成员改回
+  29**——那会破坏 `-m0` 的逐 字节对拍。
 - **移植去重与两处小一致性**（2026-09-24）：① `header_crc16`（RAR4 头 CRC =
   CRC-32 截 16 位）此前在 `format/rar4/write/mod.rs` 与
   `archive/rar4_edit/mod.rs` 各有一份，现移入 `format/shared/checksum.rs`

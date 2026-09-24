@@ -55,12 +55,13 @@ impl ReconstructReport {
 /// Rebuild `src` into `dst`, keeping only the members that decode and verify,
 /// like WinRAR's `rar r` when no recovery record is present.
 ///
-/// The rebuilt container keeps the source family: legacy (RAR 1.3–4.x)
-/// members are rebuilt as RAR4 (`v29`), everything else as RAR5 (`v50`).
-/// Members are stored uncompressed (STORE) and their per-member timestamps
-/// and attributes are not preserved. One member is held in memory at a time;
-/// the per-member and total read caps are lifted so a large member is not
-/// refused mid-recovery.
+/// The rebuilt container keeps the source family: a legacy (RAR 1.3–4.x)
+/// source is rebuilt as a RAR4 container (written at `v29`), everything else
+/// as RAR5 (`v50`). Members are stored uncompressed (STORE), so a legacy
+/// member carries the official `-m0` `unp_ver` 20 rather than the container's
+/// 29; per-member timestamps and attributes are not preserved. One member is
+/// held in memory at a time; the per-member and total read caps are lifted so
+/// a large member is not refused mid-recovery.
 ///
 /// An archive whose *headers* cannot be parsed at all fails to open and is
 /// reported as an error: only payload damage is salvaged here.
