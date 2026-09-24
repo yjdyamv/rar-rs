@@ -388,6 +388,27 @@ pub(crate) fn build_ext_time(mtime: u32, mtime_ns: Option<u32>) -> Option<Vec<u8
     Some(ext)
 }
 
+/// `FHD_EXTTIME` record for a member of a container whose member version is
+/// `unp_ver`.
+///
+/// RAR 1.5/2.x (`unp_ver` 15/20) predate the extended-time area: their readers
+/// size a plain file header as `32 + name` (no record), so an extra one shifts
+/// the data offset and the header CRC no longer covers what they expect —
+/// UnRAR 2.90 reports "the file header is corrupt" on such a member (verified
+/// against the reference build). Only v29 members carry the record.
+pub(crate) fn build_member_ext_time(
+    unp_ver: u8,
+    mtime: u32,
+    mtime_ns: Option<u32>,
+) -> Option<Vec<u8>> {
+    if crate::version::LegacyCodec::from_unp_ver(unp_ver)
+        != Some(crate::version::LegacyCodec::Rar29)
+    {
+        return None;
+    }
+    build_ext_time(mtime, mtime_ns)
+}
+
 /// Encode a dictionary size (in bytes) into the upper bits of the FILE_HEAD
 /// flags word (bits 5–7). Test-only: production code passes the 3-bit
 /// `window_bits` straight to [`build_file_header`], so this pins the
@@ -578,6 +599,26 @@ mod tests {
             0xB,
             "PRESENT + 3 tick bytes"
         );
+    }
+
+    /// The extended-time area is a RAR 3.0+ (`v29`) construct: RAR 1.5/2.x
+    /// readers size a plain file header as `32 + name` (no record), so a
+    /// record there shifts their data offset and the header CRC no longer
+    /// covers what they expect (UnRAR 2.90 reported "the file header is
+    /// corrupt"). Only v29 members may carry one.
+    #[test]
+    fn member_ext_time_is_v29_only() {
+        let odd = local_civil_to_epoch(1_700_000_001); // odd local second
+        let even = local_civil_to_epoch(1_700_000_002);
+        assert!(build_member_ext_time(29, odd, None).is_some());
+        assert!(build_member_ext_time(29, even, Some(123_456_700)).is_some());
+        assert!(build_member_ext_time(29, even, None).is_none());
+        for unp_ver in [15, 20, 26] {
+            assert!(
+                build_member_ext_time(unp_ver, odd, Some(123_456_700)).is_none(),
+                "unp_ver {unp_ver} must not carry a record"
+            );
+        }
     }
 
     #[test]

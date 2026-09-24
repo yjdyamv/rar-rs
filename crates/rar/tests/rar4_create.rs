@@ -1134,6 +1134,49 @@ fn create_rar4_exttime_mtime_ns_roundtrip() {
     );
 }
 
+/// RAR 1.5/2.x members (`-ma15`/`-ma2`, `unp_ver` 15/20) predate the FILE_HEAD
+/// extended-time area; emitting one shifts the data offset their readers
+/// expect and breaks the header CRC (UnRAR 2.90: "the file header is
+/// corrupt"). The writer must emit the record for v29 members only.
+#[test]
+fn create_rar4_pre_rar3_members_carry_no_exttime_record() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("stamp.bin");
+    std::fs::write(&src, b"timestamped payload").unwrap();
+    // A sub-second mtime forces the record where the format has one.
+    let target = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(target))
+        .unwrap();
+
+    for (version, tag, wants_record) in [
+        (ArchiveVersion::V15, "v15", false),
+        (ArchiveVersion::V20, "v20", false),
+        (ArchiveVersion::V29, "v29", true),
+    ] {
+        let arc = dir.path().join(format!("{tag}.rar"));
+        let mut archive =
+            ArchiveWriter::create_with(&arc, WriterOptions::default().compression(version))
+                .unwrap();
+        archive.add_path(&src, ewo(0)).unwrap();
+        archive.finish().unwrap();
+
+        let raw = std::fs::read(&arc).unwrap();
+        let members = scan_rar4_members(&raw);
+        assert_eq!(members.len(), 1, "{tag}");
+        let (name, flags, _packed, _unpacked, _attr) = &members[0];
+        assert_eq!(name, "stamp.bin", "{tag}");
+        assert_eq!(
+            flags & 0x1000 != 0,
+            wants_record,
+            "{tag}: FHD_EXTTIME must be set only for v29 members"
+        );
+    }
+}
+
 /// RAR4 solid (`-s`): one persistent encoder carries the LZ window and Huffman
 /// tables across the members of a solid run. The first member has no
 /// FHD_SOLID; every later compressed member does; the main header carries

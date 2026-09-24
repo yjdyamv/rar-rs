@@ -104,7 +104,11 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
         method,
         attr,
     } = prepared;
-    let ext_time = crate::format::rar4::write::build_ext_time(mtime, Some(mtime_ns));
+    let ext_time = crate::format::rar4::write::build_member_ext_time(
+        cx.write_ctx().solid.rar4_unp_ver,
+        mtime,
+        Some(mtime_ns),
+    );
 
     let password_encrypted = cx.password().is_some_and(|pw| !pw.is_empty());
     let mut salt = None;
