@@ -351,6 +351,40 @@ mod tests {
         assert_eq!(std::fs::read(&volumes[1]).unwrap(), original);
     }
 
+    /// WinRAR names a trailer `.rev` after the *recovery* volume number, so its
+    /// padding can be narrower than the data volumes' (three `set.part01.rar`
+    /// data volumes protected by one `set.part1.rev`, when it estimates ten or
+    /// more volumes). A rebuilt volume must take the data set's own padding;
+    /// copying the `.rev` width wrote `set.part2.rar`, which the reader then
+    /// could not find and reported as a missing volume.
+    #[test]
+    fn trailer_rev_with_narrower_padding_rebuilds_with_the_data_sets_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let volumes = write_fake_volumes_padded(dir.path(), &[1024, 1024, 700], 2);
+        // Zero the seven-byte tails so the builder picks the trailer layout.
+        for path in &volumes {
+            let mut bytes = std::fs::read(path).unwrap();
+            let len = bytes.len();
+            bytes[len - TRAILER_LEN..].fill(0);
+            std::fs::write(path, &bytes).unwrap();
+        }
+        let revs = build_recovery_volumes_for_set_chunked(&volumes, 1, 64).unwrap();
+        // The builder names it `set.part01.rev`; the narrower recovery-number
+        // width is the shape WinRAR produces.
+        let narrow = dir.path().join("set.part1.rev");
+        std::fs::rename(&revs[0], &narrow).unwrap();
+
+        let original = std::fs::read(&volumes[1]).unwrap();
+        std::fs::remove_file(&volumes[1]).unwrap();
+        let rebuilt = rebuild_missing_volumes_chunked(&volumes[0], None, None, 64).unwrap();
+        assert_eq!(
+            rebuilt,
+            vec![dir.path().join("set.part02.rar")],
+            "the rebuilt volume must keep the data set's two-digit padding"
+        );
+        assert_eq!(std::fs::read(&rebuilt[0]).unwrap(), original);
+    }
+
     /// A failed streaming build removes the temps it wrote and leaves a
     /// pre-existing `.rev` untouched.
     #[test]
