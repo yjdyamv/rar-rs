@@ -1,7 +1,10 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-24（本轮：**RAR4 分卷创建对齐官方新式命名 + `.rev` trailer
-> 布局**——创建默认改 `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
+> 最后核对：2026-09-26（本轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志
+> （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O 失败）；并给 napi
+> 补 `oldNumbering`、改正其 `volumeSize` 文档。前轮：**RAR4 分卷创建对齐官方新式
+> 命名 + `.rev` trailer 布局**——创建默认改 `base.partNN.rar`（零填充）+ 每卷主头
+> `MHD_NEWNUMBERING`
 >
 > - 官方 20 字节 `ENDARC`（其后 7 零字节），`.rev` 随之自动落 trailer 布局、
 >   名字自动成 `base.partNN.rev`；新增 `-vn`（`old_numbering`）回旧式
@@ -133,6 +136,25 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **RAR5 并行 batch 的内存成员带时间**（2026-09-26）：`prepare_batch_wave` 的
+  `BatchEntry::Bytes` 分支只算秒值、`time_extra` 恒为 `None`，而 Windows
+  上头内不 写 mtime，于是经 `add_batch` 添加的内存成员（绑定的 `bytes`
+  条目、`-si`）mtime 落成 0——顺序 `add_bytes_rar5`
+  则有（`mtime_record`）。现同一 wave 预计算一次 `mtime_record`（Unix 返回
+  `None`、头内字段承载；Windows 返回 FILE_TIME 记录）， Bytes
+  分支共用，两条路径一致。契约由
+  `rar50_roundtrip::batch_bytes_member_carries_the_current_time` 钉住；napi 的
+  `extractArchive honors freshen and update (-f/-u)` 用例随之转绿（另把该套件里
+  `core errors …` 用例用可压缩全零当多卷语料的错误构造改为 `level: 0`）。
+- **`-vn`（`old_numbering`）只作用于 RAR 1.5–4.x**（2026-09-26）：该标志此前被
+  `write_file_path` / `commit_pending` / `rar4_staged_volume_path` 无条件读取，
+  而这些助手也被 RAR5（与 RAR13）共用——于是 `rar a -vn -v...` 写 RAR5/RAR13
+  分卷时，安装阶段按**旧的** `.rar`/`.rNN` 名字去找暂存卷（实际暂存是新式
+  `partNN`），报 `I/O error: 系统找不到指定的文件`、整次创建失败（`docs/CLI.md`
+  一直写的是「ignored by other formats」，即代码背离文档）。现新增
+  `old_volume_numbering()` = `is_rar4() && old_numbering`，四处读取统一经它：
+  RAR5 恒新式、RAR13 恒旧式。契约由
+  `rar4_create::old_numbering_is_ignored_by_rar5_and_rar13` 钉住。
 - **legacy 分卷成员的 chunk 上限**（2026-09-24）：`MAX_MEMBER_CHUNKS` 此前只在
   RAR5 目录构建器里执行，RAR4/RAR13 的跨卷合并（`format/shared/split.rs` 的
   `SplitMerge`）不设上限——手工构造的、每条 continuation 头极小的卷集能让单个成员
@@ -399,6 +421,12 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **工程**
 
+- **napi 补 `oldNumbering` 并改正其文档（2026-09-26）**：`CreateArchiveOptions`
+  补 `old_numbering`（`oldNumbering`，映射库 `WriterOptions::old_numbering` /
+  CLI `-vn`）——它是本轮唯一「库与 CLI 已公开、绑定拿不到」的开关；同时改正
+  `volume_size` 的文档（RAR4 默认已是零填充 `partNN`，旧式命名只在 rar13 或
+  `oldNumbering` 时出现；此前注释写「legacy 用 `name.rar`/`name.r00`」）。契约由
+  JS `createArchive oldNumbering selects the old-style RAR4 volume names` 钉住。
 - **`reconstruct` 的 legacy 源重建为 RAR4 容器、成员是 STORE（`-m0`）**
   （2026-09-24）：`reconstruct_rebuilds_a_legacy_archive_as_rar4`
   此前断言重建成员 的 `version()` 为 `V29`，与 `-m0` 契约（v29 容器里 level-0
