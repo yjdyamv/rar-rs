@@ -37,7 +37,7 @@ version`，以及 `crates/rar-napi/package.json` 的
 
 改版本号还要刷新 `Cargo.lock` 与 `fuzz/Cargo.lock`（两个 CI 检查都带
 `--locked`）。 四者一致由 `lint` job 的 "Workspace versions agree"
-步骤守住。**当前同为 `0.11.0`。**
+步骤守住。**当前同为 `0.12.0`。**
 
 ## 2 · 模块地图
 

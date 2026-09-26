@@ -58,7 +58,7 @@
 
 ### 发布收口
 
-- [ ] **打包与发布顺序**：`rar-rs`（0.11.0）已能 `cargo package` 并通过校验；
+- [ ] **打包与发布顺序**：`rar-rs`（0.12.0）已能 `cargo package` 并通过校验；
       `rar-cli` 依赖 workspace 内的 `rar-rs`，需先发布 `rar-rs`。三个 crate 的
       `readme` / `keywords` / `documentation` / `categories` 元数据已补齐，但
       `rar-cli` / `rar-rs-napi` 仍因 `rar-rs` 未发布而无法解析依赖。
