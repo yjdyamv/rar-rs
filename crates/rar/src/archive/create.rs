@@ -253,7 +253,7 @@ impl RarArchive {
                 parent, tmp_base, ..
             }) => {
                 let volume = self.write_ctx().output.current_volume;
-                if self.write_ctx().output.old_numbering {
+                if self.old_volume_numbering() {
                     volume_path_rar4(parent, tmp_base, volume)
                 } else {
                     volume_path(parent, tmp_base, volume)
@@ -801,7 +801,7 @@ impl RarArchive {
             flags |= MHD_VOLUME;
             // WinRAR flags every volume of a modern set MHD_NEWNUMBERING
             // (`.partNN.rar` names); `-vn` (`old_numbering`) leaves it clear.
-            if !self.write_ctx().output.old_numbering {
+            if !self.old_volume_numbering() {
                 flags |= MHD_NEWNUMBERING;
             }
             // The first volume of a RAR4 set flags MHD_FIRSTVOLUME alongside
@@ -980,13 +980,24 @@ impl RarArchive {
         Ok(hasher.finalize())
     }
 
+    /// Whether `-vn` (`old_numbering`) is in effect for this writer. Only the
+    /// RAR 1.5–4.x family has two naming schemes — RAR13 always uses the old
+    /// names (selected per call site, not this flag) and RAR5 only has the
+    /// zero-padded ones — so the flag is ignored everywhere else. The RAR5
+    /// commit path shares the RAR4 staged/final naming helpers, so an
+    /// ungated flag would look for the wrong staged files and fail the
+    /// install.
+    fn old_volume_numbering(&self) -> bool {
+        self.is_rar4() && self.write_ctx().output.old_numbering
+    }
+
     /// Staged path of volume `n` (1-based) of a RAR4 set under the naming
     /// policy: `{base}.partN.rar` for the default new numbering,
     /// `{base}.rar`/`{base}.rNN` for `-vn` (old numbering). The staged names
     /// must match the final family so the recovery-volume builder recognises
     /// them (`identify` keys off the name shape).
     fn rar4_staged_volume_path(&self, parent: &Path, tmp_base: &str, n: usize) -> PathBuf {
-        if self.write_ctx().output.old_numbering {
+        if self.old_volume_numbering() {
             volume_path_rar4(parent, tmp_base, n)
         } else {
             volume_path(parent, tmp_base, n)
@@ -997,7 +1008,7 @@ impl RarArchive {
     /// policy, with the part number zero-padded to `width` digits for the
     /// new numbering (matching WinRAR's `part01..part15`).
     fn rar4_final_volume_path(&self, parent: &Path, base: &str, n: usize, width: usize) -> PathBuf {
-        if self.write_ctx().output.old_numbering {
+        if self.old_volume_numbering() {
             volume_path_rar4(parent, base, n)
         } else {
             volume_path_padded(parent, base, n, width)

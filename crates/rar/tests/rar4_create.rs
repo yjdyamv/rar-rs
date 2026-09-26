@@ -2126,6 +2126,69 @@ fn rar4_multivolume_uses_new_numbering_and_the_volume_endarc() {
     }
 }
 
+/// `-vn` (`old_numbering`) is a RAR4-only naming flag: RAR5 and RAR13 ignore
+/// it. RAR5 must still produce the zero-padded `partNN` set and RAR13 always
+/// the old `.rar`/`.rNN` one. An ungated flag made the volume commit look for
+/// old-style staged files that were never written, so the install failed with
+/// a file-not-found I/O error instead of ignoring the flag.
+#[test]
+fn old_numbering_is_ignored_by_rar5_and_rar13() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("big.bin");
+    let mut data = vec![0u8; 250_000];
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for b in &mut data {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+    }
+    std::fs::write(&src, &data).unwrap();
+
+    let rar5 = dir.path().join("five.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &rar5,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V50)
+            .old_numbering(true)
+            .volume_size(100_000),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(0)).unwrap();
+    let report = archive.finish().unwrap();
+    let volumes = report.volume_paths();
+    assert!(volumes.len() >= 2, "{volumes:?}");
+    for (index, path) in volumes.iter().enumerate() {
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            format!("five.part{}.rar", index + 1),
+            "RAR5 ignores -vn"
+        );
+    }
+
+    let rar13 = dir.path().join("dos.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &rar13,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V14)
+            .old_numbering(true)
+            .volume_size(100_000),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(0)).unwrap();
+    let report = archive.finish().unwrap();
+    let volumes = report.volume_paths();
+    assert!(volumes.len() >= 2, "{volumes:?}");
+    assert_eq!(volumes[0].file_name().unwrap(), "dos.rar");
+    for (index, path) in volumes.iter().enumerate().skip(1) {
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            format!("dos.r{:02}", index - 1),
+            "RAR13 always uses the old names"
+        );
+    }
+}
+
 /// RAR4 volume sets build legacy `.rev` recovery volumes through the same
 /// library surface as RAR5 sets (dispatched by the volume signature).
 #[test]
