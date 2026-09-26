@@ -270,8 +270,9 @@
   ——零填充 `base.partNN.rar`（宽度 = 总卷数位数）+ 每卷主头 `MHD_NEWNUMBERING`
   - 每卷 20 字节 `ENDARC`（`0x400e`、`head_size 0x0014`、ENDARC 之前整卷的
     CRC-32、 0 起卷号、7 零尾；单卷归档仍 7
-    字节）；`-vn`（`old_numbering`）回旧式 `.rar/.rNN` 且不置位；RAR13
-    一律旧式。`discover_volumes` 两族都认（任意卷入口），
+    字节）；`-vn`（`old_numbering`）回旧式 `.rar/.rNN` 且不置位（**仅 RAR
+    1.5–4.x**；RAR5 恒新式，标志被忽略）；RAR13 一律旧式。`discover_volumes`
+    两族都认（任意卷入口），
     新式集运行期（`rv`/`rc`/编辑）用**首卷**寻址（官方同）。solid repack
     重发成员时 **保留原 DOS 属性字节**。
 - **RAR4 block envelope（`format/rar4/envelope.rs`）** — RAR 1.5–4.x
