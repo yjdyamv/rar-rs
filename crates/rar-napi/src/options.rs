@@ -152,6 +152,7 @@ impl CreateArchiveOptions {
     let opts = rar_rs::WriterOptions::new()
       .solid_mode(solid_mode)
       .quick_open(self.quick_open.unwrap_or(false))
+      .old_numbering(self.old_numbering.unwrap_or(false))
       .blake2(self.blake2.unwrap_or(false))
       .encrypt_headers(self.encrypt_headers.unwrap_or(false))
       .save_ctime(self.save_ctime.unwrap_or(false))

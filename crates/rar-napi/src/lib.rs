@@ -69,9 +69,15 @@ pub struct CreateArchiveOptions {
   /// `recovery_volume_count`.
   pub recovery_volumes_percent: Option<f64>,
   /// Volume size in bytes; when set, produces multi-volume archives
-  /// (`name.part1.rar`, ... for RAR5/RAR7; `name.rar`/`name.r00`, ... for
-  /// the legacy and RAR 1.3/1.4 formats).
+  /// (zero-padded `name.partNN.rar` for RAR5/RAR7 and RAR 1.5/2.x/4.x;
+  /// RAR 1.3/1.4 always use the old-style `name.rar`/`name.r00`, and
+  /// `oldNumbering` selects that naming for RAR4 too).
   pub volume_size: Option<f64>,
+  /// Name a RAR4 volume set the old way (WinRAR `-vn`): `{base}.rar`,
+  /// `{base}.r00`, ... with no `MHD_NEWNUMBERING`, instead of the default
+  /// zero-padded `{base}.partNN.rar` naming. Ignored by RAR 1.3/1.4 (always
+  /// old naming) and RAR5/RAR7 (single new naming).
+  pub old_numbering: Option<bool>,
   /// Reject the operation when the summed input size exceeds this.
   pub max_total_bytes: Option<f64>,
   /// Dictionary size (like WinRAR `-md<size>[k|m|g]`, no unit = MiB).
