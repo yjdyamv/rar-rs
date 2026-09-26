@@ -235,6 +235,67 @@ test('creates 10+ volumes in natural discovery order', async () => {
   }
 })
 
+test('createArchive oldNumbering selects the old-style RAR4 volume names', async () => {
+  const dir = tempDir()
+  try {
+    const { readMember } = await import('../index.js')
+    const payload = Buffer.alloc(90_000, 0x42)
+
+    const modern = join(dir, 'modern.rar')
+    const modernRes = await createArchive({
+      outPath: modern,
+      format: 'rar4',
+      level: 0,
+      volumeSize: 32 * 1024,
+      entries: [{ kind: 'bytes', name: 'big.bin', data: payload }],
+    })
+    assert.ok(modernRes.files.length >= 2, `expected volumes, got ${modernRes.files.join(', ')}`)
+    // Default RAR4 naming is the zero-padded `name.partNN.rar` set.
+    const width = String(modernRes.files.length).length
+    assert.deepEqual(
+      modernRes.files,
+      modernRes.files.map((_, index) =>
+        join(dir, `modern.part${String(index + 1).padStart(width, '0')}.rar`),
+      ),
+    )
+    assert.deepEqual(await readMember(modernRes.files[0], 'big.bin'), payload)
+
+    const legacy = join(dir, 'legacy.rar')
+    const legacyRes = await createArchive({
+      outPath: legacy,
+      format: 'rar4',
+      level: 0,
+      volumeSize: 32 * 1024,
+      oldNumbering: true,
+      entries: [{ kind: 'bytes', name: 'big.bin', data: payload }],
+    })
+    assert.deepEqual(
+      legacyRes.files,
+      legacyRes.files.map((_, index) =>
+        index === 0 ? join(dir, 'legacy.rar') : join(dir, `legacy.r${String(index - 1).padStart(2, '0')}`),
+      ),
+    )
+    assert.equal(legacyRes.files.length, modernRes.files.length, 'same data, same volume count')
+    assert.deepEqual(await readMember(legacyRes.files[0], 'big.bin'), payload)
+
+    // RAR5 has a single new naming, so the flag is ignored there.
+    const rar5 = join(dir, 'five.rar')
+    const rar5Res = await createArchive({
+      outPath: rar5,
+      level: 0,
+      volumeSize: 32 * 1024,
+      oldNumbering: true,
+      entries: [{ kind: 'bytes', name: 'big.bin', data: payload }],
+    })
+    assert.ok(
+      rar5Res.files.every((path) => /\.part\d+\.rar$/.test(path)),
+      `RAR5 ignores oldNumbering, got ${rar5Res.files.join(', ')}`,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('creates archives via parallel batch with mixed entries', async (t) => {
   const dir = tempDir()
   try {
@@ -959,6 +1020,10 @@ test('core errors expose stable napi codes and archive testing is async', async 
       outPath: rrSet,
       volumeSize: 100_000,
       recoveryPercent: 10,
+      // Stored (level 0) so the 200 KB member really exceeds the 100 KB
+      // volume size and the set splits; compressible zeros would fit in one
+      // volume and the per-volume record assertion below would be vacuous.
+      level: 0,
       entries: [{ kind: 'bytes', name: 'a.bin', data: Buffer.alloc(200_000) }],
     })
     const rrVolumes = readdirSync(dir).filter((name) => name.startsWith('rr-set') && name.endsWith('.rar'))
