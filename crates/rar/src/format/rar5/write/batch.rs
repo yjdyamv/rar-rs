@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "parallel")]
-use super::add::{owner_extra_cfg, time_extra_cfg};
+use super::add::{mtime_record, owner_extra_cfg, time_extra_cfg};
 #[cfg(feature = "parallel")]
 use super::layout::{dict_params_for, sample_is_incompressible};
 #[cfg(feature = "parallel")]
@@ -135,6 +135,18 @@ fn prepare_batch_wave(
 ) -> RarResult<Vec<(usize, PreparedEntry)>> {
     use rayon::prelude::*;
 
+    // A raw-bytes member (`-si` / the binding's `bytes` entries) has no
+    // filesystem metadata, so its only time is "now". On Windows the header
+    // carries no mtime and the FILE_TIME extra record is the sole carrier
+    // (exactly as the sequential `add_bytes_rar5` builds it); on Unix the
+    // record is `None` and the header's 4-byte mtime carries it. Computing it
+    // once per wave keeps `Engine` out of the parallel closure.
+    let bytes_mtime = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32;
+    let bytes_time_extra = mtime_record(cx, bytes_mtime);
+
     let ctx = BatchPrepareCtx {
         password: cx.password(),
         blake2: cx.write_ctx().meta.blake2,
@@ -157,16 +169,19 @@ fn prepare_batch_wave(
                 .map(|&(idx, entry)| {
                     let _guard = BatchWorkerGuard::new();
                     let prepared = match entry {
-                        BatchEntry::Bytes { name, data, level } => {
-                            let mtime = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as u32;
-                            prepare_data_entry(
-                                &ctx, name, data, level, 0o100644, mtime, None, None, false, idx,
-                                progress,
-                            )
-                        }
+                        BatchEntry::Bytes { name, data, level } => prepare_data_entry(
+                            &ctx,
+                            name,
+                            data,
+                            level,
+                            0o100644,
+                            bytes_mtime,
+                            bytes_time_extra.clone(),
+                            None,
+                            false,
+                            idx,
+                            progress,
+                        ),
                         BatchEntry::File { path, name, level } => {
                             prepare_file_entry(&ctx, path, name, level, idx, progress)
                         }

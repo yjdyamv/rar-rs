@@ -159,7 +159,7 @@ fn time_extra_for(
 /// running platform's form. `None` when the platform stores the time in the
 /// header itself (Unix) or when times are switched off — on Windows the
 /// header carries no mtime, so the record is the only carrier.
-fn mtime_record(cx: &dyn Engine, mtime: u32) -> Option<Vec<u8>> {
+pub(super) fn mtime_record(cx: &dyn Engine, mtime: u32) -> Option<Vec<u8>> {
     if !crate::platform::file_time_is_windows() || !cx.write_ctx().meta.mtime || mtime == 0 {
         return None;
     }

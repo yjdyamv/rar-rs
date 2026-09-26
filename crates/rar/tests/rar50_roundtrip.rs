@@ -1128,6 +1128,42 @@ fn batch_archive_matches_sequential_bytes() {
     );
 }
 
+/// A raw-bytes member added through the batch path carries the current wall
+/// clock, exactly like the sequential `add_bytes` (`-si`). The parallel wave
+/// used to hand the header no time record, so on Windows — where the header
+/// carries no mtime — the member surfaced with `mtime == 0` and `freshen` /
+/// `update` treated it as the epoch.
+#[test]
+fn batch_bytes_member_carries_the_current_time() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("bytes.rar");
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32
+    };
+    let before = now();
+
+    let mut ar = ArchiveWriter::create(&path).unwrap();
+    ar.add_batch(&[rar_rs::WriteEntry::Bytes {
+        name: "a.txt",
+        data: b"archived",
+        options: opts(3),
+    }])
+    .unwrap();
+    ar.finish().unwrap();
+
+    let after = now();
+    let archive = ArchiveReader::open(&path).unwrap();
+    let entry = archive.entries().next().expect("one member");
+    assert!(
+        (before..=after).contains(&entry.mtime()),
+        "batch bytes member mtime {} must be within {before}..={after}",
+        entry.mtime()
+    );
+}
+
 #[cfg(feature = "parallel")]
 #[test]
 fn batch_encrypted_archive_roundtrips() {
