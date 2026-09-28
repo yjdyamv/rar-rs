@@ -613,20 +613,32 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             .map(|c| c.name.clone())
             .chain(args.stdin_name.iter().cloned())
             .collect();
+        // `-ver` keeps the replaced member as an old version; the sort keeps
+        // the per-name version walk deterministic.
+        let mut incoming_names: Vec<String> = incoming.iter().cloned().collect();
+        incoming_names.sort();
+        let version_spec = misc.version_control.clone();
         crate::transaction::update_archive_transactionally_with(
             std::path::Path::new(archive_path),
             |staged_path| {
                 let mut editor = open_editor(staged_path, password.as_deref())?;
-                let to_drop: Vec<String> = editor
-                    .entries()
-                    .map(|entry| entry.name().to_string())
-                    .filter(|n| incoming.contains(n))
-                    .collect();
-                if !to_drop.is_empty() {
-                    let refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
-                    let plan =
-                        editor_delete_plan(&editor, &refs).map_err(|e| format!("replace: {e}"))?;
-                    editor.apply(plan).map_err(|e| format!("replace: {e}"))?;
+                if let Some(spec) = &version_spec {
+                    let edits = crate::edit::version_edits(&editor, &incoming_names, spec)
+                        .map_err(|e| format!("replace: {e}"))?;
+                    crate::edit::apply_version_edits(&mut editor, edits)
+                        .map_err(|e| format!("replace: {e}"))?;
+                } else {
+                    let to_drop: Vec<String> = editor
+                        .entries()
+                        .map(|entry| entry.name().to_string())
+                        .filter(|n| incoming.contains(n))
+                        .collect();
+                    if !to_drop.is_empty() {
+                        let refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
+                        let plan = editor_delete_plan(&editor, &refs)
+                            .map_err(|e| format!("replace: {e}"))?;
+                        editor.apply(plan).map_err(|e| format!("replace: {e}"))?;
+                    }
                 }
                 // Deleting every member erases the staged archive (like
                 // `rar d`); when the replacement removed the only members,

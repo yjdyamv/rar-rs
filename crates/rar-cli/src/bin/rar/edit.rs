@@ -104,6 +104,121 @@ pub(crate) fn editor_chained_rename_plan(
     Ok(plan)
 }
 
+/// Non-RAR5 members keep versions in the name (`name;N`); RAR5 marks them
+/// with a VERSION extra record.
+pub(crate) enum VersionEdits {
+    /// RAR5: one plan carrying every version marking and cap drop.
+    Rar5(rar_rs::EditPlan),
+    /// RAR 1.5–4.x: rename old versions to `name;N`, then drop the overflow.
+    Legacy {
+        renames: Vec<(String, String)>,
+        drops: Vec<String>,
+    },
+}
+
+/// Build the WinRAR `-ver[n]` edits for the existing members named by
+/// `names`: every version of each member shifts up by one (the current
+/// member becomes version 1), and a `-verN` cap drops the overflow. The
+/// archive family decides whether the version lives in the header (RAR5) or
+/// in the name (RAR 1.5–4.x).
+pub(crate) fn version_edits(
+    editor: &rar_rs::ArchiveEditor,
+    names: &[String],
+    spec: &str,
+) -> Result<VersionEdits, String> {
+    let max_versions = if spec.is_empty() {
+        None
+    } else {
+        spec.parse::<u32>().ok().filter(|count| *count > 0)
+    };
+    let legacy = editor.entries().next().is_some_and(|entry| {
+        let version = entry.version();
+        version.is_legacy() || version.is_rar13()
+    });
+    let mut plan = rar_rs::EditPlan::new();
+    let mut renames: Vec<(String, String)> = Vec::new();
+    let mut drops: Vec<String> = Vec::new();
+    for name in names {
+        let mut members: Vec<(u64, rar_rs::EntryId, String)> = Vec::new();
+        for entry in editor.entries() {
+            let member = entry.name();
+            let version = if member == name {
+                Some(entry.file_version().unwrap_or(0))
+            } else if legacy {
+                member
+                    .strip_prefix(&format!("{name};"))
+                    .and_then(|suffix| suffix.parse::<u64>().ok())
+            } else {
+                None
+            };
+            if let Some(version) = version {
+                members.push((version, entry.id(), member.to_string()));
+            }
+        }
+        members.sort_by_key(|(version, _, _)| *version);
+        for (version, id, member) in members.iter().rev() {
+            let new_version = version
+                .checked_add(1)
+                .ok_or_else(|| format!("version number overflow for {member}"))?;
+            if max_versions.is_some_and(|limit| u64::from(limit) < new_version) {
+                if legacy {
+                    drops.push(member.clone());
+                } else {
+                    plan = plan.delete(*id);
+                }
+            } else if legacy {
+                renames.push((member.clone(), format!("{name};{new_version}")));
+            } else {
+                plan = plan.set_file_version(*id, new_version);
+            }
+        }
+    }
+    if legacy {
+        Ok(VersionEdits::Legacy { renames, drops })
+    } else {
+        Ok(VersionEdits::Rar5(plan))
+    }
+}
+
+/// Apply [`version_edits`] to the staged archive in order (the RAR5 header
+/// rewrite, then the legacy name-based drop).
+pub(crate) fn apply_version_edits(
+    editor: &mut rar_rs::ArchiveEditor,
+    edits: VersionEdits,
+) -> Result<(), String> {
+    match edits {
+        VersionEdits::Rar5(plan) => {
+            if !plan.is_empty() {
+                editor
+                    .apply(plan)
+                    .map_err(|error| format!("mark staged versions: {error}"))?;
+            }
+        }
+        VersionEdits::Legacy { renames, drops } => {
+            if !renames.is_empty() {
+                let pairs: Vec<(&str, &str)> = renames
+                    .iter()
+                    .map(|(old, new)| (old.as_str(), new.as_str()))
+                    .collect();
+                let plan = editor_chained_rename_plan(editor, &pairs)
+                    .map_err(|error| format!("rename staged members: {error}"))?;
+                editor
+                    .apply(plan)
+                    .map_err(|error| format!("rename staged members: {error}"))?;
+            }
+            if !drops.is_empty() {
+                let names: Vec<&str> = drops.iter().map(String::as_str).collect();
+                let plan = editor_delete_plan(editor, &names)
+                    .map_err(|error| format!("delete staged versions: {error}"))?;
+                editor
+                    .apply(plan)
+                    .map_err(|error| format!("delete staged versions: {error}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Delete members from an archive without rebuilding it (mirrors `rar d`).
 pub(crate) fn cmd_delete(args: &DeleteArgs, misc: &common::MiscSwitches) -> CliResult<()> {
     let archive_path = &args.archive;

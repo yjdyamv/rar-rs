@@ -8,8 +8,8 @@ use crate::format::rar5::{
     ARCHIVE_FLAG_VOLUME, ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA,
     BLOCK_FLAG_SKIP_IF_UNKNOWN, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_END_ARCHIVE,
     BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER, COMP_INFO_DICT_SHIFT,
-    COMP_INFO_METHOD_SHIFT, COMP_INFO_SOLID_BIT, EXTRA_FILE_HASH, EXTRA_FILE_TIME, FILE_FLAG_CRC32,
-    FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX,
+    COMP_INFO_METHOD_SHIFT, COMP_INFO_SOLID_BIT, EXTRA_FILE_HASH, EXTRA_FILE_TIME,
+    EXTRA_FILE_VERSION, FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX,
 };
 use crate::vint;
 
@@ -170,6 +170,20 @@ impl FileHeader {
 
         frame_block(&body)
     }
+}
+
+/// Serialize a VERSION extra record (`EXTRA_FILE_VERSION`) for an old file
+/// version (WinRAR `-ver`): `[flags vint][version vint]`. The flags field is
+/// reserved and always zero (libarchive's reader discards it).
+pub(crate) fn version_extra_record(version: u64) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend(vint::encode(0u64)); // reserved flags
+    body.extend(vint::encode(version));
+    let mut out = Vec::with_capacity(3 + body.len());
+    out.extend(vint::encode((1 + body.len()) as u64));
+    out.extend(vint::encode(EXTRA_FILE_VERSION));
+    out.extend(body);
+    out
 }
 
 /// Serialize a BLAKE2sp hash extra record for file headers.
@@ -446,6 +460,15 @@ pub(crate) fn vint_fixed(value: u64, width: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The VERSION extra record is byte-identical to WinRAR's: `[size=3]
+    /// [type=0x04][flags=0][version]`.
+    #[test]
+    fn version_record_bytes_match_winrar() {
+        assert_eq!(version_extra_record(1), vec![0x03, 0x04, 0x00, 0x01]);
+        assert_eq!(version_extra_record(2), vec![0x03, 0x04, 0x00, 0x02]);
+        assert_eq!(version_extra_record(0), vec![0x03, 0x04, 0x00, 0x00]);
+    }
 
     #[test]
     fn rar7_max_dictionary_roundtrips_exactly() {
