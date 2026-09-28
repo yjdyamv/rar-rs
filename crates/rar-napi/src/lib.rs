@@ -251,6 +251,13 @@ pub struct ExtractArchiveOptions {
   pub skip_links: Option<bool>,
   /// Extract links with dangerous targets as-is (like `-ola`).
   pub allow_unsafe_links: Option<bool>,
+  /// Keep Windows-hostile member names as written (like `-oni`): an exact
+  /// reserved device name such as `aux` is extracted literally instead of
+  /// becoming `_aux`. A no-op on POSIX.
+  pub allow_incompatible_names: Option<bool>,
+  /// Write a member that carries a VERSION extra record as `name;N` instead
+  /// of `name` (WinRAR's `-ver` extraction). Off by default.
+  pub file_version_suffix: Option<bool>,
 }
 
 #[cfg(test)]
