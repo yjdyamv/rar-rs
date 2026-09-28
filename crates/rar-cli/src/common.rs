@@ -634,33 +634,153 @@ pub struct MiscSwitches {
 /// (`-m`, `-p`, `-v`, `-s`) keep their rar spelling via `short`.
 /// Used only by the `rar` binary.
 #[allow(dead_code)]
+/// Exact rar switch spellings and the clap long option they map to. A long
+/// value may already carry its own `=value` (`-ad1`, `-o+`), and `-idq` /
+/// `-inul` share `--quiet`.
+const EXACT_SWITCHES: &[(&str, &str)] = &[
+    ("-da", "--delete-archive"),
+    ("-df", "--delete-after"),
+    ("-t", "--test-after"),
+    ("-as", "--sync-archive"),
+    ("-ds", "--no-sort"),
+    ("-se", "--solid-reset=extension"),
+    ("-sv", "--solid-reset=volume"),
+    ("-sd", "--solid-reset=continuous"),
+    ("-so", "--stdout"),
+    ("-htb", "--blake2"),
+    ("-htc", "--hash-crc"),
+    ("-ao", "--archive-attr"),
+    ("-oc", "--ntfs-compressed"),
+    ("-mlp", "--large-pages"),
+    ("-m", "--level"),
+    ("-p", "--password-prompt"),
+    ("-p-", "--password="),
+    ("-hp", "--header-encrypt"),
+    ("-ag", "--auto-name"),
+    ("-dh", "--shared-files"),
+    ("-dr", "--recycle-bin"),
+    ("-dw", "--wipe"),
+    ("-vp", "--pause-volumes"),
+    ("-vd", "--erase-disk"),
+    ("-vn", "--old-numbering"),
+    ("-v-", "--no-volumes"),
+    ("-v", "--auto-volumes"),
+    ("-s", "--solid"),
+    ("-ep", "--basename-only"),
+    ("-ep1", "--exclude-base-dir"),
+    ("-ep2", "--full-paths"),
+    ("-ep3", "--full-paths-drive"),
+    ("-r", "--recurse"),
+    ("-r0", "--recurse-zero"),
+    ("-r-", "--no-recurse"),
+    ("-cl", "--lowercase"),
+    ("-cu", "--uppercase"),
+    ("-y", "--yes"),
+    ("-idq", "--quiet"),
+    ("-inul", "--quiet"),
+    ("-ierr", "--err"),
+    ("-iver", "--version-info"),
+    ("-cfg-", "--no-config"),
+    ("-idc", "--id=c"),
+    ("-idd", "--id=d"),
+    ("-idn", "--id=n"),
+    ("-idp", "--id=p"),
+    ("-@", "--list-files="),
+    ("-@+", "--list-files=+"),
+    ("-ac", "--clear-attr"),
+    ("-ai", "--ignore-attr"),
+    ("-os", "--save-streams"),
+    ("-oni", "--allow-names"),
+    ("-ow", "--owner"),
+    ("-o+", "--overwrite=always"),
+    ("-o-", "--overwrite=never"),
+    ("-or", "--auto-rename"),
+    ("-kb", "--keep-broken"),
+    ("-tk", "--keep-time"),
+    ("-tl", "--set-latest-time"),
+    ("-tsp", "--ts-preserve"),
+    ("-ol-", "--skip-links"),
+    ("-ola", "--unsafe-links"),
+    ("-ol", "--links"),
+    ("-oh", "--hardlinks"),
+    ("-f", "--freshen"),
+    ("-u", "--update-files"),
+    ("-k", "--lock"),
+    ("-ed1", "--no-empty-dirs1"),
+    ("-ed", "--no-empty-dirs"),
+    ("-c-", "--no-comment"),
+    ("-ad", "--append-dir"),
+    ("-ad1", "--append-dir=1"),
+    ("-ad2", "--append-dir=2"),
+];
+
+/// Prefix rar switches and the `--long=` template their remainder is
+/// appended to. **Sorted by descending prefix length** so a longer, more
+/// specific switch always wins (`-mcl` before `-mc`, `-ver` before `-v`,
+/// `-ep4` before `-e`); `prefix_table_is_longest_first` pins the order.
+const PREFIX_SWITCHES: &[(&str, &str)] = &[
+    ("-ieml", "--email="),
+    ("-ilog", "--log-errors="),
+    ("-ioff", "--power-off="),
+    ("-isnd", "--sound="),
+    ("-limt", "--time-limit="),
+    ("-mcl", "--long-match="),
+    ("-mdx", "--dict-extract="),
+    ("-ep4", "--exclude-prefix="),
+    ("-sfx", "--sfx-module="),
+    ("-ver", "--version-control="),
+    ("-log", "--log="),
+    ("-mt", "--threads="),
+    ("-ms", "--store-types="),
+    ("-mc", "--mc="),
+    ("-me", "--me="),
+    ("-ma", "--archive-format="),
+    ("-md", "--dict-size="),
+    ("-ap", "--archive-path="),
+    ("-x@", "--exclude-list="),
+    ("-n@", "--include-list="),
+    ("-hp", "--header-encrypt="),
+    ("-rv", "--recovery-volumes="),
+    ("-sc", "--charset="),
+    ("-ri", "--priority="),
+    ("-oi", "--identical="),
+    ("-om", "--mark-web="),
+    ("-am", "--archive-meta="),
+    ("-op", "--output-path="),
+    ("-ta", "--after="),
+    ("-tb", "--before="),
+    ("-tn", "--tn-filter="),
+    ("-to", "--to-filter="),
+    ("-tk", "--keep-time="),
+    ("-ts", "--ts="),
+    ("-ag", "--auto-name="),
+    ("-sl", "--size-less="),
+    ("-sm", "--size-more="),
+    ("-si", "--stdin-name="),
+    ("-m", "--level="),
+    ("-p", "--password="),
+    ("-v", "--volume-size="),
+    ("-x", "--exclude="),
+    ("-n", "--include="),
+    ("-w", "--work-dir="),
+    ("-e", "--exclude-attrs="),
+    ("-z", "--comment-file="),
+];
+
+/// Normalize rar-style switches (`-htb`, `-ep1`, `-m3`, `-ap<path>`, ...)
+/// into clap long options. clap short flags are single characters, so the
+/// multi-character rar forms are mapped here; the single-character forms
+/// (`-m`, `-p`, `-v`, `-s`) keep their rar spelling via `short`.
+///
+/// Simple spellings live in [`EXACT_SWITCHES`] and [`PREFIX_SWITCHES`]; only
+/// the three that need real logic stay as code below. Used only by the `rar`
+/// binary.
+#[allow(dead_code)]
 pub fn normalize_switch(arg: &str) -> String {
-    if let Some(rest) = arg.strip_prefix("-mt") {
-        return format!("--threads={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-ms") {
-        return format!("--store-types={rest}");
-    }
-    if arg == "-da" {
-        return "--delete-archive".into();
-    }
-    if arg == "-df" {
-        return "--delete-after".into();
-    }
-    if arg == "-t" {
-        return "--test-after".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-ep4") {
-        return format!("--exclude-prefix={rest}");
-    }
-    if arg == "-as" {
-        return "--sync-archive".into();
-    }
-    if arg == "-ds" {
-        return "--no-sort".into();
-    }
-    // WinRAR accepts the reset modes both bare (`-se`) and with an equals
-    // sign (`-s=e`); other `-s=` values stay solid parameters.
+    // `-s=<mode>` maps one letter to a full long; `-qo` distinguishes `-`;
+    // and `-rr` mixes a percent (`-rr10%`, bare `-rr`/`-rr%` = 3%) with a
+    // legacy RAR4 parity-sector count (`-rr10`), which `create` turns into a
+    // percentage for RAR5. All three are measured against 6.23.
     if let Some(rest) = arg.strip_prefix("-s=") {
         return match rest {
             "d" => "--solid-reset=continuous".into(),
@@ -669,136 +789,13 @@ pub fn normalize_switch(arg: &str) -> String {
             other => format!("--solid-params={other}"),
         };
     }
-    // WinRAR `-s` modifiers that split the solid compression chain.
-    if arg == "-se" {
-        return "--solid-reset=extension".into();
-    }
-    if arg == "-sv" {
-        return "--solid-reset=volume".into();
-    }
-    if arg == "-sd" {
-        return "--solid-reset=continuous".into();
-    }
-    if arg == "-so" {
-        return "--stdout".into();
-    }
-    if arg == "-htc" {
-        return "--hash-crc".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-mcl") {
-        return format!("--long-match={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-mc") {
-        return format!("--mc={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-me") {
-        return format!("--me={rest}");
-    }
-    if arg == "-ao" {
-        return "--archive-attr".into();
-    }
-    if arg == "-oc" {
-        return "--ntfs-compressed".into();
-    }
-    if arg == "-mlp" {
-        return "--large-pages".into();
-    }
-    if arg == "-dh" {
-        return "--shared-files".into();
-    }
-    if arg == "-dr" {
-        return "--recycle-bin".into();
-    }
-    if arg == "-dw" {
-        return "--wipe".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-mdx") {
-        return format!("--dict-extract={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-ma") {
-        return format!("--archive-format={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-md") {
-        return format!("--dict-size={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-m") {
-        return if rest.is_empty() {
-            "--level".into()
-        } else {
-            format!("--level={rest}")
-        };
-    }
-    if let Some(rest) = arg.strip_prefix("-p") {
-        return if rest.is_empty() {
-            // The caller rejects this form unless secure no-echo prompting is
-            // available. Keep it distinct from `-p-` during normalization.
-            "--password-prompt".into()
-        } else if rest == "-" {
-            // `-p-` explicitly disables password use.
-            "--password=".into()
-        } else {
-            format!("--password={rest}")
-        };
-    }
-    if let Some(rest) = arg.strip_prefix("-ver") {
-        return format!("--version-control={rest}");
-    }
-    if arg == "-vp" {
-        return "--pause-volumes".into();
-    }
-    if arg == "-vd" {
-        return "--erase-disk".into();
-    }
-    if arg == "-vn" {
-        // WinRAR `-vn`: name a RAR4 volume set the old way
-        // (`{base}.rar`/`{base}.rNN`) instead of the zero-padded
-        // `.partNN.rar`. Checked before the `-v<size>` arm below, which
-        // would otherwise read it as `--volume-size=n`.
-        return "--old-numbering".into();
-    }
-    if arg == "-v-" {
-        // WinRAR cancels volume creation with `-v-`; volumes are off by
-        // default here, so this only has to clear a requested size.
-        return "--no-volumes".into();
-    }
-    if arg == "-v" {
-        // Bare `-v` takes no value: with a create command it is volume-size
-        // autodetection (a single archive on a fixed disk, which is our
-        // behavior), and with `l`/`v` it lists every volume of the set.
-        // Translating it to `--volume-size` would make clap consume the
-        // archive path as the size.
-        return "--auto-volumes".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-v") {
-        return format!("--volume-size={rest}");
-    }
-    if arg == "-s" {
-        return "--solid".into();
-    }
-    if arg == "-htb" {
-        return "--blake2".into();
-    }
     if let Some(rest) = arg.strip_prefix("-qo") {
         return match rest {
-            "+" => "--quick-open".into(),
             "-" => "--no-quick-open".into(),
             _ => "--quick-open".into(),
         };
     }
-    if let Some(rest) = arg.strip_prefix("-hp") {
-        return if rest.is_empty() {
-            "--header-encrypt".into()
-        } else {
-            format!("--header-encrypt={rest}")
-        };
-    }
     if let Some(rest) = arg.strip_prefix("-rr") {
-        // `-rr` alone (and `-rr%`) means WinRAR's default 3 percent. `-rrN%`
-        // is a percentage; a bare `-rrN` is a legacy RAR4 parity-sector count
-        // (the record's native unit), which `create` turns into a percentage
-        // for RAR5, whose record is sized by percent only. Both are measured
-        // against 6.23: `-rr10` writes exactly 10 RAR4 parity sectors at any
-        // size, and bare `-rr` matches `-rr3%` for both formats.
         match rest.strip_suffix('%') {
             Some("") => return "--recovery-percent=3".into(),
             Some(percent) => return format!("--recovery-percent={percent}"),
@@ -809,242 +806,16 @@ pub fn normalize_switch(arg: &str) -> String {
         }
         return format!("--recovery-sectors={rest}");
     }
-    if let Some(rest) = arg.strip_prefix("-rv") {
-        return format!("--recovery-volumes={rest}");
-    }
-    if arg == "-ep" {
-        return "--basename-only".into();
-    }
-    if arg == "-ep1" {
-        return "--exclude-base-dir".into();
-    }
-    if arg == "-ep2" {
-        return "--full-paths".into();
-    }
-    if arg == "-ep3" {
-        return "--full-paths-drive".into();
-    }
-    if arg == "-r" {
-        return "--recurse".into();
-    }
-    if arg == "-r0" {
-        return "--recurse-zero".into();
-    }
-    if arg == "-r-" {
-        return "--no-recurse".into();
-    }
-    if arg == "-cl" {
-        return "--lowercase".into();
-    }
-    if arg == "-cu" {
-        return "--uppercase".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-ap") {
-        return format!("--archive-path={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-x@") {
-        return format!("--exclude-list={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-n@") {
-        return format!("--include-list={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-x") {
-        return format!("--exclude={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-n") {
-        return format!("--include={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-sfx") {
-        return format!("--sfx-module={rest}");
-    }
-    if arg == "-y" {
-        return "--yes".into();
-    }
-    if arg == "-idq" || arg == "-inul" {
-        return "--quiet".into();
-    }
-    if arg == "-ierr" {
-        return "--err".into();
-    }
-    if arg == "-iver" {
-        return "--version-info".into();
-    }
-    if arg == "-cfg-" {
-        return "--no-config".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-ieml") {
-        return format!("--email={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-ioff") {
-        return format!("--power-off={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-isnd") {
-        return format!("--sound={rest}");
-    }
-    if arg == "-idc" {
-        return "--id=c".into();
-    }
-    if arg == "-idd" {
-        return "--id=d".into();
-    }
-    if arg == "-idn" {
-        return "--id=n".into();
-    }
-    if arg == "-idp" {
-        return "--id=p".into();
-    }
-    if arg == "-@" {
-        return "--list-files=".into();
-    }
-    if arg == "-@+" {
-        return "--list-files=+".into();
-    }
-    if arg == "-ac" {
-        return "--clear-attr".into();
-    }
-    if arg == "-ai" {
-        return "--ignore-attr".into();
-    }
-    if arg == "-os" {
-        return "--save-streams".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-sc") {
-        return format!("--charset={rest}");
-    }
-    if arg == "-oni" {
-        return "--allow-names".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-ri") {
-        return format!("--priority={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-oi") {
-        return format!("--identical={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-om") {
-        return format!("--mark-web={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-limt") {
-        return format!("--time-limit={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-log") {
-        return format!("--log={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-am") {
-        return format!("--archive-meta={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-ilog") {
-        return format!("--log-errors={rest}");
-    }
-    if arg == "-ow" {
-        return "--owner".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-w") {
-        return format!("--work-dir={rest}");
-    }
-    if arg == "-o+" {
-        return "--overwrite=always".into();
-    }
-    if arg == "-o-" {
-        return "--overwrite=never".into();
-    }
-    if arg == "-or" {
-        return "--auto-rename".into();
-    }
-    if arg == "-kb" {
-        return "--keep-broken".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-op") {
-        return format!("--output-path={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-ta") {
-        return format!("--after={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-tb") {
-        return format!("--before={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-tn") {
-        return format!("--tn-filter={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-to") {
-        return format!("--to-filter={rest}");
-    }
-    if arg == "-tk" {
-        return "--keep-time".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-tk") {
-        // `-tk<date>` sets the archive time.
-        return format!("--keep-time={rest}");
-    }
-    if arg == "-tl" {
-        return "--set-latest-time".into();
-    }
-    if arg == "-tsp" {
-        return "--ts-preserve".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-ts") {
-        return format!("--ts={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-ag") {
-        return if rest.is_empty() {
-            "--auto-name".into()
-        } else {
-            format!("--auto-name={rest}")
-        };
-    }
-    if arg == "-ol-" {
-        return "--skip-links".into();
-    }
-    if arg == "-ola" {
-        return "--unsafe-links".into();
-    }
-    if arg == "-ol" {
-        return "--links".into();
-    }
-    if arg == "-oh" {
-        return "--hardlinks".into();
-    }
-    if arg == "-f" {
-        return "--freshen".into();
-    }
-    if arg == "-u" {
-        return "--update-files".into();
-    }
-    if arg == "-k" {
-        return "--lock".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-sl") {
-        return format!("--size-less={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-sm") {
-        return format!("--size-more={rest}");
-    }
-    if arg == "-ed1" {
-        return "--no-empty-dirs1".into();
-    }
-    if arg == "-ed" {
-        return "--no-empty-dirs".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-e") {
-        return format!("--exclude-attrs={rest}");
-    }
 
-    if arg == "-c-" {
-        return "--no-comment".into();
+    for &(switch, long) in EXACT_SWITCHES {
+        if switch == arg {
+            return long.to_string();
+        }
     }
-    if arg == "-ad" {
-        return "--append-dir".into();
-    }
-    if arg == "-ad1" {
-        return "--append-dir=1".into();
-    }
-    if arg == "-ad2" {
-        return "--append-dir=2".into();
-    }
-    if let Some(rest) = arg.strip_prefix("-si") {
-        return format!("--stdin-name={rest}");
-    }
-    if let Some(rest) = arg.strip_prefix("-z") {
-        return format!("--comment-file={rest}");
+    for &(prefix, long) in PREFIX_SWITCHES {
+        if let Some(rest) = arg.strip_prefix(prefix) {
+            return format!("{long}{rest}");
+        }
     }
     arg.to_string()
 }
@@ -1319,5 +1090,95 @@ mod tests {
             &options,
         );
         assert_eq!(merged, ["a", "--password", "new", "arc.rar"]);
+    }
+
+    /// The prefix scan relies on the table being sorted by descending prefix
+    /// length: a shorter entry before a longer one would shadow it.
+    #[test]
+    fn prefix_table_is_longest_first() {
+        use super::PREFIX_SWITCHES;
+        for pair in PREFIX_SWITCHES.windows(2) {
+            assert!(
+                pair[0].0.len() >= pair[1].0.len(),
+                "{} must not precede {}",
+                pair[1].0,
+                pair[0].0
+            );
+        }
+    }
+
+    /// The order-sensitive mappings a hand-ordered if-chain used to encode:
+    /// a longer prefix must win, and an exact spelling must beat a prefix.
+    #[test]
+    fn switch_tables_resolve_the_order_sensitive_forms() {
+        for (input, expected) in [
+            ("-mlp", "--large-pages"),
+            ("-mcl5", "--long-match=5"),
+            ("-mc5", "--mc=5"),
+            ("-mdx10m", "--dict-extract=10m"),
+            ("-md1m", "--dict-size=1m"),
+            ("-ma4", "--archive-format=4"),
+            ("-msjpg", "--store-types=jpg"),
+            ("-mt8", "--threads=8"),
+            ("-m5", "--level=5"),
+            ("-m", "--level"),
+            ("-ver5", "--version-control=5"),
+            ("-vn", "--old-numbering"),
+            ("-v-", "--no-volumes"),
+            ("-v", "--auto-volumes"),
+            ("-v5m", "--volume-size=5m"),
+            ("-limt10", "--time-limit=10"),
+            ("-log=name", "--log==name"),
+            ("-ep4src", "--exclude-prefix=src"),
+            ("-ep2", "--full-paths"),
+            ("-e+rh", "--exclude-attrs=+rh"),
+            ("-s", "--solid"),
+            ("-se", "--solid-reset=extension"),
+            ("-s=e", "--solid-reset=extension"),
+            ("-s=x", "--solid-params=x"),
+            ("-scuc", "--charset=uc"),
+            ("-si-", "--stdin-name=-"),
+            ("-sl1k", "--size-less=1k"),
+            ("-sm1k", "--size-more=1k"),
+            ("-sfxmod", "--sfx-module=mod"),
+            ("-t", "--test-after"),
+            ("-tsp", "--ts-preserve"),
+            ("-ts1", "--ts=1"),
+            ("-tk", "--keep-time"),
+            ("-tk20250101", "--keep-time=20250101"),
+            ("-p", "--password-prompt"),
+            ("-p-", "--password="),
+            ("-psecret", "--password=secret"),
+            ("-qo", "--quick-open"),
+            ("-qo+", "--quick-open"),
+            ("-qo-", "--no-quick-open"),
+            ("-rr", "--recovery-percent=3"),
+            ("-rr%", "--recovery-percent=3"),
+            ("-rr10%", "--recovery-percent=10"),
+            ("-rr10", "--recovery-sectors=10"),
+            ("-ol-", "--skip-links"),
+            ("-ola", "--unsafe-links"),
+            ("-ol", "--links"),
+            ("-o+", "--overwrite=always"),
+            ("-o-", "--overwrite=never"),
+            ("-or", "--auto-rename"),
+            ("-opout", "--output-path=out"),
+            ("-x@list", "--exclude-list=list"),
+            ("-n@list", "--include-list=list"),
+            ("-x*.tmp", "--exclude=*.tmp"),
+            ("-n*.txt", "--include=*.txt"),
+            ("-iemlme@x", "--email=me@x"),
+            ("-ioff60", "--power-off=60"),
+            ("-isnd-", "--sound=-"),
+            ("-ilogerr", "--log-errors=err"),
+            ("-hp", "--header-encrypt"),
+            ("-hpsecret", "--header-encrypt=secret"),
+            ("-rv3", "--recovery-volumes=3"),
+            ("-agfmt", "--auto-name=fmt"),
+        ] {
+            assert_eq!(normalize_switch(input), expected, "{input}");
+        }
+        // An unknown switch is left for clap to reject.
+        assert_eq!(normalize_switch("-unknown"), "-unknown");
     }
 }
