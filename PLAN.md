@@ -3,11 +3,13 @@
 > 最后核对：2026-09-28（本轮：**Windows `NOT_CONTENT_INDEXED` 属性位对齐**——创建
 > （RAR5/RAR4）写官方同样存储的 `0x2000`、抽取还原该位、`lt` 首列渲染 `I`；
 > 对拍官方 6.23/7.23 钉住「官方只额外保留这一位，offline/pinned/no-scrub
-> 也丢」；以及**抽取时用文件替换同名空目录**（官方 7.30 行为）—— 前轮：**`-vn`
-> 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志 （此前它泄漏到共用的命名助手，让
-> RAR5 分卷创建在安装阶段 I/O 失败）；并给 napi 补 `oldNumbering`、改正其
-> `volumeSize` 文档。更前轮：**RAR4 分卷创建对齐官方新式 命名 + `.rev` trailer
-> 布局**——创建默认改 `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
+> 也丢」；以及**抽取时用文件替换同名空目录**（官方 7.30 行为）——并顺带把 7.30
+> `Rar.txt` 逐项审查发现的缺口记入「待办」（裸 `-v`、`-ver` 读取、`la`/`va`
+> 命令、 `-limt`、保留名清洗等）。 前轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13
+> 忽略该标志 （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O
+> 失败）；并给 napi 补 `oldNumbering`、改正其 `volumeSize` 文档。更前轮：**RAR4
+> 分卷创建对齐官方新式 命名 + `.rev` trailer 布局**——创建默认改
+> `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
 >
 > - 官方 20 字节 `ENDARC`（其后 7 零字节），`.rev` 随之自动落 trailer 布局、
 >   名字自动成 `base.partNN.rev`；新增 `-vn`（`old_numbering`）回旧式
@@ -72,6 +74,41 @@
 
 - [ ] **RAR4 solid 归档 MT**：legacy solid 链保持串行；成员级并行需跨成员共享
       窗口，属结构性代价（RAR5 的 chunk 级 MT 已兑现）。
+
+### 2026-09-28 官方 7.30 文档审查发现的缺口（待决定）
+
+按本地安装的 RAR 7.30 beta 1 `Rar.txt` + `WhatsNew.txt` 与实测逐项核对，
+以下都是与官方可见行为的偏离（按影响排序）：
+
+- [ ] **裸 `-v` 被当成 `--volume-size`**：官方裸 `-v`（无尺寸）在创建时是
+      「卷大小自适应」（本机硬盘上即单文件），在 `l`/`v` 列表时是「列出卷集全部
+      卷」。我们把裸 `-v` 翻译成需要取值的 `--volume-size`，于是 `a -v arc` 把
+      `arc` 当尺寸报错、`l -v arc` 直接缺 ARCHIVE 报错（官方两者都 exit 0）。
+      修法：裸 `-v` 单独成标志；列表侧 = 逐卷 `discover_volumes` 再各自列出
+      （官方 `lb -v` 就是各卷目录顺序拼接）。
+- [ ] **`-ver[n]` 只写不读**：`FileHeader::version` 已从 VERSION extra
+      记录解析， 但库里再无消费者——列表不显示 `name;n`（官方 `lt` 显示
+      `f.txt;1`）、抽取不按 版本过滤（官方默认只解当前版本，`-ver` 全解、`-verN`
+      只解第 N 版并去后缀）、 选择器也不认 `f.txt;5`。
+- [ ] **`la`/`lba`/`va`/`vba` 命令被拒**（7.30 新增，`Rar.txt` 的 `l[a,b,t]`/
+      `v[a,b,t]`）：官方 exit 0，我们 `unknown command` exit 7。另外服务块列表
+      （`lt` 已显示 STM 流、`lta`/`vta` 还有 `Service: EOF`）我们完全不列。
+- [ ] **`-limt<sec>` 未接**（`Rar.txt` 运行时限；官方超时报 exit 15）：
+      `rar t -limt1` 官方 exit 0，我们 `unexpected argument '-l'` exit 7。库已有
+      cancel 钩子，落地只需一个计时器并把超时与用户取消区分（exit 15 vs 255）。
+- [ ] **Windows 保留/歧义成员名我们整轮拒绝**：`sanitize_archive_path` 对设备名
+      （`aux.txt`）、尾部点/空格、`:` 直接报 `Security` 并中止，官方默认是
+      **清洗**（去尾部点/空格、设备名前加 `_`）后正常抽取，`-oni` 才按原名。实测
+      官方解 `aux.txt` 成员得 `aux.txt`（用 `\\?\` 字面路径），我们 exit 2
+      什么也 不写。`-oni` 目前也只是「接受但不生效」。
+- [ ] **`-da`/`-df` 删除失败未报 exit 14**（7.30 第 6 条）：我们 `-da` 映射
+      fatal(2)、 `-df` 映射 warning(1)。另注意方向相反的一处：只读归档官方 `-da`
+      删不掉报 exit 14，我们反而删得掉（`-df` 两边都删得掉）。
+- [ ] **`-tn`/`-to`/`-ta`/`-tb` 多修饰符与 OR 逻辑**：官方 `-tnmc30d` 同时作用于
+      mtime 与 ctime、`-tnco30d -tnmo20d` 是 OR；`filters.rs` 只保留**最后一个**
+      修饰符、`o` 仅注释「无效果」，即 `-tnmc30d` 实际只按 ctime。
+- [ ] **非空目录挡路时的退出码**：我们 fatal(2) vs 官方 create-error(9)；要新增
+      `ErrorCode` 变体，属 API 决策（上轮已记在「已修」条目内）。
 
 **有意不做（设计决定，别当缺口修）：**
 
