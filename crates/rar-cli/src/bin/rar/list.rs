@@ -11,6 +11,50 @@ use crate::ops;
 fn filter_names(args: &ListArgs, misc: &common::MiscSwitches) -> Result<Vec<String>, String> {
     crate::listfile::expand(&args.names, misc.list_files.as_deref())
 }
+
+/// Run a listing body over the volumes of the set when bare `-v`
+/// ([`MiscSwitches::auto_volumes`]) is active, otherwise over the single
+/// archive path given on the command line.
+///
+/// WinRAR's bare `-v` "list all volumes" is per-volume: it scans each volume
+/// file and prints the file headers found in it (a multi-volume member appears
+/// once per volume, exactly like opening that volume on its own). Starting
+/// from `set.part3.rar` lists volumes 3..N, so the slice keeps the given
+/// volume as the first one.
+fn for_each_listed_volume<F>(
+    args: &ListArgs,
+    misc: &common::MiscSwitches,
+    mut list: F,
+) -> CliResult<()>
+where
+    F: FnMut(&rar_rs::ArchiveReader, &str, &[String]) -> CliResult<()>,
+{
+    let names = filter_names(args, misc).map_err(error::CliError::from)?;
+    if !misc.auto_volumes {
+        let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
+        list(&rar, &args.archive, &names)?;
+        return write_list_logs(misc, &rar, &args.archive, &names);
+    }
+    let mut volumes = rar_rs::discover_volumes(std::path::Path::new(&args.archive));
+    if volumes.is_empty() {
+        volumes.push(std::path::PathBuf::from(&args.archive));
+    }
+    // `discover_volumes` always starts at part 1; bare `-v` starts at the
+    // volume named on the command line.
+    if let Some(start) = volumes
+        .iter()
+        .position(|path| path == std::path::Path::new(&args.archive))
+    {
+        volumes.drain(..start);
+    }
+    for path in volumes {
+        let name = path.to_string_lossy().into_owned();
+        let rar = ops::open_reader_quick(&path, args.password.password.as_deref())?;
+        list(&rar, &name, &names)?;
+        write_list_logs(misc, &rar, &name, &names)?;
+    }
+    Ok(())
+}
 /// Find a string in member contents (like `rar i<string>`).
 ///
 /// The search string is attached to the command: `rar i<str> archive.rar`,
@@ -97,10 +141,10 @@ pub(crate) fn cmd_find(cmd: &str, args: &[String], password: Option<&str>) -> Cl
 /// Verbose list (like `rar v`): adds the packed size, ratio and checksum
 /// columns.
 pub(crate) fn cmd_verbose_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
-    let names = filter_names(args, misc).map_err(error::CliError::from)?;
-    let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
-    ops::list_entries(&rar, &args.archive, &names, true);
-    write_list_logs(misc, &rar, &args.archive, &names)
+    for_each_listed_volume(args, misc, |rar, name, names| {
+        ops::list_entries(rar, name, names, true);
+        Ok(())
+    })
 }
 
 /// Test archive contents (like `rar t`), optionally filtered to the
@@ -134,27 +178,27 @@ pub(crate) fn cmd_test(args: &ListArgs, misc: &common::MiscSwitches) -> CliResul
 }
 
 pub(crate) fn cmd_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
-    let names = filter_names(args, misc).map_err(error::CliError::from)?;
-    let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
-    ops::list_entries(&rar, &args.archive, &names, false);
-    write_list_logs(misc, &rar, &args.archive, &names)
+    for_each_listed_volume(args, misc, |rar, name, names| {
+        ops::list_entries(rar, name, names, false);
+        Ok(())
+    })
 }
 
 /// Bare list (`lb` / `vb`): member names only.
 pub(crate) fn cmd_list_bare(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
-    let names = filter_names(args, misc).map_err(error::CliError::from)?;
-    let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
-    ops::list_bare(&rar, &args.archive, &names);
-    write_list_logs(misc, &rar, &args.archive, &names)
+    for_each_listed_volume(args, misc, |rar, name, names| {
+        ops::list_bare(rar, name, names);
+        Ok(())
+    })
 }
 
 /// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
 /// method per member, in the spirit of the official `rar lt`.
 pub(crate) fn cmd_list_technical(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
-    let names = filter_names(args, misc).map_err(error::CliError::from)?;
-    let rar = ops::open_reader_quick(&args.archive, args.password.password.as_deref())?;
-    ops::list_technical(&rar, &args.archive, &names);
-    write_list_logs(misc, &rar, &args.archive, &names)
+    for_each_listed_volume(args, misc, |rar, name, names| {
+        ops::list_technical(rar, name, names);
+        Ok(())
+    })
 }
 
 /// `-log` for the listing commands: every listed member name.

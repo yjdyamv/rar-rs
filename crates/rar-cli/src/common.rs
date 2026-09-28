@@ -515,6 +515,11 @@ pub struct MiscSwitches {
     #[arg(global = true, long = "pause-volumes")]
     #[allow(dead_code)]
     pub pause_volumes: bool,
+    /// Bare `-v`: volume-size autodetection on create (a fixed disk yields a
+    /// single archive, which is what we do) and "list every volume" on
+    /// `l`/`v`.
+    #[arg(global = true, long = "auto-volumes")]
+    pub auto_volumes: bool,
     /// Erase disk contents before creating volume (`-vd`; removable
     /// media only, never touched)
     #[arg(global = true, long = "erase-disk")]
@@ -752,12 +757,16 @@ pub fn normalize_switch(arg: &str) -> String {
         // default here, so this only has to clear a requested size.
         return "--no-volumes".into();
     }
+    if arg == "-v" {
+        // Bare `-v` takes no value: with a create command it is volume-size
+        // autodetection (a single archive on a fixed disk, which is our
+        // behavior), and with `l`/`v` it lists every volume of the set.
+        // Translating it to `--volume-size` would make clap consume the
+        // archive path as the size.
+        return "--auto-volumes".into();
+    }
     if let Some(rest) = arg.strip_prefix("-v") {
-        return if rest.is_empty() {
-            "--volume-size".into()
-        } else {
-            format!("--volume-size={rest}")
-        };
+        return format!("--volume-size={rest}");
     }
     if arg == "-s" {
         return "--solid".into();

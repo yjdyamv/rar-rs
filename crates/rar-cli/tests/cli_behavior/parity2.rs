@@ -592,6 +592,61 @@ fn cli_volume_set_listing_matches_winrar() {
     );
 }
 
+/// Bare `-v` (no size) takes no value: on a create it is volume-size
+/// autodetection (WinRAR yields a single archive on a fixed disk, ours must
+/// too — it used to consume the archive path as a size), and on `l`/`v` it
+/// lists every volume of the set. The all-volumes listing is the per-volume
+/// scan concatenated, matching WinRAR.
+#[test]
+fn cli_bare_v_autodetects_and_lists_every_volume() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.bin"), vec![b'a'; 12_000]).unwrap();
+    std::fs::write(dir.path().join("b.bin"), vec![b'b'; 12_000]).unwrap();
+
+    // `-v` with no size must not eat the archive path as its value.
+    let single = dir.path().join("single.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-v", "-idq"])
+        .arg(&single)
+        .arg("a.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "bare -v create failed");
+    assert!(single.is_file());
+    assert!(
+        !dir.path().join("single.part1.rar").exists(),
+        "autodetection on a fixed disk must not split"
+    );
+
+    // A real multi-volume set for the `-v` listing.
+    let archive = dir.path().join("mv.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "--volume-size=8k", "-idq"])
+        .arg(&archive)
+        .args(["a.bin", "b.bin"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let volumes = rar_rs::discover_volumes(&archive);
+    assert!(volumes.len() >= 2, "{} volumes", volumes.len());
+
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let all = run(&["lb", "-v", archive.to_str().unwrap()]);
+    let mut per_volume = String::new();
+    for volume in &volumes {
+        per_volume.push_str(&run(&["lb", volume.to_str().unwrap()]));
+    }
+    assert_eq!(all, per_volume, "bare -v must list every volume in order");
+}
+
 /// Solid archives carry the `, solid` suffix and mark chain continuations
 /// with WinRAR's `Flags: solid` line.
 #[test]
