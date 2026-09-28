@@ -508,6 +508,15 @@ impl Default for CreateOptions {
 /// The type is `Clone` but deliberately not `Copy` (like
 /// [`WriterOptions`](crate::WriterOptions)): it carries owned per-run policies
 /// such as [`mark_web`](Self::mark_web).
+///
+/// # Stability
+///
+/// The field set is **additive**: a new policy field is a minor breaking
+/// change for a caller that builds the struct with a full literal. Construct
+/// it as `ExtractOptions { ..Default::default() }` so a new field only needs a
+/// decision where it actually matters — the CLI's `ExtractRequest::options`
+/// and the Node binding's option mapping list every field on purpose, while
+/// tests and examples stay untouched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractOptions {
     /// Reject member names that could escape the destination directory
