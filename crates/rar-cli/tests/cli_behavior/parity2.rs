@@ -647,6 +647,43 @@ fn cli_bare_v_autodetects_and_lists_every_volume() {
     assert_eq!(all, per_volume, "bare -v must list every volume in order");
 }
 
+/// WinRAR 7.30 accepts the `a` list modifier (`la`/`lba`/`va`/`vba`); we
+/// rejected all four as unknown commands (exit 7). Service records are not
+/// rendered yet, so an alias matches its plain form.
+#[test]
+fn cli_a_list_modifiers_are_accepted() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"body\n").unwrap();
+    let archive = dir.path().join("a.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let run = |binary: &str, command: &str| {
+        let out = std::process::Command::new(binary)
+            .arg(command)
+            .arg(&archive)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{binary} {command} failed: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // Both binaries accept the aliases (official `rar` and `unrar` do).
+    for binary in [RAR_CLI, UNRAR_CLI] {
+        assert_eq!(run(binary, "la"), run(binary, "l"));
+        assert_eq!(run(binary, "lba"), run(binary, "lb"));
+        assert_eq!(run(binary, "va"), run(binary, "v"));
+        assert_eq!(run(binary, "vba"), run(binary, "vb"));
+        assert_eq!(run(binary, "lta"), run(binary, "lt"));
+        assert_eq!(run(binary, "vta"), run(binary, "vt"));
+    }
+}
+
 /// Solid archives carry the `, solid` suffix and mark chain continuations
 /// with WinRAR's `Flags: solid` line.
 #[test]

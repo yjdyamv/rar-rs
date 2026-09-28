@@ -106,20 +106,21 @@ pub(crate) enum Command {
     #[command(visible_alias = "t")]
     Test(ListArgs),
     /// Verbosely list archive contents
-    #[command(visible_alias = "v")]
+    #[command(visible_aliases = ["v", "va"])]
     VerboseList(ListArgs),
-    /// List archive contents
-    #[command(visible_alias = "l")]
+    /// List archive contents (`la` asks for the service blocks WinRAR 7.30
+    /// adds; our listing does not render them yet, so it matches `l`)
+    #[command(visible_aliases = ["l", "la"])]
     List(ListArgs),
     /// List bare (names only, like `lb`)
-    #[command(visible_alias = "lb")]
+    #[command(visible_aliases = ["lb", "lba"])]
     ListBare(ListArgs),
     /// List technical (like `lt`; `lta` is accepted as an alias — service
     /// records are not listed)
     #[command(visible_aliases = ["lt", "lta"])]
     ListTechnical(ListArgs),
     /// Verbosely list bare (like `vb`)
-    #[command(visible_alias = "vb")]
+    #[command(visible_aliases = ["vb", "vba"])]
     VerboseListBare(ListArgs),
     /// Verbosely list technical (like `vt`; `vta` is accepted as an alias)
     #[command(visible_aliases = ["vt", "vta"])]
