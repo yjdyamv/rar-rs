@@ -196,14 +196,13 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
   timer sets a cancel flag installed on every archive the run opens, and a
   timeout exits 15 with `Timeout exceeded.` (rar only; UnRAR rejects the switch,
   like the official binary)
-- `-ver[n]` — file versions. On create/update, `-ver` keeps the replaced member
-  as an old version and `-verN` caps how many are retained. On extraction the
-  default writes only the current version, `-ver` writes every version as
-  `name;N`, `-verN` writes only version `N` under the plain name, and a `name;N`
-  selector picks that version alone. RAR5 stores the version in the VERSION
-  extra record (RAR 1.5–4.x keeps `;N` in the name); our RAR5 **writer** still
-  renames to a literal `name;N`, so an archive we create is read by WinRAR but
-  its default extraction keeps both names
+- `-ver[n]` — file versions. On create (`a`), update (`u`) and freshen (`f`),
+  `-ver` keeps the replaced member as an old version and `-verN` caps how many
+  are retained. On extraction the default writes only the current version,
+  `-ver` writes every version as `name;N`, `-verN` writes only version `N` under
+  the plain name, and a `name;N` selector picks that version alone. RAR5 stores
+  the version in the VERSION extra record (RAR 1.5–4.x keeps `;N` in the name),
+  so WinRAR reads our archives the same way
 - `-ag[fmt]` — auto-name from the local time
 - `-y` / `-o±` — yes / overwrite mode. On a console (stdin is a terminal),
   extraction without `-y`/`-o±`/`-or` asks before replacing each existing file
