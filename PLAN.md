@@ -554,6 +554,21 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **工程**
 
+- **架构审查（2026-09-28）落地的一批**：① **CLI 错误类别不被字符串化吞掉**
+  （A1）：transaction
+  闭包、`open_editor`、`apply_version_edits`、comment/recovery/ move 路径改为
+  `CliResult` + `CliError::from(..).context(..)`——`u -pwrong` 与锁定 归档上的
+  `u`/`ch`/`c` 现报 **11 / 4**（此前一律 fatal 2）。② **抽取逐成员前奏
+  去重**（A2）：新增 `resolve_member_target`
+  给串行/并行共用（目录/重定向/skip/refuse 与 corrected
+  记账不再两处各写一篇）。③ **边界测试补 `recovery`/`wire` 不得引用
+  `archive`、根叶子不得向上依赖**（A3）。④ **napi 补齐
+  `allowIncompatibleNames`/`fileVersionSuffix`**（A4）。⑤ **`normalize_switch`
+  改 表驱动**（A5）：精确表 + 按前缀长度降序的前缀表 + 三处需真逻辑的
+  （`-s=`/`-qo`/`-rr`），单测钉住表序与全部顺序敏感映射。⑥ **选项可加性契约**
+  （A6，见下条）。⑦ **CI 增加确定性测试 smoke** （`cargo test -p rar-rs` +
+  `cargo test -p rar-cli --bins`，A7）——0.12.0 曾带着过 期断言发布，JS/WASI
+  绑定套件仍留本地避免 flake。
 - **选项结构的可加性契约（2026-09-28 架构审查）**（A6）：`ExtractOptions` 字段是
   `pub`，新加一个字段会让穷举字面量的调用方编译失败。**用 `..Default::default()`
   构造**即可：仓库内除两处有意的映射点（CLI `ExtractRequest::options`、绑定
