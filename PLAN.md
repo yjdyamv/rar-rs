@@ -197,10 +197,19 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   false；CLI 在 `-ver` 全解或显式 `;N` 选择器时置真）承载输出名。契约由
   `format::rar5::headers::parse::tests::file_version_record_skips_the_flags_field`、
   `winrar_interop::member_selection::file_versions_follow_winrar` 与
-  `ops::tests` 两个 用例钉住。**已知残余**：我们**创建** `-ver`
-  归档时仍把旧版本改名成字面 `name;N` （RAR5 官方写 VERSION
-  记录）——官方能读，但默认抽取会把两者都解出来；改成写 VERSION
-  记录需要给编辑器加一个「设版本」操作（RAR4 无此记录，仍用字面名）。
+  `ops::tests` 两个 用例钉住。
+- **`-ver` 的写侧（RAR5 VERSION 记录）**（2026-09-28 对拍官方 7.30 beta 1）：
+  此前创建/更新 `-ver` 只把旧成员改名成字面
+  `name;N`（官方能读，但默认抽取会把两者 都解出）。现新增
+  `EditOp::SetFileVersion` / `EditPlan::set_file_version`，重写 头时把 VERSION
+  记录（`[size=3][type=0x04][flags=0][version]`，与官方逐字节相同） 刷新进 extra
+  区；`version_edits`/`apply_version_edits` 按族选路：RAR5 走版本 记录，RAR
+  1.5–4.x 仍把 `;N` 写进名字（官方亦然）。`a -ver` 与 `u -ver` 都接上 了（此前
+  `a -ver` 完全不生效），`-verN` 上限照旧。契约由
+  `format::rar5::headers::serialize::tests::version_record_bytes_match_winrar`、
+  `cli_behavior::cli_version_control_keeps_previous_versions` 与
+  `winrar_interop::member_selection::our_rar5_file_versions_are_read_by_winrar`
+  钉住。
 - **`la`/`lba`/`va`/`vba` 列表别名被拒**（2026-09-28 对拍官方 7.30 beta
   1）：官方这四个 7.30 新增的命令 exit 0，我们 `unknown command` exit
   7（`Rar.txt` 的 `l[a,b,t]` / `v[a,b,t]`）。现按 `visible_aliases`
