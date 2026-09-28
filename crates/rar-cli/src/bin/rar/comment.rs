@@ -3,6 +3,7 @@
 use crate::args::{CommentArgs, CommentWriteArgs, FileCommentArgs};
 use crate::common;
 use crate::edit::open_editor;
+use crate::error::CliError;
 use crate::error::CliResult;
 use crate::info;
 /// Set the archive comment (like `rar c`), from stdin or `-z<file>`;
@@ -24,7 +25,7 @@ pub(crate) fn cmd_comment_set(args: &CommentArgs, misc: &common::MiscSwitches) -
     let remove = comment.is_empty();
     editor
         .apply(rar_rs::EditPlan::new().set_comment(comment))
-        .map_err(|e| format!("comment: {e}"))?;
+        .map_err(|e| CliError::from(e).context("comment"))?;
     if remove {
         info!("Comment removed from {archive}", archive = args.archive);
     } else {
@@ -55,11 +56,11 @@ pub(crate) fn cmd_file_comment_set(
     let mut editor = open_editor(&args.archive, args.password.password.as_deref())?;
     let id = editor
         .unique_entry(&args.member)
-        .map_err(|e| format!("cf: {}: {e}", args.member))?;
+        .map_err(|e| CliError::from(e).context(format!("cf: {}", args.member)))?;
     let remove = comment.is_empty();
     editor
         .apply(rar_rs::EditPlan::new().set_member_comment(id, comment))
-        .map_err(|e| format!("cf: {e}"))?;
+        .map_err(|e| CliError::from(e).context("cf"))?;
     if remove {
         info!(
             "Comment removed from {member} in {archive}",
@@ -85,7 +86,7 @@ pub(crate) fn cmd_comment_write(args: &CommentWriteArgs) -> CliResult<()> {
     let mut rar = rar_rs::ArchiveReader::open_with(&args.archive, options)
         .map_err(|e| format!("open: {e}"))?;
     rar.set_cancel_flag(crate::ops::time_limit_flag());
-    let Some(comment) = rar.comment().map_err(|e| format!("cw: {e}"))? else {
+    let Some(comment) = rar.comment().map_err(|e| CliError::from(e).context("cw"))? else {
         info!("Comment is not present");
         return Ok(());
     };

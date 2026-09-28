@@ -5,20 +5,23 @@ use crate::args::archive_version;
 use crate::args::resolve_dict_switch;
 use crate::args::{ChangeArgs, DeleteArgs, RenameArgs};
 use crate::common;
+use crate::error::CliError;
 use crate::error::CliResult;
 use crate::filters::arg_to_name;
 use crate::info;
 use crate::time;
 /// Open a [`rar_rs::ArchiveEditor`] for the CLI, honoring the password switch.
+/// Errors keep their library category, so a wrong password or a locked
+/// archive reaches the caller as exit 11 / 4 instead of a generic fatal 2.
 pub(crate) fn open_editor(
     path: impl AsRef<std::path::Path>,
     password: Option<&str>,
-) -> Result<rar_rs::ArchiveEditor, String> {
+) -> CliResult<rar_rs::ArchiveEditor> {
     let mut editor = match password {
-        Some(pw) if !pw.is_empty() => {
-            rar_rs::ArchiveEditor::open_with_password(path, pw).map_err(|e| format!("open: {e}"))?
-        }
-        _ => rar_rs::ArchiveEditor::open(path).map_err(|e| format!("open: {e}"))?,
+        Some(pw) if !pw.is_empty() => rar_rs::ArchiveEditor::open_with_password(path, pw)
+            .map_err(|error| CliError::from(error).context("open"))?,
+        _ => rar_rs::ArchiveEditor::open(path)
+            .map_err(|error| CliError::from(error).context("open"))?,
     };
     editor.set_cancel_flag(crate::ops::time_limit_flag());
     Ok(editor)
@@ -185,13 +188,13 @@ pub(crate) fn version_edits(
 pub(crate) fn apply_version_edits(
     editor: &mut rar_rs::ArchiveEditor,
     edits: VersionEdits,
-) -> Result<(), String> {
+) -> CliResult<()> {
     match edits {
         VersionEdits::Rar5(plan) => {
             if !plan.is_empty() {
                 editor
                     .apply(plan)
-                    .map_err(|error| format!("mark staged versions: {error}"))?;
+                    .map_err(|error| CliError::from(error).context("mark staged versions"))?;
             }
         }
         VersionEdits::Legacy { renames, drops } => {
@@ -201,18 +204,18 @@ pub(crate) fn apply_version_edits(
                     .map(|(old, new)| (old.as_str(), new.as_str()))
                     .collect();
                 let plan = editor_chained_rename_plan(editor, &pairs)
-                    .map_err(|error| format!("rename staged members: {error}"))?;
+                    .map_err(|error| CliError::from(error).context("rename staged members"))?;
                 editor
                     .apply(plan)
-                    .map_err(|error| format!("rename staged members: {error}"))?;
+                    .map_err(|error| CliError::from(error).context("rename staged members"))?;
             }
             if !drops.is_empty() {
                 let names: Vec<&str> = drops.iter().map(String::as_str).collect();
                 let plan = editor_delete_plan(editor, &names)
-                    .map_err(|error| format!("delete staged versions: {error}"))?;
+                    .map_err(|error| CliError::from(error).context("delete staged versions"))?;
                 editor
                     .apply(plan)
-                    .map_err(|error| format!("delete staged versions: {error}"))?;
+                    .map_err(|error| CliError::from(error).context("delete staged versions"))?;
             }
         }
     }
@@ -301,7 +304,7 @@ pub(crate) fn cmd_move(
             .or_else(|| dict_size_log.map(|log| (128u64 * 1024) << log))
             .map(|bytes| {
                 rar_rs::DictionarySize::try_from(bytes)
-                    .map_err(|error| format!("dictionary: {error}"))
+                    .map_err(|error| CliError::from(error).context("dictionary"))
             })
             .transpose()?
     };
@@ -324,7 +327,8 @@ pub(crate) fn cmd_move(
         if let Some(size) = dictionary {
             append_opts = append_opts.dictionary_size(size);
         }
-        crate::ops::append_writer(archive_path, append_opts).map_err(|e| format!("open: {e}"))?
+        crate::ops::append_writer(archive_path, append_opts)
+            .map_err(|e| CliError::from(e).context("open"))?
     } else {
         let ts = time::parse_ts_specs(&args.ts_specs)?;
         let mut writer_opts = rar_rs::WriterOptions::new()
@@ -346,10 +350,12 @@ pub(crate) fn cmd_move(
         if let Some(size) = dictionary {
             writer_opts = writer_opts.dictionary_size(size);
         }
-        crate::ops::create_writer(archive_path, writer_opts).map_err(|e| format!("create: {e}"))?
+        crate::ops::create_writer(archive_path, writer_opts)
+            .map_err(|e| CliError::from(e).context("create"))?
     };
     let options = rar_rs::EntryWriteOptions::new().compression_level(
-        rar_rs::CompressionLevel::try_from(args.level).map_err(|e| format!("level: {e}"))?,
+        rar_rs::CompressionLevel::try_from(args.level)
+            .map_err(|e| CliError::from(e).context("level"))?,
     );
     // Both `m` and `mf` archive the full tree (directory entries included);
     // they differ only in what is removed from disk afterwards.
@@ -358,10 +364,12 @@ pub(crate) fn cmd_move(
         let name = arg_to_name(file);
         writer
             .add_path_as(file, &name, options)
-            .map_err(|e| format!("add {file}: {e}"))?;
+            .map_err(|e| CliError::from(e).context(format!("add {file}")))?;
         moved += 1;
     }
-    writer.finish().map_err(|e| format!("close: {e}"))?;
+    writer
+        .finish()
+        .map_err(|e| CliError::from(e).context("close"))?;
     for file in files {
         let path = std::path::Path::new(file);
         if path.is_dir() {
@@ -405,8 +413,9 @@ pub(crate) fn cmd_change(args: &ChangeArgs) -> CliResult<()> {
     };
     let mut editor = match &args.password.password {
         Some(pw) if !pw.is_empty() => rar_rs::ArchiveEditor::open_with_password(&args.archive, pw)
-            .map_err(|e| format!("open: {e}"))?,
-        _ => rar_rs::ArchiveEditor::open(&args.archive).map_err(|e| format!("open: {e}"))?,
+            .map_err(|e| CliError::from(e).context("open"))?,
+        _ => rar_rs::ArchiveEditor::open(&args.archive)
+            .map_err(|e| CliError::from(e).context("open"))?,
     };
     editor.set_cancel_flag(crate::ops::time_limit_flag());
     let names: Vec<String> = editor
@@ -431,10 +440,11 @@ pub(crate) fn cmd_change(args: &ChangeArgs) -> CliResult<()> {
         .iter()
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
-    let plan = editor_rename_plan(&editor, &pairs_ref).map_err(|e| format!("ch: {e}"))?;
+    let plan =
+        editor_rename_plan(&editor, &pairs_ref).map_err(|e| CliError::from(e).context("ch"))?;
     let renamed = editor
         .apply(plan)
-        .map_err(|e| format!("ch: {e}"))?
+        .map_err(|e| CliError::from(e).context("ch"))?
         .renamed();
     info!(
         "Converted {renamed} name(s) in {archive}",
