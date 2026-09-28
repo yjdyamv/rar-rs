@@ -17,7 +17,7 @@ use crate::engine::Engine;
 use crate::engine::{ArchiveEntry, MAX_DICT_SIZE_LOG};
 use crate::error::{RarError, RarResult};
 use crate::fs::atomic::{read_write_create, replace_file, temp_sibling_path};
-use crate::fs::safe_path::sanitize_archive_path;
+use crate::fs::safe_path::sanitize_archive_path_corrected;
 #[cfg(feature = "parallel")]
 use crate::model::FileHeader;
 #[cfg(feature = "parallel")]
@@ -38,8 +38,14 @@ const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
 /// extraction paths share it so `-e`, `-o-` and `-or` behave identically.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Destination {
-    /// Extract the member to this path.
-    Extract(PathBuf),
+    /// Extract the member to this path. `corrected` records that a Windows
+    /// reserved device name was rewritten (WinRAR warns about that case).
+    Extract {
+        /// Where the member is written.
+        path: PathBuf,
+        /// Whether a device name was corrected during sanitization.
+        corrected: bool,
+    },
     /// `-o-`: the destination already exists and must be left untouched.
     Skip(PathBuf),
 }
@@ -95,7 +101,13 @@ fn install_member_file(tmp_path: &Path, dest_path: &Path) -> RarResult<()> {
     let result = if dest_path.is_dir() {
         match fs::remove_dir(dest_path) {
             Ok(()) => replace_file(tmp_path, dest_path),
-            Err(error) => Err(RarError::Io(error)),
+            // A non-empty directory is a create error (WinRAR reports exit 9),
+            // matching its `Cannot create ...: Directory with such name
+            // already exists`.
+            Err(_) => Err(RarError::create(
+                dest_path,
+                "directory with such name already exists",
+            )),
         }
     } else {
         replace_file(tmp_path, dest_path)
@@ -178,6 +190,7 @@ pub struct ExtractionReport {
     written: Vec<PathBuf>,
     skipped: Vec<PathBuf>,
     refused: Vec<PathBuf>,
+    corrected: Vec<String>,
 }
 
 impl ExtractionReport {
@@ -216,6 +229,13 @@ impl ExtractionReport {
         self.refused.len()
     }
 
+    /// Stored names whose Windows reserved device name was corrected during
+    /// extraction (WinRAR prints `WARNING: Attempting to correct the invalid
+    /// file or directory name` for each). Empty on POSIX.
+    pub fn corrected(&self) -> &[String] {
+        &self.corrected
+    }
+
     pub(crate) fn record_written(&mut self, path: PathBuf) {
         self.written.push(path);
     }
@@ -226,6 +246,10 @@ impl ExtractionReport {
 
     pub(crate) fn record_refused(&mut self, path: PathBuf) {
         self.refused.push(path);
+    }
+
+    pub(crate) fn record_corrected(&mut self, name: String) {
+        self.corrected.push(name);
     }
 }
 
@@ -468,8 +492,8 @@ fn extract_all_parallel(
         // of the catalog first (the serial loop keeps a whole-catalog
         // snapshot for the same reason).
         let entry = cx.entries()[idx].clone();
-        let dest_path = match resolve_dest_path(cx, &entry, dest)? {
-            Destination::Extract(path) => path,
+        let (dest_path, corrected) = match resolve_dest_path(cx, &entry, dest)? {
+            Destination::Extract { path, corrected } => (path, corrected),
             Destination::Skip(path) => {
                 if reports_outcome(&entry, &cx.read_ctx().extract_options) {
                     report.record_skipped(path);
@@ -477,6 +501,9 @@ fn extract_all_parallel(
                 continue;
             }
         };
+        if corrected && reports_outcome(&entry, &cx.read_ctx().extract_options) {
+            report.record_corrected(entry.name().to_string());
+        }
         if is_directory_entry(&entry) {
             materialize_directory(&dest_path)?;
             // Flat extraction resolves directories to the destination
@@ -632,15 +659,19 @@ pub(crate) fn resolve_dest_path_with(
     {
         member_name = format!("{member_name};{version}");
     }
-    let dest_path = if options.flat_paths {
+    let (dest_path, corrected) = if options.flat_paths {
         if is_directory_entry(entry) {
-            return Ok(Destination::Extract(dest_dir.to_path_buf()));
+            return Ok(Destination::Extract {
+                path: dest_dir.to_path_buf(),
+                corrected: false,
+            });
         }
-        let safe_name = sanitize_archive_path(&member_name, options.allow_incompatible_names)?;
+        let (safe_name, corrected) =
+            sanitize_archive_path_corrected(&member_name, options.allow_incompatible_names)?;
         let base = safe_name.rsplit('/').next().unwrap_or(&safe_name);
-        dest_dir.join(base)
+        (dest_dir.join(base), corrected)
     } else {
-        crate::format::shared::extract::dest::safe_dest_path_with(
+        crate::format::shared::extract::dest::safe_dest_path_with_correction(
             cx,
             dest_dir,
             &member_name,
@@ -678,7 +709,10 @@ pub(crate) fn resolve_dest_path_with(
                 return Ok(Destination::Skip(dest_path));
             }
             crate::options::OverwriteChoice::Rename => {
-                return Ok(Destination::Extract(next_free_name(&dest_path)));
+                return Ok(Destination::Extract {
+                    path: next_free_name(&dest_path),
+                    corrected,
+                });
             }
             crate::options::OverwriteChoice::Quit => return Err(RarError::Cancelled),
         }
@@ -712,7 +746,10 @@ pub(crate) fn resolve_dest_path_with(
     if options.auto_rename && !is_directory_entry(entry) {
         dest_path = next_free_name(&dest_path);
     }
-    Ok(Destination::Extract(dest_path))
+    Ok(Destination::Extract {
+        path: dest_path,
+        corrected,
+    })
 }
 
 /// The first free sibling of `path` in the `name(N).ext` numbering WinRAR
@@ -754,7 +791,12 @@ fn extract_entry(
     validate_entry_limits(cx, idx)?;
 
     let dest_path = match resolve_dest_path(cx, entry, dest_dir)? {
-        Destination::Extract(path) => path,
+        Destination::Extract { path, corrected } => {
+            if corrected && reports_outcome(entry, &cx.read_ctx().extract_options) {
+                report.record_corrected(entry.name().to_string());
+            }
+            path
+        }
         Destination::Skip(path) => {
             if reports_outcome(entry, &cx.read_ctx().extract_options) {
                 report.record_skipped(path.clone());

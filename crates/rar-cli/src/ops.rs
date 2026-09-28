@@ -1105,6 +1105,11 @@ fn extract_members(
     let report = rar
         .extract_ids_with_options(&wanted, dest, options)
         .map_err(CliError::from)?;
+    // WinRAR warns on stderr for every reserved device name it corrects, and
+    // `-idq` does not suppress it.
+    for _ in report.corrected() {
+        eprintln!("WARNING: Attempting to correct the invalid file or directory name");
+    }
     for path in report.skipped() {
         crate::info!("Skipping {}", display_name(&path.to_string_lossy()));
     }
