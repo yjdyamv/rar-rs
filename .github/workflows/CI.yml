@@ -17,13 +17,16 @@ env:
   CARGO_ZIGBUILD_VERSION: '0.23.4'
   # Release-grade work — the binding matrix builds and rustdoc — runs on tags
   # and manual dispatches. A push/PR keeps only what catches a broken change
-  # fast: fmt, the host-path guard, cargo check/clippy and cargo-deny.
+  # fast: fmt, the host-path guard, cargo check/clippy, a deterministic Rust
+  # test smoke and cargo-deny.
   #
-  # Tests are NOT run here: they are a local gate (`cargo test --workspace
-  # --all-features`, see docs/testing.md). The owner asked for that in
-  # 2026-09 after the WASI binding suite blocked a release on a
-  # non-reproducible `memory access out of bounds`; a red CI run is now a
-  # compile/lint failure, never a test flake.
+  # Tests are otherwise a local gate (`cargo test --workspace --all-features`,
+  # see docs/testing.md): the owner asked for that in 2026-09 after the WASI
+  # binding suite blocked a release on a non-reproducible `memory access out of
+  # bounds`. The `lint` job now runs the Rust unit/integration suites as a
+  # smoke (they caught a stale assertion that shipped with 0.12.0); the JS/WASI
+  # binding suites stay local so a red run stays a compile/lint/test-fact
+  # failure rather than a flake.
   RUN_HEAVY: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
 'on':
   push:
@@ -104,6 +107,15 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
         run: cargo check -p rar-rs --all-features --target wasm32-wasip1-threads --locked
+      - name: Cargo test (rar-rs + rar-cli unit/integration)
+        # Tests are a local gate by default (see docs/testing.md), but a stale
+        # test assertion shipped with 0.12.0 because nothing ran them here. This
+        # deterministic smoke — the library and CLI suites, no official-tool
+        # interop, no JS/WASI binding suite (the earlier flake source) — closes
+        # that gap without making a red run ambiguous.
+        run: |
+          cargo test -p rar-rs --locked
+          cargo test -p rar-cli --bins --locked
       - name: Workspace versions agree
         # The release job only compares the tag against `crates/rar-napi`, so the
         # library and CLI drifted (0.1.2 vs the binding's 0.7.0). Everything here
