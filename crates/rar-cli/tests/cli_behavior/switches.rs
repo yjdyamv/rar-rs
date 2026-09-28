@@ -2065,3 +2065,61 @@ fn cli_non_empty_directory_is_a_create_error() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Library error categories survive the CLI's error seam: a wrong password and
+/// a locked archive keep exit 11 / 4 on every command, not only the ones whose
+/// path already used the typed conversion.
+#[test]
+fn cli_library_error_categories_reach_the_exit_code() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"body").unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(RAR_CLI)
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+
+    // Wrong password on a header-encrypted archive (`u` used to exit 2).
+    let hp = dir.path().join("hp.rar");
+    assert!(run(&["a", "-hpsecret", "-idq", "hp.rar", "f.txt"]).is_some_and(|c| c == 0));
+    assert_eq!(
+        run(&["u", "-pwrong", "-idq", "hp.rar", "f.txt"]),
+        Some(11),
+        "wrong password must be exit 11"
+    );
+
+    // Locked archive (`u`/`ch`/`c` used to exit 2).
+    let locked = dir.path().join("locked.rar");
+    assert!(run(&["a", "-idq", "locked.rar", "f.txt"]).is_some_and(|c| c == 0));
+    assert!(run(&["k", "-idq", "locked.rar"]).is_some_and(|c| c == 0));
+    // Make the source newer than the archived copy so `u` actually plans a
+    // replacement (and therefore hits the locked archive).
+    let source = dir.path().join("f.txt");
+    std::fs::write(&source, b"changed").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(30))
+        .unwrap();
+    assert_eq!(
+        run(&["u", "-idq", "locked.rar", "f.txt"]),
+        Some(4),
+        "u on a locked archive must be exit 4"
+    );
+    assert_eq!(
+        run(&["ch", "-cu", "-idq", "locked.rar"]),
+        Some(4),
+        "ch on a locked archive must be exit 4"
+    );
+    std::fs::write(dir.path().join("c.txt"), b"note").unwrap();
+    assert_eq!(
+        run(&["c", "-zc.txt", "-idq", "locked.rar"]),
+        Some(4),
+        "c on a locked archive must be exit 4"
+    );
+}

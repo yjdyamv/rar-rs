@@ -8,6 +8,7 @@ use crate::common;
 use crate::edit::editor_delete_plan;
 use crate::edit::open_editor;
 use crate::error;
+use crate::error::CliError;
 use crate::error::CliResult;
 use crate::filters::TimeBound;
 use crate::filters::TimeKind;
@@ -146,7 +147,8 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             .or(dict_size_bytes)
             .or_else(|| dict_size_log.map(|log| (128u64 * 1024) << log))
             .map(|bytes| {
-                rar_rs::DictionarySize::try_from(bytes).map_err(|e| format!("dictionary: {e}"))
+                rar_rs::DictionarySize::try_from(bytes)
+                    .map_err(|e| CliError::from(e).context("dictionary"))
             })
             .transpose()?
     };
@@ -225,7 +227,8 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     };
     let opts = if let Some(threads) = args.threads {
         opts.thread_count(
-            rar_rs::ThreadCount::try_from(threads).map_err(|e| format!("threads: {e}"))?,
+            rar_rs::ThreadCount::try_from(threads)
+                .map_err(|e| CliError::from(e).context("threads"))?,
         )
     } else {
         opts
@@ -244,7 +247,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     let keep_original_time = args.keep_time.as_deref() == Some("");
     let tk_date = match args.keep_time.as_deref() {
         Some(spec) if !spec.is_empty() => {
-            Some(time::parse_tk_date(spec).map_err(|e| format!("-tk: {e}"))?)
+            Some(time::parse_tk_date(spec).map_err(|e| CliError::from(e).context("-tk"))?)
         }
         _ => None,
     };
@@ -464,7 +467,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     } else {
         Some(
             crate::ops::create_writer(archive_path, opts.clone())
-                .map_err(|e| format!("create: {e}"))?,
+                .map_err(|e| CliError::from(e).context("create"))?,
         )
     };
     // Directory entries always come after the files, like WinRAR.
@@ -512,7 +515,8 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     let mut write_entries: Vec<rar_rs::WriteEntry<'_>> = Vec::with_capacity(collected.len());
     for c in &collected {
         let options = rar_rs::EntryWriteOptions::new().compression_level(
-            rar_rs::CompressionLevel::try_from(c.level).map_err(|e| format!("level: {e}"))?,
+            rar_rs::CompressionLevel::try_from(c.level)
+                .map_err(|e| CliError::from(e).context("level"))?,
         );
         if c.is_dir {
             write_entries.push(rar_rs::WriteEntry::Directory {
@@ -529,7 +533,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     }
     // The member write sequence is shared by the fresh-create and the
     // transactional replace paths.
-    let write_members = |mut writer: rar_rs::ArchiveWriter| -> Result<rar_rs::WriteReport, String> {
+    let write_members = |mut writer: rar_rs::ArchiveWriter| -> CliResult<rar_rs::WriteReport> {
         // RAR 1.3/1.4 have no editor path: the DOS main header must
         // precede every member, so `-z` queues the comment before the
         // first member; RAR5/RAR4 attach it after creation through the
@@ -544,18 +548,18 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 let mut data = Vec::new();
                 std::io::stdin()
                     .read_to_end(&mut data)
-                    .map_err(|e| format!("stdin: {e}"))?;
+                    .map_err(|e| CliError::from(e).context("stdin"))?;
                 data
             } else {
-                std::fs::read(comment_file).map_err(|e| format!("comment: {e}"))?
+                std::fs::read(comment_file).map_err(|e| CliError::from(e).context("comment"))?
             };
             writer
                 .set_archive_comment(Some(data))
-                .map_err(|e| format!("comment: {e}"))?;
+                .map_err(|e| CliError::from(e).context("comment"))?;
         }
         writer
             .add_batch(&write_entries)
-            .map_err(|e| format!("add: {e}"))?;
+            .map_err(|e| CliError::from(e).context("add"))?;
         // Link redirects are recorded after their data members (the
         // reference target name is what matters, not the order).
         for redirect in &redirects {
@@ -567,7 +571,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                     redirect.mtime,
                     (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
                 )
-                .map_err(|e| format!("link {}: {e}", redirect.name))?;
+                .map_err(|e| CliError::from(e).context(format!("link {}", redirect.name)))?;
         }
         // -si<name>: one member read from stdin. A bare `-si` names it
         // `stdin`, like WinRAR.
@@ -576,7 +580,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             let mut data = Vec::new();
             std::io::stdin()
                 .read_to_end(&mut data)
-                .map_err(|e| format!("stdin: {e}"))?;
+                .map_err(|e| CliError::from(e).context("stdin"))?;
             let name = if name.is_empty() {
                 "stdin".to_string()
             } else {
@@ -584,13 +588,15 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             };
             let stdin_options = rar_rs::EntryWriteOptions::new().compression_level(
                 rar_rs::CompressionLevel::try_from(args.level)
-                    .map_err(|e| format!("level: {e}"))?,
+                    .map_err(|e| CliError::from(e).context("level"))?,
             );
             writer
                 .add_bytes(&name, &data, stdin_options)
-                .map_err(|e| format!("add stdin: {e}"))?;
+                .map_err(|e| CliError::from(e).context("add stdin"))?;
         }
-        writer.finish().map_err(|e| format!("close: {e}"))
+        writer
+            .finish()
+            .map_err(|e| CliError::from(e).context("close"))
     };
     // WinRAR `rar a` semantics on an existing archive: members with the
     // same name as an incoming file are replaced — deleted first through
@@ -624,9 +630,9 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 let mut editor = open_editor(staged_path, password.as_deref())?;
                 if let Some(spec) = &version_spec {
                     let edits = crate::edit::version_edits(&editor, &incoming_names, spec)
-                        .map_err(|e| format!("replace: {e}"))?;
+                        .map_err(|e| CliError::from(e).context("replace"))?;
                     crate::edit::apply_version_edits(&mut editor, edits)
-                        .map_err(|e| format!("replace: {e}"))?;
+                        .map_err(|e| e.context("replace"))?;
                 } else {
                     let to_drop: Vec<String> = editor
                         .entries()
@@ -636,8 +642,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                     if !to_drop.is_empty() {
                         let refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
                         let plan = editor_delete_plan(&editor, &refs)
-                            .map_err(|e| format!("replace: {e}"))?;
-                        editor.apply(plan).map_err(|e| format!("replace: {e}"))?;
+                            .map_err(|e| CliError::from(e).context("replace"))?;
+                        editor
+                            .apply(plan)
+                            .map_err(|e| CliError::from(e).context("replace"))?;
                     }
                 }
                 // Deleting every member erases the staged archive (like
@@ -653,10 +661,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                         append_opts = append_opts.dictionary_size(size);
                     }
                     crate::ops::append_writer(staged_path, append_opts)
-                        .map_err(|e| format!("open: {e}"))?
+                        .map_err(|e| CliError::from(e).context("open"))?
                 } else {
                     crate::ops::create_writer(staged_path, opts.clone())
-                        .map_err(|e| format!("create: {e}"))?
+                        .map_err(|e| CliError::from(e).context("create"))?
                 };
                 write_members(writer)
             },
@@ -799,8 +807,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             .collect();
         if !stale.is_empty() {
             let refs: Vec<&str> = stale.iter().map(|s| s.as_str()).collect();
-            let plan = editor_delete_plan(&editor, &refs).map_err(|e| format!("sync: {e}"))?;
-            editor.apply(plan).map_err(|e| format!("sync: {e}"))?;
+            let plan = editor_delete_plan(&editor, &refs)
+                .map_err(|e| CliError::from(e).context("sync"))?;
+            editor
+                .apply(plan)
+                .map_err(|e| CliError::from(e).context("sync"))?;
         }
     }
     if args.volume_size.is_some() {

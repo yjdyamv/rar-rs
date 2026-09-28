@@ -1,4 +1,5 @@
 use crate::args::parse_size;
+use crate::error::CliError;
 use crate::transaction::update_archive_transactionally;
 
 #[test]
@@ -37,7 +38,7 @@ fn successful_archive_transaction_replaces_original_bytes() {
     std::fs::write(&archive, b"original").unwrap();
 
     update_archive_transactionally(&archive, |staged| {
-        std::fs::write(staged, b"replacement").map_err(|error| error.to_string())
+        std::fs::write(staged, b"replacement").map_err(CliError::from)
     })
     .unwrap();
 

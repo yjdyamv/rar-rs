@@ -6,6 +6,7 @@ use crate::args::{FilesArgs, collect_inputs};
 use crate::common;
 use crate::edit::editor_delete_plan;
 use crate::edit::open_editor;
+use crate::error::CliError;
 use crate::error::CliResult;
 use crate::info;
 use crate::ops;
@@ -64,7 +65,7 @@ fn cmd_update_freshen(
             .or_else(|| dict_size_log.map(|log| (128u64 * 1024) << log))
             .map(|bytes| {
                 rar_rs::DictionarySize::try_from(bytes)
-                    .map_err(|error| format!("dictionary: {error}"))
+                    .map_err(|error| CliError::from(error).context("dictionary"))
             })
             .transpose()?
     };
@@ -72,7 +73,7 @@ fn cmd_update_freshen(
     // -tk: keep the original archive time (bare) or set the given date.
     let tk_date = match args.keep_time.as_deref() {
         Some(spec) if !spec.is_empty() => {
-            Some(time::parse_tk_date(spec).map_err(|error| format!("-tk: {error}"))?)
+            Some(time::parse_tk_date(spec).map_err(|error| CliError::from(error).context("-tk"))?)
         }
         _ => None,
     };
@@ -80,7 +81,7 @@ fn cmd_update_freshen(
         Some(
             std::fs::metadata(archive_path)
                 .and_then(|metadata| metadata.modified())
-                .map_err(|error| format!("read archive modification time: {error}"))?,
+                .map_err(|error| CliError::from(error).context("read archive modification time"))?,
         )
     } else {
         None
@@ -96,13 +97,16 @@ fn cmd_update_freshen(
         misc.skip_links,
     )?;
     let archive = ops::open_reader(archive_path, password.as_deref())
-        .map_err(|error| format!("open: {error}"))?;
+        .map_err(|error| error.context("open"))?;
     let mut to_delete = Vec::new();
     let mut to_add = Vec::new();
     for item in &collected {
         let source_mtime = std::fs::metadata(&item.path)
             .and_then(|metadata| metadata.modified())
-            .map_err(|error| format!("read source metadata {}: {error}", item.path.display()))?
+            .map_err(|error| {
+                CliError::from(error)
+                    .context(format!("read source metadata {}", item.path.display()))
+            })?
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
@@ -196,22 +200,22 @@ fn cmd_update_freshen(
                 // recompress the solid chain, so they stay split exactly
                 // like the legacy sequential calls.
                 let mut editor = open_editor(staged_path, password.as_deref())
-                    .map_err(|error| format!("open staged archive: {error}"))?;
+                    .map_err(|error| error.context("open staged archive"))?;
                 let edits = crate::edit::version_edits(&editor, &to_delete, version_spec)
-                    .map_err(|error| format!("version staged members: {error}"))?;
+                    .map_err(|error| CliError::from(error).context("version staged members"))?;
                 crate::edit::apply_version_edits(&mut editor, edits)
-                    .map_err(|error| format!("version staged members: {error}"))?;
+                    .map_err(|error| error.context("version staged members"))?;
             } else {
                 // Plain replacement delete (no version control) runs through
                 // the editor role in one atomic rewrite.
                 let mut editor = open_editor(staged_path, password.as_deref())
-                    .map_err(|error| format!("open staged archive: {error}"))?;
+                    .map_err(|error| error.context("open staged archive"))?;
                 let names: Vec<&str> = to_delete.iter().map(String::as_str).collect();
                 let plan = editor_delete_plan(&editor, &names)
-                    .map_err(|error| format!("delete staged members: {error}"))?;
+                    .map_err(|error| CliError::from(error).context("delete staged members"))?;
                 editor
                     .apply(plan)
-                    .map_err(|error| format!("delete staged members: {error}"))?;
+                    .map_err(|error| CliError::from(error).context("delete staged members"))?;
             }
         }
 
@@ -224,7 +228,7 @@ fn cmd_update_freshen(
                 append_opts = append_opts.dictionary_size(size);
             }
             crate::ops::append_writer(staged_path, append_opts)
-                .map_err(|error| format!("open staged archive for append: {error}"))?
+                .map_err(|error| CliError::from(error).context("open staged archive for append"))?
         } else {
             let mut writer_opts = rar_rs::WriterOptions::new()
                 .compression(version)
@@ -245,13 +249,13 @@ fn cmd_update_freshen(
                 writer_opts = writer_opts.dictionary_size(size);
             }
             crate::ops::create_writer(staged_path, writer_opts)
-                .map_err(|error| format!("recreate staged archive: {error}"))?
+                .map_err(|error| CliError::from(error).context("recreate staged archive"))?
         };
         let mut write_entries: Vec<rar_rs::WriteEntry<'_>> = Vec::with_capacity(to_add.len());
         for item in &to_add {
             let options = rar_rs::EntryWriteOptions::new().compression_level(
                 rar_rs::CompressionLevel::try_from(item.level)
-                    .map_err(|error| format!("level: {error}"))?,
+                    .map_err(|error| CliError::from(error).context("level"))?,
             );
             if item.is_dir {
                 write_entries.push(rar_rs::WriteEntry::Directory {
@@ -268,7 +272,7 @@ fn cmd_update_freshen(
         }
         staged
             .add_batch(&write_entries)
-            .map_err(|error| format!("append staged members: {error}"))?;
+            .map_err(|error| CliError::from(error).context("append staged members"))?;
         for redirect in &redirects {
             staged
                 .add_redirect_with_time(
@@ -278,18 +282,20 @@ fn cmd_update_freshen(
                     redirect.mtime,
                     (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
                 )
-                .map_err(|error| format!("link {}: {error}", redirect.name))?;
+                .map_err(|error| {
+                    CliError::from(error).context(format!("link {}", redirect.name))
+                })?;
         }
         staged
             .finish()
-            .map_err(|error| format!("close staged archive: {error}"))?;
+            .map_err(|error| CliError::from(error).context("close staged archive"))?;
 
         if let Some(modified) = tk_date.or(original_mtime) {
             std::fs::File::options()
                 .write(true)
                 .open(staged_path)
                 .and_then(|file| file.set_times(std::fs::FileTimes::new().set_modified(modified)))
-                .map_err(|error| format!("restore staged archive time: {error}"))?;
+                .map_err(|error| CliError::from(error).context("restore staged archive time"))?;
         }
         Ok(())
     })?;

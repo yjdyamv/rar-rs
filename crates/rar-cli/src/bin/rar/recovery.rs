@@ -3,6 +3,7 @@
 use crate::args::{ArchiveArgs, RecoveryArgs, RecoveryVolumesArgs};
 use crate::edit::open_editor;
 use crate::error;
+use crate::error::CliError;
 use crate::error::CliResult;
 use crate::info;
 use crate::list::is_rar4_file;
@@ -10,8 +11,10 @@ use crate::output;
 /// Lock the archive (like `rar k`).
 pub(crate) fn cmd_lock(args: &ArchiveArgs) -> CliResult<()> {
     let mut editor = open_editor(&args.archive, args.password.password.as_deref())
-        .map_err(|e| format!("open: {e}"))?;
-    editor.lock().map_err(|e| format!("lock: {e}"))?;
+        .map_err(|e| e.context("open"))?;
+    editor
+        .lock()
+        .map_err(|e| CliError::from(e).context("lock"))?;
     info!("Locked {archive}", archive = args.archive);
     Ok(())
 }
@@ -62,7 +65,9 @@ pub(crate) fn cmd_rr(args: &RecoveryArgs) -> CliResult<()> {
         ),
     };
     let mut editor = open_editor(&args.archive, args.password.password.as_deref())?;
-    editor.apply(plan).map_err(|e| format!("rr: {e}"))?;
+    editor
+        .apply(plan)
+        .map_err(|e| CliError::from(e).context("rr"))?;
     info!(
         "Recovery record {label} added to {archive}",
         archive = args.archive
@@ -292,7 +297,7 @@ fn reconstruct(
 pub(crate) fn cmd_rebuild_volumes(args: &ArchiveArgs) -> CliResult<()> {
     let first = &args.archive;
     let rebuilt = rar_rs::rebuild_missing_volumes(std::path::Path::new(first))
-        .map_err(|e| format!("rc: {e}"))?;
+        .map_err(|e| CliError::from(e).context("rc"))?;
     if rebuilt.is_empty() {
         info!("All volumes present");
     } else {
