@@ -474,8 +474,8 @@ fn windows_metadata_round_trips_through_winrar() {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
-        FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
+        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
+        FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
     };
 
     fn set_attrs(path: &Path, attrs: u32) {
@@ -483,7 +483,7 @@ fn windows_metadata_round_trips_through_winrar() {
         assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), attrs) }, 0);
     }
     fn attrs(path: &Path) -> u32 {
-        const STORED: u32 = 0x1 | 0x2 | 0x4 | 0x20;
+        const STORED: u32 = 0x1 | 0x2 | 0x4 | 0x20 | 0x2000;
         std::fs::metadata(path).unwrap().file_attributes() & STORED
     }
 
@@ -497,19 +497,30 @@ fn windows_metadata_round_trips_through_winrar() {
     let ro = src.join("ro.txt");
     let hidden = src.join("hidden.txt");
     let sys = src.join("sys.txt");
+    let indexed = src.join("indexed.txt");
     let nfd = src.join("decomposed_e\u{301}.txt");
-    for f in [&ro, &hidden, &sys, &nfd] {
+    for f in [&ro, &hidden, &sys, &indexed, &nfd] {
         std::fs::write(f, b"body").unwrap();
     }
     set_attrs(&ro, FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE);
     set_attrs(&hidden, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE);
     set_attrs(&sys, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE);
+    set_attrs(
+        &indexed,
+        FILE_ATTRIBUTE_NOT_CONTENT_INDEXED | FILE_ATTRIBUTE_ARCHIVE,
+    );
 
     let archive = dir.path().join("attrs.rar");
     let (ok, out) = run(Command::new(ours_rar)
         .args(["a", "-m0", "-idq"])
         .arg(&archive)
-        .args(["ro.txt", "hidden.txt", "sys.txt", "decomposed_e\u{301}.txt"])
+        .args([
+            "ro.txt",
+            "hidden.txt",
+            "sys.txt",
+            "indexed.txt",
+            "decomposed_e\u{301}.txt",
+        ])
         .current_dir(&src));
     assert!(ok, "create failed:\n{out}");
 
@@ -544,6 +555,11 @@ fn windows_metadata_round_trips_through_winrar() {
             attrs(&dest.join("sys.txt")),
             FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE,
             "{tag}: system must survive"
+        );
+        assert_eq!(
+            attrs(&dest.join("indexed.txt")),
+            FILE_ATTRIBUTE_NOT_CONTENT_INDEXED | FILE_ATTRIBUTE_ARCHIVE,
+            "{tag}: not-content-indexed must survive"
         );
         // The decomposed name is kept exactly, not NFC-composed.
         let names: Vec<String> = std::fs::read_dir(&dest)

@@ -63,13 +63,15 @@ fn apply_windows_attributes(hdr: &crate::model::FileHeader, dest_path: &Path) {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
-        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_READONLY,
+        FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
     };
 
     const STORED_DOS_ATTRIBUTES: u64 = (FILE_ATTRIBUTE_READONLY
         | FILE_ATTRIBUTE_HIDDEN
         | FILE_ATTRIBUTE_SYSTEM
-        | FILE_ATTRIBUTE_ARCHIVE) as u64;
+        | FILE_ATTRIBUTE_ARCHIVE
+        | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED) as u64;
     let mut attrs = match hdr.host_attributes() {
         crate::model::HostAttributes::Dos => (hdr.attributes & STORED_DOS_ATTRIBUTES) as u32,
         crate::model::HostAttributes::UnixMode(_) | crate::model::HostAttributes::Other => {
