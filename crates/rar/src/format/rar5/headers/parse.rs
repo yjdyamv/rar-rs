@@ -701,7 +701,13 @@ fn parse_extra_records(
                 }
             }
             EXTRA_FILE_VERSION => {
-                if let Ok((v, _)) = vint::decode_from_slice(extra_data, body_start) {
+                // `[flags vint][version vint]`: the flags are reserved and
+                // ignored (libarchive's `parse_file_extra_version` reads and
+                // discards them the same way). Reading the first vint as the
+                // version silently reported every old version as 0.
+                if let Ok((_, fl)) = vint::decode_from_slice(extra_data, body_start)
+                    && let Ok((v, _)) = vint::decode_from_slice(extra_data, body_start + fl)
+                {
                     version = Some(v);
                 }
             }
@@ -1528,6 +1534,23 @@ mod tests {
         let extra = file_time_record(0x0002, &[u64::MAX]);
         let header = FileHeader::from_raw(&raw_block(file_header_with_extra(&extra)), 0).unwrap();
         assert_eq!(header.mtime, u32::MAX);
+    }
+
+    /// The VERSION extra record body is `[flags vint][version vint]`
+    /// (libarchive's `parse_file_extra_version` reads and discards the
+    /// flags). Reading the first vint as the version reported every old
+    /// version as 0.
+    #[test]
+    fn file_version_record_skips_the_flags_field() {
+        let mut body = Vec::new();
+        body.extend(vint::encode(0u64)); // flags (reserved, ignored)
+        body.extend(vint::encode(3u64)); // version
+        let mut record = vint::encode(body.len() as u64 + 1);
+        record.extend(vint::encode(EXTRA_FILE_VERSION));
+        record.extend(body);
+
+        let header = FileHeader::from_raw(&raw_block(file_header_with_extra(&record)), 0).unwrap();
+        assert_eq!(header.version, Some(3));
     }
 
     #[test]
