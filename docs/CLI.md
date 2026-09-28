@@ -183,7 +183,15 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 - `-da` / `-df` / `-kb` / `-si<name>` — delete the archive after a successful
   extraction (volumes and `.rev` included) / delete sources / keep broken /
   stdin member
-- `-ver[n]` / `-ag[fmt]` — versioning / auto-name (local time)
+- `-ver[n]` — file versions. On create/update, `-ver` keeps the replaced member
+  as an old version and `-verN` caps how many are retained. On extraction the
+  default writes only the current version, `-ver` writes every version as
+  `name;N`, `-verN` writes only version `N` under the plain name, and a `name;N`
+  selector picks that version alone. RAR5 stores the version in the VERSION
+  extra record (RAR 1.5–4.x keeps `;N` in the name); our RAR5 **writer** still
+  renames to a literal `name;N`, so an archive we create is read by WinRAR but
+  its default extraction keeps both names
+- `-ag[fmt]` — auto-name from the local time
 - `-y` / `-o±` — yes / overwrite mode. On a console (stdin is a terminal),
   extraction without `-y`/`-o±`/`-or` asks before replacing each existing file
   (`Y`es / `N`o / `A`ll / `R`ename / `Q`uit), like WinRAR; a non-interactive run

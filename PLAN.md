@@ -4,12 +4,12 @@
 > （RAR5/RAR4）写官方同样存储的 `0x2000`、抽取还原该位、`lt` 首列渲染 `I`；
 > 对拍官方 6.23/7.23 钉住「官方只额外保留这一位，offline/pinned/no-scrub
 > 也丢」；以及**抽取时用文件替换同名空目录**（官方 7.30 行为）——并顺带把 7.30
-> `Rar.txt` 逐项审查发现的缺口记入「待办」（裸 `-v`、`-ver` 读取、`la`/`va`
-> 命令、 `-limt`、保留名清洗等）。 前轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13
-> 忽略该标志 （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O
-> 失败）；并给 napi 补 `oldNumbering`、改正其 `volumeSize` 文档。更前轮：**RAR4
-> 分卷创建对齐官方新式 命名 + `.rev` trailer 布局**——创建默认改
-> `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
+> `Rar.txt` 逐项审查发现的缺口记入「待办」（`-ver` 读取与裸 `-v` 已修；余下
+> `la`/`va` 命令、 `-limt`、保留名清洗等）。 前轮：**`-vn` 限定 RAR
+> 1.5–4.x**——RAR5/RAR13 忽略该标志 （此前它泄漏到共用的命名助手，让 RAR5
+> 分卷创建在安装阶段 I/O 失败）；并给 napi 补 `oldNumbering`、改正其
+> `volumeSize` 文档。更前轮：**RAR4 分卷创建对齐官方新式 命名 + `.rev` trailer
+> 布局**——创建默认改 `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
 >
 > - 官方 20 字节 `ENDARC`（其后 7 零字节），`.rev` 随之自动落 trailer 布局、
 >   名字自动成 `base.partNN.rev`；新增 `-vn`（`old_numbering`）回旧式
@@ -80,10 +80,6 @@
 按本地安装的 RAR 7.30 beta 1 `Rar.txt` + `WhatsNew.txt` 与实测逐项核对，
 以下都是与官方可见行为的偏离（按影响排序）：
 
-- [ ] **`-ver[n]` 只写不读**：`FileHeader::version` 已从 VERSION extra
-      记录解析， 但库里再无消费者——列表不显示 `name;n`（官方 `lt` 显示
-      `f.txt;1`）、抽取不按 版本过滤（官方默认只解当前版本，`-ver` 全解、`-verN`
-      只解第 N 版并去后缀）、 选择器也不认 `f.txt;5`。
 - [ ] **`la`/`lba`/`va`/`vba` 命令被拒**（7.30 新增，`Rar.txt` 的 `l[a,b,t]`/
       `v[a,b,t]`）：官方 exit 0，我们 `unknown command` exit 7。另外服务块列表
       （`lt` 已显示 STM 流、`lta`/`vta` 还有 `Service: EOF`）我们完全不列。
@@ -170,6 +166,22 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **`-ver[n]` 的解析与消费**（2026-09-28 对拍官方 7.30 beta 1）：两件事。①
+  **解析 bug**：VERSION extra 记录的 body 是
+  `[flags vint][version vint]`（libarchive 的 `parse_file_extra_version`
+  同样先读并丢弃 flags），我们只读第一个 vint，于是每个 旧版本都读成 0——官方
+  `lt`/`lb` 显示的 `f.txt;1` 在我们这里是 `f.txt`。现读第二个 vint。②
+  **消费**：新增 `ArchiveEntry::file_version()`；列表（`l`/`v`/`lb`/`lt` 及
+  变体）按 `name;N` 渲染；抽取默认只解当前版本（version 0/无记录），`-ver`
+  全解并保留 `;N`、`-verN` 只解第 N 版并去后缀、选择器 `f.txt;5` 只选第 5
+  版，均与官方逐一对拍。 新增 `ExtractOptions::file_version_suffix`（默认
+  false；CLI 在 `-ver` 全解或显式 `;N` 选择器时置真）承载输出名。契约由
+  `format::rar5::headers::parse::tests::file_version_record_skips_the_flags_field`、
+  `winrar_interop::member_selection::file_versions_follow_winrar` 与
+  `ops::tests` 两个 用例钉住。**已知残余**：我们**创建** `-ver`
+  归档时仍把旧版本改名成字面 `name;N` （RAR5 官方写 VERSION
+  记录）——官方能读，但默认抽取会把两者都解出来；改成写 VERSION
+  记录需要给编辑器加一个「设版本」操作（RAR4 无此记录，仍用字面名）。
 - **裸 `-v` 不再被当成 `--volume-size`**（2026-09-28 对拍官方 7.30 beta
   1）：官方裸 `-v`（无尺寸）在创建时是「卷大小自适应」（本机硬盘上即单文件），在
   `l`/`v` 列表时 是「从命名卷起的全部卷」。我们把它翻成需要取值的
