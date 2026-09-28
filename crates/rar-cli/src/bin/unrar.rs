@@ -81,22 +81,22 @@ enum Command {
     #[command(visible_alias = "e")]
     ExtractFlat(ExtractArgs),
     /// List contents
-    #[command(visible_alias = "l")]
+    #[command(visible_aliases = ["l", "la"])]
     List(ArchiveArgs),
     /// List bare (names only, like `lb`)
-    #[command(visible_alias = "lb")]
+    #[command(visible_aliases = ["lb", "lba"])]
     ListBare(ArchiveArgs),
     /// List technical (like `lt`)
-    #[command(visible_alias = "lt")]
+    #[command(visible_aliases = ["lt", "lta"])]
     ListTechnical(ArchiveArgs),
     /// Verbosely list contents
-    #[command(visible_alias = "v")]
+    #[command(visible_aliases = ["v", "va"])]
     VerboseList(ArchiveArgs),
     /// Verbosely list bare (like `vb`)
-    #[command(visible_alias = "vb")]
+    #[command(visible_aliases = ["vb", "vba"])]
     VerboseListBare(ArchiveArgs),
     /// Verbosely list technical (like `vt`)
-    #[command(visible_alias = "vt")]
+    #[command(visible_aliases = ["vt", "vta"])]
     VerboseListTechnical(ArchiveArgs),
     /// Test integrity
     #[command(visible_alias = "t")]
