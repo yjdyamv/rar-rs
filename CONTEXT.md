@@ -1,6 +1,6 @@
 # CONTEXT — rar-rs
 
-> 最后核对：2026-09-22 @ `fbe2f8c`；实现细节以源码为准。
+> 最后核对：2026-09-28 @ `33fb69d`；实现细节以源码为准。
 
 领域词汇（本仓库术语的单一来源）。给架构审查和后续 skill 使用；新术语先查这里，
 模糊了就地改。非词汇信息（模块地图、工程状态、限制）不放这里，见文末指针。
@@ -193,13 +193,15 @@
 - **Platform metadata（`platform.rs`）** — 按宿主平台写 RAR5
   成员元数据的唯一出处 （2026-09-23）：`host_os()`（Windows 0 / Unix
   1）、属性（Windows 取 DOS 位、目录 `0x10`、symlink `0x420`、junction
-  `0x410`、hardlink/copy `0x20`；Unix 取 `st_mode`）、 时间载体
-  `file_time_is_windows()`（Windows 上清 `FILE_FLAG_TIME_UNIX`、时间放进
-  FILE_TIME 记录并写 Windows FILETIME；`-ts1` 仍用 unix 秒）。`engine` 与
-  `format`
-  都经它取头字段，因此同一输入在两平台各产出与官方对应平台一致的元数据。RAR4 的
-  DOS 属性字段也走这里（`rar4_file_attributes`/`rar4_dir_attributes`：Windows
-  直拷 文件属性、非 Windows 落 `0x20`/`0x10`）。
+  `0x410`、hardlink/copy `0x20`、not-content-indexed `0x2000`；Unix 取
+  `st_mode`）、 时间载体 `file_time_is_windows()`（Windows 上清
+  `FILE_FLAG_TIME_UNIX`、时间放进 FILE_TIME 记录并写 Windows FILETIME；`-ts1`
+  仍用 unix 秒）。`engine` 与 `format`
+  都经它取头字段，因此同一输入在两平台各产出与官方对应平台一致的元数据。抽取侧
+  `extract/dest.rs` 还原同一子集（只读/隐藏/系统/归档/内容未索引 +
+  目录位）。RAR4 的 DOS
+  属性字段也走这里（`rar4_file_attributes`/`rar4_dir_attributes`：Windows 直拷
+  文件属性、非 Windows 落 `0x20`/`0x10`）。
 - **ExtractionReport（`format/shared/extract/members.rs`，经
   `archive/reader.rs`）** —
   抽取操作的唯一回报值（2026-09）：`written`（真正写出的文件与创建的链接，按归档序）+

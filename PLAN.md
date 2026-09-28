@@ -1,10 +1,13 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-26（本轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志
+> 最后核对：2026-09-28（本轮：**Windows `NOT_CONTENT_INDEXED` 属性位对齐**——创建
+> （RAR5/RAR4）写官方同样存储的 `0x2000`、抽取还原该位、`lt` 首列渲染 `I`；
+> 对拍官方 6.23/7.23 钉住「官方只额外保留这一位，offline/pinned/no-scrub
+> 也丢」。 前轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志
 > （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O 失败）；并给 napi
-> 补 `oldNumbering`、改正其 `volumeSize` 文档。前轮：**RAR4 分卷创建对齐官方新式
-> 命名 + `.rev` trailer 布局**——创建默认改 `base.partNN.rar`（零填充）+ 每卷主头
-> `MHD_NEWNUMBERING`
+> 补 `oldNumbering`、改正其 `volumeSize` 文档。更前轮：**RAR4
+> 分卷创建对齐官方新式 命名 + `.rev` trailer 布局**——创建默认改
+> `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
 >
 > - 官方 20 字节 `ENDARC`（其后 7 零字节），`.rev` 随之自动落 trailer 布局、
 >   名字自动成 `base.partNN.rev`；新增 `-vn`（`old_numbering`）回旧式
@@ -17,10 +20,10 @@
 >   `data_size`/`unpacked_size`/`comp_info` 改写到官方的最小 2 字节、STM
 >   服务块按官方的 `vint_size(unpacked_size << 12)` 预留（此前三者全是
 >   最小编码，−3 字节/成员）；**Unix 时间载体去重**，头内 mtime 与 FILE_TIME
->   记录 二选一（此前两者都写））。另记 Windows 属性位子集、`-ts`
->   数字组合两处差异。 前轮：**主头 locator 恒写**（含 QO 0 占位、主头块 flags
->   0x5），并顺带修 `split_main_extra` 只看标志位 就重建 QO 记录的真
->   bug；locator 的偏移**宽度**仍是我们定长 5 字节 vs 官方按预计 大小 3–6
+>   记录 二选一（此前两者都写））。另记 `-ts` 数字组合一处差异。 前轮：**主头
+>   locator 恒写**（含 QO 0 占位、主头块 flags 0x5），并顺带修
+>   `split_main_extra` 只看标志位 就重建 QO 记录的真 bug；locator
+>   的偏移**宽度**仍是我们定长 5 字节 vs 官方按预计 大小 3–6
 >   字节）。更前轮：**元数据改为按宿主平台写** ——新增 `platform.rs` 统一
 >   `host_os`/属性/时间载体，Windows 上写 `host_os`=0 + DOS 属性 + FILE_TIME
 >   记录的 Windows FILETIME，WinRAR/我们都恢复只读/隐藏/系统位、也不再被 NFC
@@ -136,6 +139,19 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **Windows `NOT_CONTENT_INDEXED` 属性位**（2026-09-28 对拍官方 6.23/7.23）：
+  `platform.rs` 的 `STORED_DOS_ATTRIBUTES` 与抽取侧 `dest.rs` 的掩码都漏了
+  `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED`（`0x2000`）——从「内容未索引」目录继承该位的
+  文件，创建时我们写 `0x20`、官方写
+  `0x2020`（`A0 40`），抽取官方归档时我们也把该位 抹掉，`lt` 的首列 `I`
+  同样不渲染；结果同一文件的属性无法跨工具往返。现写、抽取、
+  显示三处补齐。**实测口径**：`attrib` 可设的位里官方只额外保留这一位，offline /
+  pinned / unpinned / no-scrub 官方也一律丢弃，故不进子集。契约由
+  `rar5_edge_cases::extract_attributes::windows::not_content_indexed_attribute_round_trips`
+  （修正前失败、修正后通过）、`winrar_interop::rar4_create::rar4_stores_and_restores_dos_attributes`
+  与 `scenarios::windows_metadata_round_trips_through_winrar` 的 `indexed.txt`
+  用例， 以及
+  `ops::tests::dos_attribute_column_renders_the_not_content_indexed_bit` 钉住。
 - **RAR5 并行 batch 的内存成员带时间**（2026-09-26）：`prepare_batch_wave` 的
   `BatchEntry::Bytes` 分支只算秒值、`time_extra` 恒为 `None`，而 Windows
   上头内不 写 mtime，于是经 `add_batch` 添加的内存成员（绑定的 `bytes`
@@ -802,12 +818,6 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   对**已选**时间做秒截断），故 `-tsc1`/`-tsa1` 与官方差一个 ns
   位，`-tsc2`/`-ts3` 之类我们仍按请求存
   ctime/atime。按「静默丢弃用户请求＝缺陷，不照抄」的既有口径处理，未追平。
-- **Windows 属性的位子集**（2026-09-23 对拍官方 7.23）：`platform.rs` 的
-  `STORED_DOS_ATTRIBUTES` 只映射只读/隐藏/系统/目录/归档/重解析点六位，于是从
-  目录继承了「内容未索引」（`FILE_ATTRIBUTE_NOT_CONTENT_INDEXED`，`0x2000`）的
-  文件，我们属性字段写 `0x20`、官方写 `0x2020`（`A0 40`），解出后我们丢该位、
-  官方保留。官方显然照抄了更多 Windows 位；逐位对齐需先测清它的取舍。属有意
-  子集，未对齐。
 - **Windows 联接点的 redirect 目标字符串**（2026-09-23 对拍官方 7.23）：`-ol` 存
   junction 时我们写其原始路径（`C:\dir\target`，反斜杠），WinRAR 写 NT 打印名、
   正斜杠、带 `/??/`
