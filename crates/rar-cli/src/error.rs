@@ -29,6 +29,8 @@ pub const EXIT_MEMORY: i32 = 8;
 pub const EXIT_CREATE: i32 = 9;
 pub const EXIT_NO_FILES: i32 = 10;
 pub const EXIT_WRONG_PASSWORD: i32 = 11;
+pub const EXIT_DELETE: i32 = 14;
+pub const EXIT_TIMEOUT: i32 = 15;
 pub const EXIT_USER_BREAK: i32 = 255;
 
 /// A user-facing failure together with the process exit code it maps to.

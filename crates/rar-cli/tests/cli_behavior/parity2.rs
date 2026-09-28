@@ -684,6 +684,41 @@ fn cli_a_list_modifiers_are_accepted() {
     }
 }
 
+/// `-limt<sec>` is RAR-only: official UnRAR rejects it as an unknown option
+/// (exit 7) while `rar` accepts the switch.
+#[test]
+fn cli_limt_is_rar_only() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"body").unwrap();
+    let archive = dir.path().join("a.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let rar = std::process::Command::new(RAR_CLI)
+        .args(["l", "-limt60", "-idq"])
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(rar.success(), "rar must accept -limt");
+
+    let unrar = std::process::Command::new(UNRAR_CLI)
+        .args(["l", "-limt60", "-idq"])
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert_eq!(
+        unrar.code(),
+        Some(7),
+        "unrar must reject -limt like the official binary"
+    );
+}
+
 /// Solid archives carry the `, solid` suffix and mark chain continuations
 /// with WinRAR's `Flags: solid` line.
 #[test]

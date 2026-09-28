@@ -223,6 +223,13 @@ fn main() {
     let raw: Vec<String> = std::env::args_os()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    // `-limt<sec>` is a RAR-only switch: official UnRAR rejects it as an
+    // unknown option (exit 7), so do not let the shared switch table swallow
+    // it.
+    if let Some(token) = raw.iter().skip(1).find(|arg| arg.starts_with("-limt")) {
+        eprintln!("ERROR: Unknown option: {}", &token[1..]);
+        process::exit(error::EXIT_BAD_COMMAND);
+    }
     // Configuration sources (priority: command line > RARINISWITCHES >
     // rar.ini / .rarrc); normalized first so `-cfg-` and `--no-config` are
     // the same check.

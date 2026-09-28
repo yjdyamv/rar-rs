@@ -9,10 +9,11 @@ use crate::edit::editor_delete_plan;
 use crate::edit::open_editor;
 use crate::error;
 use crate::error::CliResult;
+use crate::filters::TimeBound;
 use crate::filters::TimeKind;
-use crate::filters::file_time;
+use crate::filters::bound_matches;
+use crate::filters::parse_date_filter;
 use crate::filters::parse_period_filter;
-use crate::filters::parse_rar_date;
 use crate::filters::read_mask_file;
 use crate::info;
 use crate::input;
@@ -346,8 +347,32 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         || !args.tn_filters.is_empty()
         || !args.to_filters.is_empty()
     {
-        let after = args.after.as_deref().map(parse_rar_date).transpose()?;
-        let before = args.before.as_deref().map(parse_rar_date).transpose()?;
+        // WinRAR keeps one filter per time kind: a later switch naming the
+        // same kind replaces the earlier one (`-tnm1d -tnmc30d` ends up with
+        // a 30-day mtime bound), while different kinds are kept. Plain
+        // filters must all pass; the `o` filters form one OR group.
+        let mut slots: [Option<(TimeBound, bool)>; 3] = [None, None, None];
+        let mut set = |kinds: &[TimeKind], or: bool, bound: TimeBound| {
+            for kind in kinds {
+                slots[kind.index()] = Some((bound, or));
+            }
+        };
+        if let Some(spec) = args.after.as_deref() {
+            let (kinds, or, date) = parse_date_filter(spec)?;
+            set(&kinds, or, TimeBound::After(date));
+        }
+        if let Some(spec) = args.before.as_deref() {
+            let (kinds, or, date) = parse_date_filter(spec)?;
+            set(&kinds, or, TimeBound::Before(date));
+        }
+        for spec in &args.tn_filters {
+            let (kinds, or, period) = parse_period_filter(spec);
+            set(&kinds, or, TimeBound::Newer(period));
+        }
+        for spec in &args.to_filters {
+            let (kinds, or, period) = parse_period_filter(spec);
+            set(&kinds, or, TimeBound::Older(period));
+        }
         // Compare in nanosecond precision (like WinRAR): whole-second
         // truncation would wrongly drop files created within the same
         // second as the run, e.g. `-to` with an empty period.
@@ -355,18 +380,6 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let filters: Vec<(TimeKind, u64, bool)> = args
-            .tn_filters
-            .iter()
-            .map(|s| {
-                let (k, p) = parse_period_filter(s);
-                (k, p, true)
-            })
-            .chain(args.to_filters.iter().map(|s| {
-                let (k, p) = parse_period_filter(s);
-                (k, p, false)
-            }))
-            .collect();
         collected.retain(|c| {
             if c.is_dir {
                 return true;
@@ -375,20 +388,25 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 Ok(m) => m,
                 Err(_) => return false,
             };
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let after_ok = after.is_none_or(|a| mtime > u128::from(a) * 1_000_000_000);
-            let before_ok = before.is_none_or(|b| mtime < u128::from(b) * 1_000_000_000);
-            let period_ok = filters.iter().all(|&(kind, period, is_tn)| {
-                let t = file_time(&meta, kind);
-                let bound = now.saturating_sub(u128::from(period) * 1_000_000_000);
-                if is_tn { t >= bound } else { t < bound }
-            });
-            after_ok && before_ok && period_ok
+            let mut plain_ok = true;
+            let mut or_seen = false;
+            let mut or_ok = false;
+            for (index, slot) in slots.iter().enumerate() {
+                let Some((bound, or)) = slot else { continue };
+                let kind = match index {
+                    0 => TimeKind::Modified,
+                    1 => TimeKind::Created,
+                    _ => TimeKind::Accessed,
+                };
+                let pass = bound_matches(kind, *bound, &meta, now);
+                if *or {
+                    or_seen = true;
+                    or_ok |= pass;
+                } else {
+                    plain_ok &= pass;
+                }
+            }
+            plain_ok && (!or_seen || or_ok)
         });
     }
     // -ol / -oh: symbolic links and hard links are stored as redirect
@@ -445,7 +463,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         None
     } else {
         Some(
-            rar_rs::ArchiveWriter::create_with(archive_path, opts.clone())
+            crate::ops::create_writer(archive_path, opts.clone())
                 .map_err(|e| format!("create: {e}"))?,
         )
     };
@@ -622,10 +640,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                     if let Some(size) = dictionary {
                         append_opts = append_opts.dictionary_size(size);
                     }
-                    rar_rs::ArchiveWriter::append_with(staged_path, append_opts)
+                    crate::ops::append_writer(staged_path, append_opts)
                         .map_err(|e| format!("open: {e}"))?
                 } else {
-                    rar_rs::ArchiveWriter::create_with(staged_path, opts.clone())
+                    crate::ops::create_writer(staged_path, opts.clone())
                         .map_err(|e| format!("create: {e}"))?
                 };
                 write_members(writer)
@@ -748,7 +766,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     if undeleted > 0 {
         return Err(error::CliError::with_code(
             format!("-df: {undeleted} source file(s) could not be deleted"),
-            error::EXIT_WARNING,
+            error::EXIT_DELETE,
         ));
     }
     // -as: synchronize the archive contents — drop members that are not

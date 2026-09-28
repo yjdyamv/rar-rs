@@ -7,12 +7,79 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{CliError, CliResult};
 use crate::output;
 use rar_rs::version::ArchiveVersion;
 use rar_rs::{ArchiveReader, EntryId, EntryRef, ExtractOptions, ExtractionReport, ScanStrategy};
+
+/// Process-wide `-limt<sec>` deadline flag. It is installed on every archive
+/// the CLI opens, so a long read or write returns
+/// [`RarError::Cancelled`](rar_rs::RarError::Cancelled) at its next
+/// per-member/per-block checkpoint instead of running to completion.
+static TIME_LIMIT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// Arm WinRAR's `-limt<sec>`: after `seconds` the shared flag is set and the
+/// running archive operation aborts. Zero is WinRAR's "no limit".
+///
+/// RAR-only: `unrar` rejects `-limt` (official UnRAR does too), so the
+/// function is dead in that binary.
+#[allow(dead_code)]
+pub fn install_time_limit(seconds: u64) {
+    if seconds == 0 {
+        return;
+    }
+    let flag = Arc::new(AtomicBool::new(false));
+    if TIME_LIMIT.set(flag.clone()).is_err() {
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+        flag.store(true, Ordering::Relaxed);
+    });
+}
+
+/// The `-limt` flag to install with `set_cancel_flag`, or `None` when no
+/// limit was requested.
+pub fn time_limit_flag() -> Option<Arc<AtomicBool>> {
+    TIME_LIMIT.get().cloned()
+}
+
+/// Whether the `-limt` timer fired (so the CLI reports exit 15, not a user
+/// break). RAR-only, like [`install_time_limit`].
+#[allow(dead_code)]
+pub fn timed_out() -> bool {
+    TIME_LIMIT
+        .get()
+        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+/// [`ArchiveWriter::create_with`](rar_rs::ArchiveWriter::create_with) with the
+/// `-limt` cancel flag installed. RAR-only (unrar never writes).
+#[allow(dead_code)]
+pub fn create_writer(
+    path: impl AsRef<Path>,
+    options: rar_rs::WriterOptions,
+) -> rar_rs::RarResult<rar_rs::ArchiveWriter> {
+    let mut writer = rar_rs::ArchiveWriter::create_with(path, options)?;
+    let _ = writer.set_cancel_flag(time_limit_flag());
+    Ok(writer)
+}
+
+/// [`ArchiveWriter::append_with`](rar_rs::ArchiveWriter::append_with) with the
+/// `-limt` cancel flag installed. RAR-only (unrar never writes).
+#[allow(dead_code)]
+pub fn append_writer(
+    path: impl AsRef<Path>,
+    options: rar_rs::AppendOptions,
+) -> rar_rs::RarResult<rar_rs::ArchiveWriter> {
+    let mut writer = rar_rs::ArchiveWriter::append_with(path, options)?;
+    let _ = writer.set_cancel_flag(time_limit_flag());
+    Ok(writer)
+}
 
 /// Quiet labels (`-idq` / `-inul`) suppress the listing tables entirely,
 /// like WinRAR's `l`/`v`/`lt`.
@@ -58,12 +125,16 @@ fn open_reader_with_strategy(
         ArchiveReader::open_with(candidate, options)
     };
     let first = match open(path) {
-        Ok(rar) => return Ok(rar),
+        Ok(mut rar) => {
+            rar.set_cancel_flag(time_limit_flag());
+            return Ok(rar);
+        }
         Err(error) => error,
     };
     if !path.exists() && path.extension().is_none() {
         for candidate in inferred_archive_paths(path) {
-            if let Ok(rar) = open(&candidate) {
+            if let Ok(mut rar) = open(&candidate) {
+                rar.set_cancel_flag(time_limit_flag());
                 return Ok(rar);
             }
         }
@@ -1100,6 +1171,15 @@ mod tests {
         assert_eq!(split_version_selector("f.txt;3"), Some(("f.txt", 3)));
         assert_eq!(split_version_selector("f.txt"), None);
         assert_eq!(split_version_selector("f.txt;x"), None);
+    }
+
+    /// `-limt<sec>` arms a timer whose flag the archive operations observe.
+    #[test]
+    fn time_limit_flag_fires_after_the_deadline() {
+        assert!(!super::timed_out());
+        super::install_time_limit(1);
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        assert!(super::timed_out(), "the -limt timer must set the flag");
     }
 
     /// `t` streams every member to a sink, so the materializing read caps

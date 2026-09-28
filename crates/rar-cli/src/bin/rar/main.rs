@@ -96,7 +96,18 @@ fn main() {
         }
     }
     let log_errors = cli.misc.log_errors.clone();
+    if let Some(seconds) = cli.misc.time_limit {
+        // `-limt<sec>`: arm the timer before the command opens anything.
+        ops::install_time_limit(seconds);
+    }
     if let Err(e) = run(cli) {
+        // `-limt<sec>`: the timer fired, so this is WinRAR's exit 15 rather
+        // than the error the cancelled operation happened to surface (the
+        // CLI stringifies some errors, losing the category).
+        if ops::timed_out() {
+            eprintln!("Timeout exceeded.");
+            process::exit(error::EXIT_TIMEOUT);
+        }
         // A silent outcome (exit code only) was already reported on stdout.
         if !e.message().is_empty() {
             eprintln!("rar: {e}");

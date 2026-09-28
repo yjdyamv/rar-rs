@@ -130,6 +130,53 @@ fn cli_da_deletes_the_archive_after_extraction() {
     assert!(locked.exists(), "a failed extraction keeps the archive");
 }
 
+/// A `-da` delete failure is WinRAR 7.30's exit 14 (it used to map to the
+/// generic fatal 2).
+#[cfg(windows)]
+#[test]
+fn cli_da_delete_failure_exits_14() {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// `FILE_SHARE_READ`: other handles may read, but not delete.
+    const FILE_SHARE_READ: u32 = 0x1;
+
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let archive = dir.path().join("one.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma5", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Hold the archive open without `FILE_SHARE_DELETE`, so extraction reads
+    // it but `-da` cannot remove it.
+    let _lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&archive)
+        .unwrap();
+    let output = std::process::Command::new(RAR_CLI)
+        .args(["x", "-da", "-o+", "-idq"])
+        .arg(&archive)
+        .args(["--dest"])
+        .arg(&out)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(14),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(out.join("a.txt").exists(), "the member was still extracted");
+}
+
 #[test]
 fn cli_period_filters_tn_to_match_winrar() {
     let dir = make_temp_dir();

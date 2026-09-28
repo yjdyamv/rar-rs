@@ -520,6 +520,10 @@ pub struct MiscSwitches {
     /// `l`/`v`.
     #[arg(global = true, long = "auto-volumes")]
     pub auto_volumes: bool,
+    /// Abort a long operation once this many seconds have elapsed
+    /// (`-limt<sec>`; WinRAR reports exit 15).
+    #[arg(global = true, long = "time-limit", value_name = "SEC")]
+    pub time_limit: Option<u64>,
     /// Erase disk contents before creating volume (`-vd`; removable
     /// media only, never touched)
     #[arg(global = true, long = "erase-disk")]
@@ -919,6 +923,9 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-om") {
         return format!("--mark-web={rest}");
     }
+    if let Some(rest) = arg.strip_prefix("-limt") {
+        return format!("--time-limit={rest}");
+    }
     if let Some(rest) = arg.strip_prefix("-log") {
         return format!("--log={rest}");
     }
@@ -1151,7 +1158,7 @@ pub fn delete_archive_set(archive: &str) -> crate::error::CliResult<()> {
         std::fs::remove_file(victim).map_err(|error| {
             crate::error::CliError::with_code(
                 format!("-da: cannot delete {}: {error}", victim.display()),
-                crate::error::EXIT_FATAL,
+                crate::error::EXIT_DELETE,
             )
         })?;
     }

@@ -279,7 +279,7 @@ fn cmd_update_freshen(
             if let Some(size) = dictionary {
                 append_opts = append_opts.dictionary_size(size);
             }
-            rar_rs::ArchiveWriter::append_with(staged_path, append_opts)
+            crate::ops::append_writer(staged_path, append_opts)
                 .map_err(|error| format!("open staged archive for append: {error}"))?
         } else {
             let mut writer_opts = rar_rs::WriterOptions::new()
@@ -300,7 +300,7 @@ fn cmd_update_freshen(
             if let Some(size) = dictionary {
                 writer_opts = writer_opts.dictionary_size(size);
             }
-            rar_rs::ArchiveWriter::create_with(staged_path, writer_opts)
+            crate::ops::create_writer(staged_path, writer_opts)
                 .map_err(|error| format!("recreate staged archive: {error}"))?
         };
         let mut write_entries: Vec<rar_rs::WriteEntry<'_>> = Vec::with_capacity(to_add.len());
@@ -407,7 +407,7 @@ fn cmd_update_freshen(
     if undeleted > 0 {
         return Err(crate::error::CliError::with_code(
             format!("-df: {undeleted} source file(s) could not be deleted"),
-            crate::error::EXIT_WARNING,
+            crate::error::EXIT_DELETE,
         ));
     }
 
