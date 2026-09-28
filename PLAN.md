@@ -80,12 +80,6 @@
 按本地安装的 RAR 7.30 beta 1 `Rar.txt` + `WhatsNew.txt` 与实测逐项核对，
 以下都是与官方可见行为的偏离（按影响排序）：
 
-- [ ] **裸 `-v` 被当成 `--volume-size`**：官方裸 `-v`（无尺寸）在创建时是
-      「卷大小自适应」（本机硬盘上即单文件），在 `l`/`v` 列表时是「列出卷集全部
-      卷」。我们把裸 `-v` 翻译成需要取值的 `--volume-size`，于是 `a -v arc` 把
-      `arc` 当尺寸报错、`l -v arc` 直接缺 ARCHIVE 报错（官方两者都 exit 0）。
-      修法：裸 `-v` 单独成标志；列表侧 = 逐卷 `discover_volumes` 再各自列出
-      （官方 `lb -v` 就是各卷目录顺序拼接）。
 - [ ] **`-ver[n]` 只写不读**：`FileHeader::version` 已从 VERSION extra
       记录解析， 但库里再无消费者——列表不显示 `name;n`（官方 `lt` 显示
       `f.txt;1`）、抽取不按 版本过滤（官方默认只解当前版本，`-ver` 全解、`-verN`
@@ -176,6 +170,17 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **裸 `-v` 不再被当成 `--volume-size`**（2026-09-28 对拍官方 7.30 beta
+  1）：官方裸 `-v`（无尺寸）在创建时是「卷大小自适应」（本机硬盘上即单文件），在
+  `l`/`v` 列表时 是「从命名卷起的全部卷」。我们把它翻成需要取值的
+  `--volume-size`，于是 `a -v arc` 把 `arc` 当尺寸报错、`l -v arc`
+  把归档路径吞成尺寸后缺 ARCHIVE 报错。现裸 `-v` → 新全局标志
+  `--auto-volumes`：创建侧不切卷（固定磁盘即官方结果），列表侧逐卷
+  `discover_volumes` 各自扫一遍（`open_reader_quick` 已按卷列出该卷的头，`lt -v`
+  遂与官方逐字节相同；从 `part3` 起从第 3 卷开始）。契约由
+  `cli_behavior::cli_bare_v_autodetects_and_lists_every_volume`
+  钉住。**已知残余**：
+  可移动介质上官方按剩余空间切卷、我们单文件；多卷列表末尾官方多一行跨卷合计。
 - **抽取目的地的类型冲突**（2026-09-28 对拍官方 7.30 beta
   1）：两个方向都曾整轮失败—— 文件成员压在**同名空目录**上时
   `materialize_member_file` 直接走 `replace_file` （Windows 的 `ReplaceFileW`
