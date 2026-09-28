@@ -1653,3 +1653,31 @@ test('createArchive recoverySectors is the legacy RAR4 sector count', async () =
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test(
+  'extractArchive allowIncompatibleNames keeps a Windows device name',
+  { skip: process.platform !== 'win32' && 'Windows-only name correction' },
+  async () => {
+    const dir = tempDir()
+    try {
+      const { extractArchive } = await import('../index.js')
+      const archive = join(dir, 'names.rar')
+      await createArchive({
+        outPath: archive,
+        entries: [{ kind: 'bytes', name: 'aux', data: Buffer.from([1]) }],
+      })
+
+      // Default: the reserved device name is corrected like WinRAR.
+      const plain = join(dir, 'plain')
+      await extractArchive(archive, { destPath: plain })
+      assert.ok(existsSync(join(plain, '_aux')), 'default must correct `aux`')
+
+      // `-oni`: the name is kept as written.
+      const raw = join(dir, 'raw')
+      await extractArchive(archive, { destPath: raw, allowIncompatibleNames: true })
+      assert.ok(existsSync(join(raw, 'aux')), 'allowIncompatibleNames keeps `aux`')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  },
+)

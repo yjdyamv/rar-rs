@@ -284,10 +284,8 @@ impl ExtractArchiveOptions {
       set_access_time: self.set_access_time.unwrap_or(false),
       skip_links: self.skip_links.unwrap_or(false),
       allow_unsafe_links: self.allow_unsafe_links.unwrap_or(false),
-      // Windows name correction (`-oni`) and `-ver` extraction are not
-      // exposed through the JS API yet.
-      allow_incompatible_names: false,
-      file_version_suffix: false,
+      allow_incompatible_names: self.allow_incompatible_names.unwrap_or(false),
+      file_version_suffix: self.file_version_suffix.unwrap_or(false),
     })
   }
 }
