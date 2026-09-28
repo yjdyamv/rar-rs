@@ -3,11 +3,11 @@
 > 最后核对：2026-09-28（本轮：**Windows `NOT_CONTENT_INDEXED` 属性位对齐**——创建
 > （RAR5/RAR4）写官方同样存储的 `0x2000`、抽取还原该位、`lt` 首列渲染 `I`；
 > 对拍官方 6.23/7.23 钉住「官方只额外保留这一位，offline/pinned/no-scrub
-> 也丢」。 前轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志
-> （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O 失败）；并给 napi
-> 补 `oldNumbering`、改正其 `volumeSize` 文档。更前轮：**RAR4
-> 分卷创建对齐官方新式 命名 + `.rev` trailer 布局**——创建默认改
-> `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
+> 也丢」；以及**抽取时用文件替换同名空目录**（官方 7.30 行为）—— 前轮：**`-vn`
+> 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志 （此前它泄漏到共用的命名助手，让
+> RAR5 分卷创建在安装阶段 I/O 失败）；并给 napi 补 `oldNumbering`、改正其
+> `volumeSize` 文档。更前轮：**RAR4 分卷创建对齐官方新式 命名 + `.rev` trailer
+> 布局**——创建默认改 `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
 >
 > - 官方 20 字节 `ENDARC`（其后 7 零字节），`.rev` 随之自动落 trailer 布局、
 >   名字自动成 `base.partNN.rev`；新增 `-vn`（`old_numbering`）回旧式
@@ -139,6 +139,17 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **抽取目的地的类型冲突**（2026-09-28 对拍官方 7.30 beta
+  1）：两个方向都曾整轮失败—— 文件成员压在**同名空目录**上时
+  `materialize_member_file` 直接走 `replace_file` （Windows 的 `ReplaceFileW`
+  不能替换目录，报 Access denied 并留下
+  `.name.rar5tmp-*`）；目录成员压在**同名文件**上时 `create_dir_all` 报
+  `ERROR_ALREADY_EXISTS`。官方两条都成功：空目录被文件替换、文件被目录替换（非空
+  目录才报 `Directory with such name already exists`，exit 9；WhatsNew 7.30 第 8
+  条）。现安装文件前先试删空目录、创建目录前先删非目录，且安装失败一律清掉暂存文件
+  （此前必留，`-kb` 路径同此）。契约由 `rar5_edge_cases::extract_type_mismatch`
+  三个 用例钉住。**已知残余**：非空目录的退出码仍为 fatal(2)，官方 9（要新增
+  `ErrorCode`，属 API 决策）。
 - **Windows `NOT_CONTENT_INDEXED` 属性位**（2026-09-28 对拍官方 6.23/7.23）：
   `platform.rs` 的 `STORED_DOS_ATTRIBUTES` 与抽取侧 `dest.rs` 的掩码都漏了
   `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED`（`0x2000`）——从「内容未索引」目录继承该位的
