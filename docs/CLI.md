@@ -174,7 +174,11 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 
 **Time**
 
-- `-ta` / `-tb` / `-tn` / `-to` — time filters
+- `-ta` / `-tb` / `-tn` / `-to` — time filters. `m`/`c`/`a` modifiers name
+  mtime/ctime/atime and may be combined (`-tnmc30d`); a later switch naming the
+  same kind replaces the earlier one, plain filters must all pass, and the `o`
+  modifiers form one OR group (`-tnco30d -tnmo1d`). `-ta` includes a file
+  matching the date exactly, `-tb` does not
 - `-tl` / `-tk[<date>]` — set the archive time to newest / keep it, or set it to
   the given local date
 - `-ts[mca][±,1]` — three timestamps; naming kinds **adds** them to the
@@ -187,7 +191,11 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 
 - `-da` / `-df` / `-kb` / `-si<name>` — delete the archive after a successful
   extraction (volumes and `.rev` included) / delete sources / keep broken /
-  stdin member
+  stdin member. A delete failure exits 14 (WinRAR 7.30)
+- `-limt<sec>` — abort a long operation once that many seconds have elapsed: the
+  timer sets a cancel flag installed on every archive the run opens, and a
+  timeout exits 15 with `Timeout exceeded.` (rar only; UnRAR rejects the switch,
+  like the official binary)
 - `-ver[n]` — file versions. On create/update, `-ver` keeps the replaced member
   as an old version and `-verN` caps how many are retained. On extraction the
   default writes only the current version, `-ver` writes every version as

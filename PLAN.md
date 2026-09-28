@@ -4,12 +4,14 @@
 > （RAR5/RAR4）写官方同样存储的 `0x2000`、抽取还原该位、`lt` 首列渲染 `I`；
 > 对拍官方 6.23/7.23 钉住「官方只额外保留这一位，offline/pinned/no-scrub
 > 也丢」；以及**抽取时用文件替换同名空目录**（官方 7.30 行为）——并顺带把 7.30
-> `Rar.txt` 逐项审查发现的缺口记入「待办」（`-ver` 读取与裸 `-v` 已修；余下
-> `la`/`va` 命令、 `-limt`、保留名清洗等）。 前轮：**`-vn` 限定 RAR
-> 1.5–4.x**——RAR5/RAR13 忽略该标志 （此前它泄漏到共用的命名助手，让 RAR5
-> 分卷创建在安装阶段 I/O 失败）；并给 napi 补 `oldNumbering`、改正其
-> `volumeSize` 文档。更前轮：**RAR4 分卷创建对齐官方新式 命名 + `.rev` trailer
-> 布局**——创建默认改 `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
+> `Rar.txt` 逐项审查发现的缺口记入「待办」（`-ver` 读取、裸 `-v`、`la`/`va`
+> 别名、 `-limt`、`-da`/`-df` exit
+> 14、时间过滤修饰符已修；余下服务块列表、保留名清洗、 非空目录退出码）。
+> 前轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志
+> （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O 失败）；并给 napi
+> 补 `oldNumbering`、改正其 `volumeSize` 文档。更前轮：**RAR4
+> 分卷创建对齐官方新式 命名 + `.rev` trailer 布局**——创建默认改
+> `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
 >
 > - 官方 20 字节 `ENDARC`（其后 7 零字节），`.rev` 随之自动落 trailer 布局、
 >   名字自动成 `base.partNN.rev`；新增 `-vn`（`old_numbering`）回旧式
@@ -87,20 +89,11 @@
       `a` 形式，已在 `docs/CLI.md` 写明）。修法：把 `ReadState.streams`
       的元数据（名字/大小/方法/CRC）经一个新的公开访问器暴露，
       再在单行与技术列表里逐成员追加。
-- [ ] **`-limt<sec>` 未接**（`Rar.txt` 运行时限；官方超时报 exit 15）：
-      `rar t -limt1` 官方 exit 0，我们 `unexpected argument '-l'` exit 7。库已有
-      cancel 钩子，落地只需一个计时器并把超时与用户取消区分（exit 15 vs 255）。
 - [ ] **Windows 保留/歧义成员名我们整轮拒绝**：`sanitize_archive_path` 对设备名
       （`aux.txt`）、尾部点/空格、`:` 直接报 `Security` 并中止，官方默认是
       **清洗**（去尾部点/空格、设备名前加 `_`）后正常抽取，`-oni` 才按原名。实测
       官方解 `aux.txt` 成员得 `aux.txt`（用 `\\?\` 字面路径），我们 exit 2
       什么也 不写。`-oni` 目前也只是「接受但不生效」。
-- [ ] **`-da`/`-df` 删除失败未报 exit 14**（7.30 第 6 条）：我们 `-da` 映射
-      fatal(2)、 `-df` 映射 warning(1)。另注意方向相反的一处：只读归档官方 `-da`
-      删不掉报 exit 14，我们反而删得掉（`-df` 两边都删得掉）。
-- [ ] **`-tn`/`-to`/`-ta`/`-tb` 多修饰符与 OR 逻辑**：官方 `-tnmc30d` 同时作用于
-      mtime 与 ctime、`-tnco30d -tnmo20d` 是 OR；`filters.rs` 只保留**最后一个**
-      修饰符、`o` 仅注释「无效果」，即 `-tnmc30d` 实际只按 ctime。
 - [ ] **非空目录挡路时的退出码**：我们 fatal(2) vs 官方 create-error(9)；要新增
       `ErrorCode` 变体，属 API 决策（上轮已记在「已修」条目内）。
 
@@ -170,6 +163,28 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **`-limt<sec>` 运行时限**（2026-09-28 对拍官方 7.30 beta 1）：官方超时报 exit
+  15 + `Timeout exceeded.`；我们此前 `unexpected argument '-l'` exit
+  7。现新增全局 `--time-limit`：CLI 装一个计时线程置共享 cancel
+  标志，`ops::open_reader*` / `open_editor` / `create_writer`/`append_writer`
+  把它装到每个打开的归档上，长操作 在下一个检查点返回 `Cancelled`；超时统一报
+  exit 15（不再被字符串化成语义丢失的 fatal 2）。**UnRAR
+  按官方拒绝该开关**（`ERROR: Unknown option: limtN`，exit 7）。 契约由
+  `cli_limt_is_rar_only` 与
+  `ops::tests::time_limit_flag_fires_after_the_deadline`
+  钉住。**已知残余**：单线程 压缩单个大成员只在成员/chunk 边界检查，abort
+  粒度比官方粗。
+- **`-da`/`-df` 删除失败报 exit 14**（2026-09-28 官方 7.30 第 6 条）：`-da`
+  失败此前 fatal(2)、`-df` 失败 warning(1)，现都报 `EXIT_DELETE`(14)。契约由
+  `cli_da_delete_failure_exits_14`（用 `FILE_SHARE_READ`
+  锁住归档制造删除失败）。
+- **`-ta`/`-tb`/`-tn`/`-to` 的多修饰符、逐类覆盖与 OR 逻辑**（2026-09-28
+  对拍官方 7.30 beta 1）：此前只保留**最后一个**修饰符（`-tnmc30d` 实际只按
+  ctime）、`o` 无 效果。现按官方实测口径实现：`-tnmc30d` 同时约束 mtime 与
+  ctime；**同类后写覆盖** （`-tnm1d -tnmc30d` = m=30d、c=30d，反过来 =
+  m=1d、c=30d）；非 `o` 过滤器全 AND， `o` 过滤器组成一个 OR
+  组（`-tnco30d -tnmo1d`）。`-ta` 按手册改为「等于也算」（`>=`）。 8
+  组组合与官方逐一对拍一致。契约由 `filters::tests` 三个单测钉住。
 - **`-ver[n]` 的解析与消费**（2026-09-28 对拍官方 7.30 beta 1）：两件事。①
   **解析 bug**：VERSION extra 记录的 body 是
   `[flags vint][version vint]`（libarchive 的 `parse_file_extra_version`
