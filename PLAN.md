@@ -554,6 +554,14 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **工程**
 
+- **选项结构的可加性契约（2026-09-28 架构审查）**（A6）：`ExtractOptions` 字段是
+  `pub`，新加一个字段会让穷举字面量的调用方编译失败。**用 `..Default::default()`
+  构造**即可：仓库内除两处有意的映射点（CLI `ExtractRequest::options`、绑定
+  `options.rs`，它们列出每个字段以强制决策）外均已如此，所以实际维护成本已经很小。
+  已在类型文档里写明该契约。**完全体做法**是像 `WriterOptions`
+  那样改成私有字段 + builder（或加 `#[non_exhaustive]`，但 `#[non_exhaustive]`
+  会禁掉 FRU，反而要求 ~40 处改成 `Default::default()` + 赋值），属公开 API
+  变更，留待破坏性发布。
 - **napi 补 `oldNumbering` 并改正其文档（2026-09-26）**：`CreateArchiveOptions`
   补 `old_numbering`（`oldNumbering`，映射库 `WriterOptions::old_numbering` /
   CLI `-vn`）——它是本轮唯一「库与 CLI 已公开、绑定拿不到」的开关；同时改正
