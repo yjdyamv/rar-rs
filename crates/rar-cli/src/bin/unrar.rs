@@ -274,7 +274,7 @@ fn main() {
     let cli = error::parse_args::<Cli>(std::iter::once("unrar".to_string()).chain(args));
     output::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
-    if let Err(e) = run(cli) {
+    if let Err(e) = run(cli, command.as_deref()) {
         // A silent outcome (exit code only) was already reported on stdout.
         if !e.message().is_empty() {
             eprintln!("unrar: {e}");
@@ -283,9 +283,9 @@ fn main() {
     }
 }
 
-fn run(cli: Cli) -> CliResult<()> {
+fn run(cli: Cli, command: Option<&str>) -> CliResult<()> {
     let log_errors = cli.misc.log_errors.clone();
-    let result = run_inner(cli);
+    let result = run_inner(cli, command);
     if let Err(e) = &result
         && !e.message().is_empty()
         && let Some(log) = &log_errors
@@ -302,7 +302,9 @@ fn run(cli: Cli) -> CliResult<()> {
     result
 }
 
-fn run_inner(cli: Cli) -> CliResult<()> {
+fn run_inner(cli: Cli, command: Option<&str>) -> CliResult<()> {
+    // WinRAR's `a` list modifier (`la`/`va`/`lba`/`vba`/`lta`/`vta`).
+    let has_a = command.is_some_and(|name| name.ends_with('a'));
     if cli.misc.erase_disk {
         return Err("-vd/--erase-disk is not supported; no disk was erased".into());
     }
@@ -329,18 +331,46 @@ fn run_inner(cli: Cli) -> CliResult<()> {
         Command::ExtractFlat(args) => {
             cmd_extract_flat(&args, password, ts, max_dict_size, motw, &cli.misc, cli.yes)
         }
-        Command::List(args) => cmd_list(&args, password, &cli.misc),
-        Command::ListBare(args) => cmd_list_bare(&args, password, &cli.misc),
-        Command::ListTechnical(args) => cmd_list_technical(&args, password, &cli.misc),
+        Command::List(args) => cmd_list(&args, password, &cli.misc, ops::ServiceListing::default()),
+        Command::ListBare(args) => {
+            cmd_list_bare(&args, password, &cli.misc, ops::ServiceListing::default())
+        }
+        // UnRAR shows NTFS streams only for `lta`/`vta` (its `lt`/`vt` and the
+        // single-line modes stay stream-free, unlike Rar.exe).
+        Command::ListTechnical(args) => cmd_list_technical(
+            &args,
+            password,
+            &cli.misc,
+            ops::ServiceListing {
+                streams: has_a,
+                eof_marker: has_a,
+            },
+        ),
         Command::VerboseList(args) => {
             let names = listfile::expand(&args.names, cli.misc.list_files.as_deref())
                 .map_err(error::CliError::from)?;
             let rar = ops::open_reader_quick(&args.archive, password)?;
-            ops::list_entries(&rar, &args.archive, &names, true);
+            ops::list_entries(
+                &rar,
+                &args.archive,
+                &names,
+                true,
+                ops::ServiceListing::default(),
+            );
             Ok(())
         }
-        Command::VerboseListBare(args) => cmd_list_bare(&args, password, &cli.misc),
-        Command::VerboseListTechnical(args) => cmd_list_technical(&args, password, &cli.misc),
+        Command::VerboseListBare(args) => {
+            cmd_list_bare(&args, password, &cli.misc, ops::ServiceListing::default())
+        }
+        Command::VerboseListTechnical(args) => cmd_list_technical(
+            &args,
+            password,
+            &cli.misc,
+            ops::ServiceListing {
+                streams: has_a,
+                eof_marker: has_a,
+            },
+        ),
         Command::Test(args) => cmd_test(&args, password, &cli.misc),
         Command::Print(args) => cmd_print(&args, password, max_dict_size),
         Command::External(ext) => {
@@ -361,11 +391,12 @@ fn cmd_list_bare(
     args: &ArchiveArgs,
     password: Option<&str>,
     misc: &common::MiscSwitches,
+    service: ops::ServiceListing,
 ) -> CliResult<()> {
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
     let rar = ops::open_reader_quick(&args.archive, password)?;
-    ops::list_bare(&rar, &args.archive, &names);
+    ops::list_bare(&rar, &args.archive, &names, service);
     Ok(())
 }
 
@@ -375,11 +406,12 @@ fn cmd_list_technical(
     args: &ArchiveArgs,
     password: Option<&str>,
     misc: &common::MiscSwitches,
+    service: ops::ServiceListing,
 ) -> CliResult<()> {
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
     let rar = ops::open_reader_quick(&args.archive, password)?;
-    ops::list_technical(&rar, &args.archive, &names);
+    ops::list_technical(&rar, &args.archive, &names, service);
     Ok(())
 }
 
@@ -511,11 +543,12 @@ fn cmd_list(
     args: &ArchiveArgs,
     password: Option<&str>,
     misc: &common::MiscSwitches,
+    service: ops::ServiceListing,
 ) -> CliResult<()> {
     let names =
         listfile::expand(&args.names, misc.list_files.as_deref()).map_err(error::CliError::from)?;
     let rar = ops::open_reader_quick(&args.archive, password)?;
-    ops::list_entries(&rar, &args.archive, &names, false);
+    ops::list_entries(&rar, &args.archive, &names, false, service);
     Ok(())
 }
 

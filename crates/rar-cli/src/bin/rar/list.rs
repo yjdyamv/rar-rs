@@ -140,9 +140,13 @@ pub(crate) fn cmd_find(cmd: &str, args: &[String], password: Option<&str>) -> Cl
 
 /// Verbose list (like `rar v`): adds the packed size, ratio and checksum
 /// columns.
-pub(crate) fn cmd_verbose_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_verbose_list(
+    args: &ListArgs,
+    misc: &common::MiscSwitches,
+    service: ops::ServiceListing,
+) -> CliResult<()> {
     for_each_listed_volume(args, misc, |rar, name, names| {
-        ops::list_entries(rar, name, names, true);
+        ops::list_entries(rar, name, names, true, service);
         Ok(())
     })
 }
@@ -177,26 +181,38 @@ pub(crate) fn cmd_test(args: &ListArgs, misc: &common::MiscSwitches) -> CliResul
     }
 }
 
-pub(crate) fn cmd_list(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_list(
+    args: &ListArgs,
+    misc: &common::MiscSwitches,
+    service: ops::ServiceListing,
+) -> CliResult<()> {
     for_each_listed_volume(args, misc, |rar, name, names| {
-        ops::list_entries(rar, name, names, false);
+        ops::list_entries(rar, name, names, false, service);
         Ok(())
     })
 }
 
 /// Bare list (`lb` / `vb`): member names only.
-pub(crate) fn cmd_list_bare(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_list_bare(
+    args: &ListArgs,
+    misc: &common::MiscSwitches,
+    service: ops::ServiceListing,
+) -> CliResult<()> {
     for_each_listed_volume(args, misc, |rar, name, names| {
-        ops::list_bare(rar, name, names);
+        ops::list_bare(rar, name, names, service);
         Ok(())
     })
 }
 
 /// Technical list (`lt` / `vt`): mtime, attributes, sizes, ratio, CRC and
 /// method per member, in the spirit of the official `rar lt`.
-pub(crate) fn cmd_list_technical(args: &ListArgs, misc: &common::MiscSwitches) -> CliResult<()> {
+pub(crate) fn cmd_list_technical(
+    args: &ListArgs,
+    misc: &common::MiscSwitches,
+    service: ops::ServiceListing,
+) -> CliResult<()> {
     for_each_listed_volume(args, misc, |rar, name, names| {
-        ops::list_technical(rar, name, names);
+        ops::list_technical(rar, name, names, service);
         Ok(())
     })
 }

@@ -100,7 +100,7 @@ fn main() {
         // `-limt<sec>`: arm the timer before the command opens anything.
         ops::install_time_limit(seconds);
     }
-    if let Err(e) = run(cli) {
+    if let Err(e) = run(cli, command.as_deref()) {
         // `-limt<sec>`: the timer fired, so this is WinRAR's exit 15 rather
         // than the error the cancelled operation happened to surface (the
         // CLI stringifies some errors, losing the category).
@@ -126,8 +126,10 @@ fn main() {
     }
 }
 
-fn run(cli: Cli) -> CliResult<()> {
+fn run(cli: Cli, command: Option<&str>) -> CliResult<()> {
     let misc = &cli.misc;
+    // WinRAR's `a` list modifier (`la`/`va`/`lba`/`vba`/`lta`/`vta`).
+    let has_a = command.is_some_and(|name| name.ends_with('a'));
     if misc.erase_disk {
         return Err("-vd/--erase-disk is not supported; no disk was erased".into());
     }
@@ -164,12 +166,54 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Extract(args) => extract::cmd_extract(&args, misc, cli.yes),
         Command::ExtractFlat(args) => extract::cmd_extract_flat(&args, misc, cli.yes),
         Command::Test(args) => list::cmd_test(&args, misc),
-        Command::VerboseList(args) => list::cmd_verbose_list(&args, misc),
-        Command::List(args) => list::cmd_list(&args, misc),
-        Command::ListBare(args) => list::cmd_list_bare(&args, misc),
-        Command::ListTechnical(args) => list::cmd_list_technical(&args, misc),
-        Command::VerboseListBare(args) => list::cmd_list_bare(&args, misc),
-        Command::VerboseListTechnical(args) => list::cmd_list_technical(&args, misc),
+        Command::VerboseList(args) => list::cmd_verbose_list(
+            &args,
+            misc,
+            ops::ServiceListing {
+                streams: has_a,
+                eof_marker: false,
+            },
+        ),
+        Command::List(args) => list::cmd_list(
+            &args,
+            misc,
+            ops::ServiceListing {
+                streams: has_a,
+                eof_marker: false,
+            },
+        ),
+        Command::ListBare(args) => list::cmd_list_bare(
+            &args,
+            misc,
+            ops::ServiceListing {
+                streams: has_a,
+                eof_marker: false,
+            },
+        ),
+        Command::ListTechnical(args) => list::cmd_list_technical(
+            &args,
+            misc,
+            ops::ServiceListing {
+                streams: true,
+                eof_marker: has_a,
+            },
+        ),
+        Command::VerboseListBare(args) => list::cmd_list_bare(
+            &args,
+            misc,
+            ops::ServiceListing {
+                streams: has_a,
+                eof_marker: false,
+            },
+        ),
+        Command::VerboseListTechnical(args) => list::cmd_list_technical(
+            &args,
+            misc,
+            ops::ServiceListing {
+                streams: true,
+                eof_marker: has_a,
+            },
+        ),
         Command::Info(args) => list::cmd_info(&args),
         Command::External(ext) => {
             let name = ext.first().cloned().unwrap_or_default();

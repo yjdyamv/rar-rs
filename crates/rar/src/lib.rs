@@ -87,8 +87,8 @@ pub use archive::{
     AppendOptions, ArchiveEditor, ArchiveEntry, ArchiveReader, ArchiveWriter, BatchEntry,
     CompressionLevel, EditOp, EditPlan, EditReport, Entries, EntryId, EntryMatches, EntryRef,
     EntryWriteOptions, ExtractionReport, OpenOptions, ReconstructReport, ScanStrategy, SolidMode,
-    ThreadCount, VerificationFailure, VerificationReport, WriteEntry, WriteReport, WriterOptions,
-    discover_volumes, reconstruct_archive_path,
+    StreamInfo, ThreadCount, VerificationFailure, VerificationReport, WriteEntry, WriteReport,
+    WriterOptions, discover_volumes, reconstruct_archive_path,
 };
 // Root re-exports of the public codec surface; the full item set lives at
 // `codec::lzss_huff`. The `parallel`-gated MT internals (`EncoderState`,

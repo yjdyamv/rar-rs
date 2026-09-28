@@ -493,27 +493,73 @@ pub(crate) fn matches_filter(member: &str, names: &[String]) -> bool {
 }
 
 /// Bare list (`lb` / `vb`): member names only (of the opened volume).
-pub fn list_bare(rar: &ArchiveReader, archive: &str, names: &[String]) {
+/// Which service records a listing renders: WinRAR's technical modes show
+/// NTFS alternate data streams by default, and its `a` list modifier asks for
+/// them on the single-line modes (`la`/`va`/`lba`/`vba`).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ServiceListing {
+    /// Render NTFS alternate data stream rows.
+    pub streams: bool,
+    /// Render the trailing `Service: EOF` marker (`lta`/`vta`).
+    pub eof_marker: bool,
+}
+
+/// The requested member's streams, grouped by owner catalog index.
+fn streams_by_owner(
+    rar: &ArchiveReader,
+    service: ServiceListing,
+) -> std::collections::HashMap<usize, Vec<rar_rs::StreamInfo>> {
+    let mut by_owner: std::collections::HashMap<usize, Vec<rar_rs::StreamInfo>> =
+        std::collections::HashMap::new();
+    if service.streams {
+        for stream in rar.streams() {
+            by_owner.entry(stream.owner_index).or_default().push(stream);
+        }
+    }
+    by_owner
+}
+
+/// `RAR 5.0(v50) -m3 -md=128k` for a stream block.
+fn stream_compression_cell(stream: &rar_rs::StreamInfo) -> String {
+    format!(
+        "RAR 5.0(v50) -m{} -md={}",
+        stream.method,
+        format_byte_count((128 * 1024) << stream.dict_size_log)
+    )
+}
+
+pub fn list_bare(rar: &ArchiveReader, archive: &str, names: &[String], service: ServiceListing) {
     if listing_quiet() {
         return;
     }
     let view = VolumeView::of(archive);
-    for entry in rar
-        .entries()
-        .filter(|entry| matches_filter(entry.name(), names) && view.includes(entry))
-    {
+    let streams = streams_by_owner(rar, service);
+    for (index, entry) in rar.entries().enumerate() {
+        if !matches_filter(entry.name(), names) || !view.includes(&entry) {
+            continue;
+        }
         println!("{}", entry_display_name(&entry));
+        for stream in streams.get(&index).into_iter().flatten() {
+            println!("STM{}", stream.name);
+        }
     }
 }
 
 /// Standard list (`l`), or the verbose variant with the packed/ratio/CRC
 /// columns (`v`), in WinRAR's table shape. On a volume set only the members
 /// with data in the opened volume are listed, with per-fragment columns.
-pub fn list_entries(rar: &ArchiveReader, archive: &str, names: &[String], verbose: bool) {
+pub fn list_entries(
+    rar: &ArchiveReader,
+    archive: &str,
+    names: &[String],
+    verbose: bool,
+    service: ServiceListing,
+) {
     if listing_quiet() {
         return;
     }
     let view = VolumeView::of(archive);
+    let streams = streams_by_owner(rar, service);
     list_preamble(rar, archive, &view);
 
     let mut total_size = 0u64;
@@ -564,12 +610,19 @@ pub fn list_entries(rar: &ArchiveReader, archive: &str, names: &[String], verbos
         println!(" Attributes       Size     Date    Time   Name");
         println!("----------- ----------  ---------- -----  ----");
     }
-    for entry in rar
-        .entries()
-        .filter(|entry| matches_filter(entry.name(), names) && view.includes(entry))
-    {
+    for (index, entry) in rar.entries().enumerate() {
+        if !matches_filter(entry.name(), names) || !view.includes(&entry) {
+            continue;
+        }
         let (position, packed, fragment_crc) = view.fragment(&entry).expect("included above");
         row(&entry, position, packed, fragment_crc);
+        // WinRAR's `la`/`va` add one row per stream, after its owner.
+        for stream in streams.get(&index).into_iter().flatten() {
+            println!(
+                "{:>11} {:>10}  {:>10} {:>5}  STM{}",
+                ".B", stream.unpacked_size, "", "", stream.name
+            );
+        }
     }
     // Legacy `.partN.rar` sets annotate the totals row like WinRAR.
     let volume_cell =
@@ -594,16 +647,22 @@ pub fn list_entries(rar: &ArchiveReader, archive: &str, names: &[String], verbos
 
 /// Technical list (`lt` / `vt`): WinRAR's per-member block shape (fragment
 /// values when listing one volume of a set).
-pub fn list_technical(rar: &ArchiveReader, archive: &str, names: &[String]) {
+pub fn list_technical(
+    rar: &ArchiveReader,
+    archive: &str,
+    names: &[String],
+    service: ServiceListing,
+) {
     if listing_quiet() {
         return;
     }
     let view = VolumeView::of(archive);
+    let streams = streams_by_owner(rar, service);
     list_preamble(rar, archive, &view);
-    for entry in rar
-        .entries()
-        .filter(|entry| matches_filter(entry.name(), names) && view.includes(entry))
-    {
+    for (index, entry) in rar.entries().enumerate() {
+        if !matches_filter(entry.name(), names) || !view.includes(&entry) {
+            continue;
+        }
         let (position, packed, fragment_crc) = view.fragment(&entry).expect("included above");
         println!("{:>12}: {}", "Name", entry_display_name(&entry));
         println!("{:>12}: {}", "Type", member_type_cell(&entry));
@@ -649,6 +708,33 @@ pub fn list_technical(rar: &ArchiveReader, archive: &str, names: &[String]) {
             // the value.
             println!("{:>12}: solid ", "Flags");
         }
+        println!();
+        // Technical listings show the member's NTFS streams as their own
+        // blocks, like WinRAR's `lt`/`vt`.
+        for stream in streams.get(&index).into_iter().flatten() {
+            println!("{:>12}: {}", "Name", "STM");
+            println!("{:>12}: {}", "Type", "NTFS alternate data stream");
+            println!("{:>12}: {}", "Target", stream.name);
+            println!("{:>12}: {}", "Size", stream.unpacked_size);
+            println!("{:>12}: {}", "Packed size", stream.data_size);
+            println!(
+                "{:>12}: {}",
+                "Ratio",
+                ratio_percent(stream.unpacked_size, stream.data_size)
+            );
+            println!("{:>12}: {}", "Attributes", ".B");
+            if let Some(crc) = stream.crc32 {
+                println!("{:>12}: {crc:08X}", "CRC32");
+            }
+            if let Some(host) = host_os_cell(&entry) {
+                println!("{:>12}: {host}", "Host OS");
+            }
+            println!("{:>12}: {}", "Compression", stream_compression_cell(stream));
+            println!();
+        }
+    }
+    if service.eof_marker {
+        println!("{:>12}: {}", "Service", "EOF");
         println!();
     }
 }
