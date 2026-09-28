@@ -1051,6 +1051,20 @@ pub fn mark_web(spec: Option<&str>) -> Result<Option<rar_rs::MarkOfTheWeb>, Stri
     }
 }
 
+/// `-ver[n]` selection (see [`crate::ops::VersionSelection`]): absent = the
+/// current version only, bare `-ver` = every version (`name;N` kept in the
+/// output name), `-verN` = version `N` only under the plain name (WinRAR).
+pub fn version_selection(spec: Option<&str>) -> Result<crate::ops::VersionSelection, String> {
+    match spec {
+        None => Ok(crate::ops::VersionSelection::Current),
+        Some("") => Ok(crate::ops::VersionSelection::All),
+        Some(value) => value
+            .parse::<u64>()
+            .map(crate::ops::VersionSelection::Only)
+            .map_err(|_| format!("invalid -ver value: {value}")),
+    }
+}
+
 /// Parse the normalized `--mark-web` value (`-om[-|1][=ext;ext]`).
 ///
 /// Returns `Ok(None)` for the off form (`-om-`); the extension list, when

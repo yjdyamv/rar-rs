@@ -424,6 +424,7 @@ fn cmd_extract(
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
         quiet_answers_yes: false,
+        version: common::version_selection(misc.version_control.as_deref())?,
     };
     let mut rar = ops::open_reader(&args.archive, password)?;
     if let Some(report) = ops::extract(&mut rar, &request)? {
@@ -478,6 +479,7 @@ fn cmd_extract_flat(
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
         quiet_answers_yes: false,
+        version: common::version_selection(misc.version_control.as_deref())?,
     };
     let mut rar = ops::open_reader(&args.archive, password)?;
     if let Some(report) = ops::extract(&mut rar, &request)? {

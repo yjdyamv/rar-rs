@@ -221,6 +221,13 @@ impl ArchiveEntry {
         }
     }
 
+    /// File version from the VERSION extra record (WinRAR `-ver[n]`): `None`
+    /// for the current version, `Some(n)` for an older one, which WinRAR
+    /// renders as `name;n` and skips on a default extraction.
+    pub fn file_version(&self) -> Option<u64> {
+        self.header.version
+    }
+
     /// Dictionary setting: `log2(size/128KiB)` for RAR5 members (RAR7
     /// members carry the byte count via
     /// [`dict_size_bytes`](Self::dict_size_bytes)), or the RAR 1.5–4.x

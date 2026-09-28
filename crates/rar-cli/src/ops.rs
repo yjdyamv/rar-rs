@@ -401,6 +401,18 @@ fn display_name(name: &str) -> String {
     }
 }
 
+/// The name WinRAR prints for a member: the stored name, plus `;version` when
+/// the VERSION extra record marks it as an old version (WinRAR `-ver`). The
+/// record is what distinguishes an old version from a plain member, so the
+/// suffix comes from the header, not from the stored name. Version 0 is the
+/// current member (WinRAR writes the record for it too) and prints bare.
+fn entry_display_name(entry: &rar_rs::ArchiveEntry) -> String {
+    match entry.file_version() {
+        Some(version) if version > 0 => display_name(&format!("{};{version}", entry.name())),
+        _ => display_name(entry.name()),
+    }
+}
+
 /// Whether a member passes the requested name filter (empty = everything).
 pub(crate) fn matches_filter(member: &str, names: &[String]) -> bool {
     names.is_empty()
@@ -419,7 +431,7 @@ pub fn list_bare(rar: &ArchiveReader, archive: &str, names: &[String]) {
         .entries()
         .filter(|entry| matches_filter(entry.name(), names) && view.includes(entry))
     {
-        println!("{}", display_name(entry.name()));
+        println!("{}", entry_display_name(&entry));
     }
 }
 
@@ -440,7 +452,7 @@ pub fn list_entries(rar: &ArchiveReader, archive: &str, names: &[String], verbos
         |entry: &EntryRef<'_>, position: usize, packed: u64, fragment_crc: Option<u32>| {
             let (date, time) = list_stamp(entry);
             let attrs = attributes_cell(entry);
-            let name = display_name(entry.name());
+            let name = entry_display_name(entry);
             if verbose {
                 let checksum = if entry.version().is_rar13() {
                     if entry.is_dir() {
@@ -522,7 +534,7 @@ pub fn list_technical(rar: &ArchiveReader, archive: &str, names: &[String]) {
         .filter(|entry| matches_filter(entry.name(), names) && view.includes(entry))
     {
         let (position, packed, fragment_crc) = view.fragment(&entry).expect("included above");
-        println!("{:>12}: {}", "Name", display_name(entry.name()));
+        println!("{:>12}: {}", "Name", entry_display_name(&entry));
         println!("{:>12}: {}", "Type", member_type_cell(&entry));
         if let Some((_, target)) = entry.redirect() {
             println!("{:>12}: {target}", "Target");
@@ -692,6 +704,19 @@ impl ExtractLimits {
     }
 }
 
+/// How `-ver[n]` selects members carrying a VERSION extra record.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum VersionSelection {
+    /// Only the current version; older ones are silently left alone
+    /// (WinRAR's default).
+    #[default]
+    Current,
+    /// Every version, written as `name;N` (`-ver` without a number).
+    All,
+    /// Only this version, written under the plain name (`-verN`).
+    Only(u64),
+}
+
 /// One extraction request: the four `x`/`e` arms of both binaries build this
 /// value and hand it to [`extract`], so the flag-to-options assembly for
 /// disk extraction has one owner.
@@ -742,6 +767,8 @@ pub struct ExtractRequest {
     /// file without asking — while `unrar` keeps asking (measured, it still
     /// prints its replacement prompt under `-idq`).
     pub quiet_answers_yes: bool,
+    /// `-ver[n]` selection policy (see [`VersionSelection`]).
+    pub version: VersionSelection,
 }
 
 impl ExtractRequest {
@@ -782,6 +809,11 @@ impl ExtractRequest {
             set_access_time: self.set_access_time,
             skip_links: self.skip_links,
             allow_unsafe_links: self.allow_unsafe_links,
+            file_version_suffix: matches!(self.version, VersionSelection::All)
+                || self
+                    .names
+                    .iter()
+                    .any(|name| split_version_selector(name).is_some()),
             ..Default::default()
         }
     }
@@ -826,8 +858,26 @@ pub fn extract(
             })));
         }
     }
-    let report = extract_members(rar, &request.dest, &request.names, options)?;
+    let report = extract_members(rar, &request.dest, &request.names, options, request.version)?;
     Ok(Some(report))
+}
+
+/// Whether `-ver[n]` selects this entry: version 0 / no VERSION record is the
+/// current member, which every mode keeps.
+fn version_allowed(entry: &rar_rs::ArchiveEntry, version: VersionSelection) -> bool {
+    let file_version = entry.file_version().unwrap_or(0);
+    match version {
+        VersionSelection::Current => file_version == 0,
+        VersionSelection::All => true,
+        VersionSelection::Only(n) => file_version == n,
+    }
+}
+
+/// Split a `name;N` selector (WinRAR's explicit file-version selection) into
+/// its stored name and version; other selectors are returned as-is.
+fn split_version_selector(name: &str) -> Option<(&str, u64)> {
+    let (base, version) = name.rsplit_once(';')?;
+    version.parse::<u64>().ok().map(|version| (base, version))
 }
 
 /// Extract the whole archive, or only the members whose stored path, mask or
@@ -844,15 +894,42 @@ fn extract_members(
     dest: &Path,
     names: &[String],
     options: ExtractOptions,
+    version: VersionSelection,
 ) -> CliResult<ExtractionReport> {
     let wanted: Vec<EntryId> = if names.is_empty() {
-        rar.entries().map(|entry| entry.id()).collect()
+        rar.entries()
+            .filter(|entry| version_allowed(entry, version))
+            .map(|entry| entry.id())
+            .collect()
     } else {
-        let wanted = crate::selector::select_entries(
-            rar.entries()
-                .map(|entry| (entry.id(), entry.metadata().name())),
-            names,
-        );
+        // `name;N` selects one version explicitly; the rest go through the
+        // shared selector with the version policy applied, so `f.txt` does
+        // not drag an old `f.txt;1` along on a default extraction.
+        let mut plain: Vec<String> = Vec::new();
+        let mut explicit: Vec<(&str, u64)> = Vec::new();
+        for name in names {
+            match split_version_selector(name) {
+                Some((base, version)) => explicit.push((base, version)),
+                None => plain.push(name.clone()),
+            }
+        }
+        let mut wanted = Vec::new();
+        if !plain.is_empty() {
+            wanted.extend(crate::selector::select_entries(
+                rar.entries()
+                    .filter(|entry| version_allowed(entry, version))
+                    .map(|entry| (entry.id(), entry.metadata().name())),
+                &plain,
+            ));
+        }
+        for (base, version) in explicit {
+            for entry in rar.entries() {
+                if entry.name() == base && entry.file_version().unwrap_or(0) == version {
+                    wanted.push(entry.id());
+                }
+            }
+        }
+        wanted.dedup();
         if wanted.is_empty() {
             return Err(CliError::with_code(
                 format!(
@@ -988,8 +1065,42 @@ pub fn print_members(
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtractRequest, extract_names_and_dest, inferred_archive_paths, verify_options};
+    use super::{
+        ExtractRequest, VersionSelection, extract_names_and_dest, inferred_archive_paths,
+        split_version_selector, verify_options,
+    };
     use rar_rs::ExtractOptions;
+
+    /// `-ver` all keeps the version in the output name, `-verN` does not, and
+    /// an explicit `name;N` selector keeps it like WinRAR.
+    #[test]
+    fn version_suffix_follows_the_policy_and_explicit_selectors() {
+        let all = ExtractRequest {
+            version: VersionSelection::All,
+            ..ExtractRequest::default()
+        };
+        assert!(all.options().file_version_suffix);
+
+        let only = ExtractRequest {
+            version: VersionSelection::Only(2),
+            ..ExtractRequest::default()
+        };
+        assert!(!only.options().file_version_suffix);
+
+        let explicit = ExtractRequest {
+            names: vec!["f.txt;2".to_string()],
+            ..ExtractRequest::default()
+        };
+        assert!(explicit.options().file_version_suffix);
+    }
+
+    /// Only a trailing `;<number>` is a version selector.
+    #[test]
+    fn version_selectors_split_from_plain_names() {
+        assert_eq!(split_version_selector("f.txt;3"), Some(("f.txt", 3)));
+        assert_eq!(split_version_selector("f.txt"), None);
+        assert_eq!(split_version_selector("f.txt;x"), None);
+    }
 
     /// `t` streams every member to a sink, so the materializing read caps
     /// must be off (otherwise > 4 GiB members / > 32 GiB archives fail while

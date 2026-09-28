@@ -623,18 +623,27 @@ pub(crate) fn resolve_dest_path_with(
     dest_dir: &Path,
     options: &crate::options::ExtractOptions,
 ) -> RarResult<Destination> {
+    // `-ver` without a number extracts every version and keeps the version in
+    // the file name (`name;N`), like WinRAR.
+    let mut member_name = entry.header.name.clone();
+    if options.file_version_suffix
+        && let Some(version) = entry.file_version()
+        && version > 0
+    {
+        member_name = format!("{member_name};{version}");
+    }
     let dest_path = if options.flat_paths {
         if is_directory_entry(entry) {
             return Ok(Destination::Extract(dest_dir.to_path_buf()));
         }
-        let safe_name = sanitize_archive_path(&entry.header.name)?;
+        let safe_name = sanitize_archive_path(&member_name)?;
         let base = safe_name.rsplit('/').next().unwrap_or(&safe_name);
         dest_dir.join(base)
     } else {
         crate::format::shared::extract::dest::safe_dest_path_with(
             cx,
             dest_dir,
-            &entry.header.name,
+            &member_name,
             options.safe_paths,
         )?
     };

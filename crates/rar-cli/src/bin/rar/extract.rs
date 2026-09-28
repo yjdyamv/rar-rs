@@ -57,6 +57,7 @@ pub(crate) fn cmd_extract(
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
         quiet_answers_yes: true,
+        version: common::version_selection(misc.version_control.as_deref())?,
         ..ops::ExtractRequest::default()
     };
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
@@ -156,6 +157,7 @@ pub(crate) fn cmd_extract_flat(
         set_creation_time: ts.save_ctime,
         set_access_time: ts.save_atime,
         quiet_answers_yes: true,
+        version: common::version_selection(misc.version_control.as_deref())?,
     };
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
     if let Some(report) = ops::extract(&mut rar, &request)? {
