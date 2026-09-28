@@ -20,8 +20,8 @@ fn rar4_stores_and_restores_dos_attributes() {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
-        FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
+        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
+        FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
     };
 
     fn set_attrs(path: &std::path::Path, attrs: u32) {
@@ -29,7 +29,7 @@ fn rar4_stores_and_restores_dos_attributes() {
         assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), attrs) }, 0);
     }
     fn attrs(path: &std::path::Path) -> u32 {
-        const STORED: u32 = 0x1 | 0x2 | 0x4 | 0x20;
+        const STORED: u32 = 0x1 | 0x2 | 0x4 | 0x20 | 0x2000;
         std::fs::metadata(path).unwrap().file_attributes() & STORED
     }
 
@@ -44,6 +44,10 @@ fn rar4_stores_and_restores_dos_attributes() {
         ("ro.txt", FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE),
         ("hidden.txt", FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE),
         ("sys.txt", FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE),
+        (
+            "indexed.txt",
+            FILE_ATTRIBUTE_NOT_CONTENT_INDEXED | FILE_ATTRIBUTE_ARCHIVE,
+        ),
         ("plain.txt", FILE_ATTRIBUTE_ARCHIVE),
     ];
     for (name, a) in cases {
@@ -69,6 +73,8 @@ fn rar4_stores_and_restores_dos_attributes() {
             "..A..H."
         } else if a & 0x4 != 0 {
             "..A.S.."
+        } else if a & 0x2000 != 0 {
+            "I.A...."
         } else {
             "..A...."
         };

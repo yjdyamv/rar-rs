@@ -1042,6 +1042,52 @@ mod extract_attributes {
             perms.set_readonly(false);
             std::fs::set_permissions(&extracted, perms).unwrap();
         }
+
+        /// WinRAR stores `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED` alongside the
+        /// archive bit (measured: 6.23/7.23 keep it, and drop offline/pinned/
+        /// no-scrub), and restores it on extraction. Ours must do the same
+        /// through the shared platform/destination code, with no byte patching.
+        #[test]
+        fn not_content_indexed_attribute_round_trips() {
+            use std::os::windows::ffi::OsStrExt;
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, SetFileAttributesW,
+            };
+
+            const STORED: u32 = 0x20 | 0x2000;
+            let dir = make_temp_dir();
+            let src = dir.path().join("indexed.bin");
+            std::fs::write(&src, b"content").unwrap();
+            let wide: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
+            assert_ne!(
+                unsafe {
+                    SetFileAttributesW(
+                        wide.as_ptr(),
+                        FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
+                    )
+                },
+                0
+            );
+
+            let archive = dir.path().join("indexed.rar");
+            {
+                let mut writer = ArchiveWriter::create(&archive).unwrap();
+                writer.add_path(&src, EntryWriteOptions::new()).unwrap();
+                writer.finish().unwrap();
+            }
+
+            let out = dir.path().join("out");
+            let mut reader = ArchiveReader::open(&archive).unwrap();
+            reader.extract_all(&out).unwrap();
+
+            let extracted = out.join("indexed.bin");
+            assert_eq!(
+                std::fs::metadata(&extracted).unwrap().file_attributes() & STORED,
+                STORED,
+                "the not-content-indexed bit must survive the round trip"
+            );
+        }
     }
 }
 

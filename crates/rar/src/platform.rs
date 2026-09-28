@@ -17,14 +17,18 @@
 
 /// DOS attribute bits WinRAR stores in the RAR5 attribute field for a
 /// Windows-host member (the subset of `FILE_ATTRIBUTE_*` that survives the
-/// round trip; `FILE_ATTRIBUTE_NORMAL` is not stored).
+/// round trip; `FILE_ATTRIBUTE_NORMAL` is not stored). Measured against
+/// WinRAR 6.23/7.23: of the bits `attrib` can set, only
+/// `NOT_CONTENT_INDEXED` joins read-only/hidden/system/archive — WinRAR drops
+/// offline, pinned, unpinned and no-scrub too, so those stay out on purpose.
 #[cfg(windows)]
 const STORED_DOS_ATTRIBUTES: u32 = 0x0001 // READONLY
     | 0x0002 // HIDDEN
     | 0x0004 // SYSTEM
     | 0x0010 // DIRECTORY
     | 0x0020 // ARCHIVE
-    | 0x0400; // REPARSE_POINT
+    | 0x0400 // REPARSE_POINT
+    | 0x2000; // NOT_CONTENT_INDEXED
 
 /// RAR5 `host_os` for the running platform: `0` = Windows, `1` = Unix, like
 /// WinRAR. Readers interpret the attribute field and the time form through it.
@@ -112,10 +116,10 @@ pub(crate) const fn redirect_attributes(redir_type: u64) -> u64 {
 /// RAR4 has one DOS attribute field on every host, and our RAR4 writer fixes
 /// `host_os` to Windows, so WinRAR stores the file's real Windows attributes
 /// there — read-only (`0x1`), hidden (`0x2`), system (`0x4`), archive
-/// (`0x20`) — and nothing else: `FILE_ATTRIBUTE_NORMAL` is not stored, so a
-/// file without the archive bit comes back as `0`. Unix has no DOS
-/// attributes, so the archive bit WinRAR uses for a plain member is kept
-/// there (unchanged Unix output).
+/// (`0x20`) and not-content-indexed (`0x2000`) — and nothing else:
+/// `FILE_ATTRIBUTE_NORMAL` is not stored, so a file without the archive bit
+/// comes back as `0`. Unix has no DOS attributes, so the archive bit WinRAR
+/// uses for a plain member is kept there (unchanged Unix output).
 pub(crate) fn rar4_file_attributes(meta: &std::fs::Metadata) -> u32 {
     #[cfg(windows)]
     {
