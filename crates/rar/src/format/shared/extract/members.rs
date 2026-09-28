@@ -492,49 +492,11 @@ fn extract_all_parallel(
         // of the catalog first (the serial loop keeps a whole-catalog
         // snapshot for the same reason).
         let entry = cx.entries()[idx].clone();
-        let (dest_path, corrected) = match resolve_dest_path(cx, &entry, dest)? {
-            Destination::Extract { path, corrected } => (path, corrected),
-            Destination::Skip(path) => {
-                if reports_outcome(&entry, &cx.read_ctx().extract_options) {
-                    report.record_skipped(path);
-                }
-                continue;
-            }
+        // The directory/redirect/skip prelude is shared with the serial path.
+        let dest_path = match resolve_member_target(cx, &entry, dest, &mut report)? {
+            MemberTarget::Done(_) => continue,
+            MemberTarget::File(path) => path,
         };
-        if corrected && reports_outcome(&entry, &cx.read_ctx().extract_options) {
-            report.record_corrected(entry.name().to_string());
-        }
-        if is_directory_entry(&entry) {
-            materialize_directory(&dest_path)?;
-            // Flat extraction resolves directories to the destination
-            // root itself; the archived mode must not be applied to the
-            // caller's directory.
-            if dest_path.as_path() != dest {
-                crate::format::shared::extract::dest::apply_member_attributes(
-                    cx,
-                    &entry.header,
-                    &dest_path,
-                );
-            }
-            continue;
-        }
-        if let Some(redir) = crate::format::shared::entry_ext::redirect_of(&entry) {
-            if !cx.read_ctx().extract_options.skip_links {
-                match crate::format::shared::extract::dest::extract_redirection(
-                    cx, dest, &dest_path, &redir,
-                )? {
-                    Some(path) => report.record_written(path),
-                    // A link whose target escapes the destination is
-                    // refused on its own (WinRAR "Skipping the potentially
-                    // unsafe ... link") and the run continues.
-                    None => report.record_refused(dest_path),
-                }
-            }
-            continue;
-        }
-        if let Some(parent) = dest_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         if let Some(err) = member.error {
             // Report the failure through the closure: that is what makes
             // `materialize_member_file` apply the `-kb` policy to the
@@ -776,20 +738,27 @@ fn next_free_name(path: &Path) -> PathBuf {
     dest
 }
 
-/// Extract one entry, recording the outcome in `report`. File contents
-/// are decoded to a temporary file and renamed over the destination only
-/// after integrity checks pass, so a failure leaves no output behind —
-/// unless `-kb` asked for the partial file
-/// ([`materialize_member_file`]).
-fn extract_entry(
+/// The pre-write outcome for one member: either it is fully handled (a
+/// directory created, a redirect written, a skipped/refused member) or there
+/// is a file destination left to write.
+enum MemberTarget {
+    /// Nothing left to write; the path is the produced one (or the skipped
+    /// destination).
+    Done(PathBuf),
+    /// A regular file destination to materialize.
+    File(PathBuf),
+}
+
+/// Resolve one member's destination and handle the cases that carry no file
+/// payload: a directory entry, a redirect member, and the skip/refuse
+/// policies. Shared by the serial ([`extract_entry`]) and parallel replay
+/// paths so the directory/redirect/`-ol-` policy cannot drift between them.
+fn resolve_member_target(
     cx: &mut dyn Engine,
-    idx: usize,
     entry: &ArchiveEntry,
     dest_dir: &Path,
     report: &mut ExtractionReport,
-) -> RarResult<PathBuf> {
-    validate_entry_limits(cx, idx)?;
-
+) -> RarResult<MemberTarget> {
     let dest_path = match resolve_dest_path(cx, entry, dest_dir)? {
         Destination::Extract { path, corrected } => {
             if corrected && reports_outcome(entry, &cx.read_ctx().extract_options) {
@@ -801,7 +770,7 @@ fn extract_entry(
             if reports_outcome(entry, &cx.read_ctx().extract_options) {
                 report.record_skipped(path.clone());
             }
-            return Ok(path);
+            return Ok(MemberTarget::Done(path));
         }
     };
 
@@ -817,34 +786,54 @@ fn extract_entry(
                 &dest_path,
             );
         }
-        return Ok(dest_path);
+        return Ok(MemberTarget::Done(dest_path));
     }
 
-    // RAR5 redirect records (symlinks, hardlinks, file copies): the
-    // entry carries no data, only the target reference. `-ol-` skips
-    // them entirely.
+    // RAR5 redirect records (symlinks, hardlinks, file copies): the entry
+    // carries no data, only the target reference. `-ol-` skips them entirely.
     if let Some(redir) = crate::format::shared::entry_ext::redirect_of(entry) {
         if cx.read_ctx().extract_options.skip_links {
-            return Ok(dest_path);
+            return Ok(MemberTarget::Done(dest_path));
         }
-        match crate::format::shared::extract::dest::extract_redirection(
+        return match crate::format::shared::extract::dest::extract_redirection(
             cx, dest_dir, &dest_path, &redir,
         )? {
             Some(path) => {
                 report.record_written(path.clone());
-                return Ok(path);
+                Ok(MemberTarget::Done(path))
             }
             // Refused link target: skip just this member, like WinRAR.
             None => {
                 report.record_refused(dest_path.clone());
-                return Ok(dest_path);
+                Ok(MemberTarget::Done(dest_path))
             }
-        }
+        };
     }
 
     if let Some(parent) = dest_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    Ok(MemberTarget::File(dest_path))
+}
+
+/// Extract one entry, recording the outcome in `report`. File contents
+/// are decoded to a temporary file and renamed over the destination only
+/// after integrity checks pass, so a failure leaves no output behind —
+/// unless `-kb` asked for the partial file
+/// ([`materialize_member_file`]).
+fn extract_entry(
+    cx: &mut dyn Engine,
+    idx: usize,
+    entry: &ArchiveEntry,
+    dest_dir: &Path,
+    report: &mut ExtractionReport,
+) -> RarResult<PathBuf> {
+    validate_entry_limits(cx, idx)?;
+
+    let dest_path = match resolve_member_target(cx, entry, dest_dir, report)? {
+        MemberTarget::Done(path) => return Ok(path),
+        MemberTarget::File(path) => path,
+    };
 
     let keep_broken = cx.read_ctx().extract_options.keep_broken;
     materialize_member_file(&dest_path, keep_broken, |file| {
