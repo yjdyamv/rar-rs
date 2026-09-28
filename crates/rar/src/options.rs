@@ -597,6 +597,12 @@ pub struct ExtractOptions {
     /// outside the destination is a security risk; only use this for
     /// trusted archives.
     pub allow_unsafe_links: bool,
+    /// Write a member that carries a VERSION extra record (WinRAR `-ver`) as
+    /// `name;N` instead of `name`. Off by default, which is WinRAR's default
+    /// extraction (the old versions are not selected at all); the CLI turns
+    /// it on for `-ver` without a number, where WinRAR extracts every version
+    /// keeping the version in the file name.
+    pub file_version_suffix: bool,
 }
 
 impl ExtractOptions {
@@ -637,6 +643,7 @@ impl Default for ExtractOptions {
             max_metadata_bytes: Some(Self::DEFAULT_MAX_METADATA_BYTES),
             skip_links: false,
             allow_unsafe_links: false,
+            file_version_suffix: false,
         }
     }
 }

@@ -277,3 +277,65 @@ fn add_time_dedupe_and_dot_normalization_match_official() {
         );
     }
 }
+
+/// WinRAR `-ver[n]` on a RAR5 archive stores the old version in the VERSION
+/// extra record (not in the name), so a listing shows `name;N`, the default
+/// extraction keeps only the current version, `-ver` keeps every version
+/// under `name;N`, and `-verN` keeps version N under the plain name.
+#[test]
+fn file_versions_follow_winrar() {
+    let Some((official, _unrar)) = official_tools() else {
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("f.txt");
+    std::fs::write(&file, "first\n").unwrap();
+    let (code, out) = run_in(&official, &["a", "-idq", "-m0", "v.rar", "f.txt"], &src);
+    assert_eq!(code, Some(0), "official a: {out}");
+    // A different second (the archive stores mtime at second precision).
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&file, "second\n").unwrap();
+    let (code, out) = run_in(
+        &official,
+        &["a", "-idq", "-m0", "-ver", "v.rar", "f.txt"],
+        &src,
+    );
+    assert_eq!(code, Some(0), "official a -ver: {out}");
+
+    let (_, listing) = run_in(Path::new(OUR_RAR), &["lb", "v.rar"], &src);
+    assert!(
+        listing.contains("f.txt;1"),
+        "our listing must render the version record as `;1`: {listing}"
+    );
+
+    // Extract with the same arguments through both tools and compare the
+    // produced file set. Switches go before the archive, selectors after it.
+    let extract = |switches: &[&str], selectors: &[&str], tag: &str| -> Vec<String> {
+        let ours = dir.path().join(format!("ours_{tag}"));
+        let theirs = dir.path().join(format!("theirs_{tag}"));
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::create_dir_all(&theirs).unwrap();
+        let mut argv: Vec<&str> = vec!["x", "-idq", "-o+"];
+        argv.extend_from_slice(switches);
+        argv.push("v.rar");
+        argv.extend_from_slice(selectors);
+        let dest = dest_arg(&ours);
+        argv.push(&dest);
+        let (code, out) = run_in(Path::new(OUR_RAR), &argv, &src);
+        assert_eq!(code, Some(0), "ours x {tag}: {out}");
+        argv.truncate(argv.len() - 1);
+        let dest = dest_arg(&theirs);
+        argv.push(&dest);
+        let (code, out) = run_in(&official, &argv, &src);
+        assert_eq!(code, Some(0), "official x {tag}: {out}");
+        assert_eq!(dir_entries(&ours), dir_entries(&theirs), "{tag} file set");
+        dir_entries(&ours)
+    };
+
+    assert_eq!(extract(&[], &[], "default"), ["f.txt"]);
+    assert_eq!(extract(&["-ver"], &[], "all"), ["f.txt", "f.txt;1"]);
+    assert_eq!(extract(&["-ver1"], &[], "only1"), ["f.txt"]);
+    assert_eq!(extract(&[], &["f.txt;1"], "explicit"), ["f.txt;1"]);
+}
