@@ -106,6 +106,23 @@ fn install_member_file(tmp_path: &Path, dest_path: &Path) -> RarResult<()> {
     result
 }
 
+/// Create a directory member's destination, replacing a non-directory in the
+/// way.
+///
+/// WinRAR replaces a file with a directory member once the overwrite policy
+/// allowed the write (the mirror of the file-over-empty-directory case in
+/// [`install_member_file`]). `create_dir_all` alone fails with `EEXIST`/
+/// `ERROR_ALREADY_EXISTS` and would abort the run, so a plain file at the
+/// destination is removed first.
+fn materialize_directory(dest_path: &Path) -> RarResult<()> {
+    match fs::symlink_metadata(dest_path) {
+        Ok(meta) if !meta.is_dir() => fs::remove_file(dest_path)?,
+        _ => {}
+    }
+    fs::create_dir_all(dest_path)?;
+    Ok(())
+}
+
 /// Materialize one member file through a temp sibling of `dest_path`.
 ///
 /// `produce` writes the member's bytes and reports the member's outcome:
@@ -461,7 +478,7 @@ fn extract_all_parallel(
             }
         };
         if is_directory_entry(&entry) {
-            fs::create_dir_all(&dest_path)?;
+            materialize_directory(&dest_path)?;
             // Flat extraction resolves directories to the destination
             // root itself; the archived mode must not be applied to the
             // caller's directory.
@@ -737,7 +754,7 @@ fn extract_entry(
     };
 
     if is_directory_entry(entry) {
-        fs::create_dir_all(&dest_path)?;
+        materialize_directory(&dest_path)?;
         // Flat extraction resolves directories to the destination root
         // itself; the archived mode must not be applied to the caller's
         // directory.
