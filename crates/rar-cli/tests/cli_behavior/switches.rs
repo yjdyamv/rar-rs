@@ -2004,6 +2004,13 @@ fn cli_windows_hostile_names_are_corrected() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // WinRAR warns about a corrected device name on stderr, even under `-idq`.
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Attempting to correct the invalid file or directory name"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let mut names: Vec<String> = std::fs::read_dir(&dest)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -2025,5 +2032,36 @@ fn cli_windows_hostile_names_are_corrected() {
     assert!(
         oni.join("aux").is_file(),
         "-oni must keep the device name literal"
+    );
+}
+
+/// A file member whose destination is a non-empty directory is WinRAR's
+/// create error (exit 9), not the generic fatal 2 it used to be.
+#[test]
+fn cli_non_empty_directory_is_a_create_error() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("a.rar");
+    {
+        let mut writer = rar_rs::ArchiveWriter::create(&archive).unwrap();
+        writer
+            .add_bytes("f.txt", b"payload", rar_rs::EntryWriteOptions::new())
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(dest.join("f.txt")).unwrap();
+    std::fs::write(dest.join("f.txt").join("inner"), b"x").unwrap();
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["x", "-o+", "-idq", "--dest"])
+        .arg(&dest)
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(9),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

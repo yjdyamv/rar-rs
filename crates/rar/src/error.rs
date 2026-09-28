@@ -43,6 +43,9 @@ pub enum ErrorCode {
     Cancelled,
     /// Header-encrypted archive opened with the wrong password.
     WrongPassword,
+    /// A destination file could not be created: a directory is in the way, or
+    /// the host refused the name (WinRAR's exit 9).
+    Create,
     /// Underlying I/O failure.
     Io,
 }
@@ -66,6 +69,7 @@ impl ErrorCode {
             Self::ArchiveLocked => "archive_locked",
             Self::Cancelled => "cancelled",
             Self::WrongPassword => "wrong_password",
+            Self::Create => "create",
             Self::Io => "io",
         }
     }
@@ -144,6 +148,9 @@ pub enum RarError {
     Cancelled,
     /// An encrypted archive was opened with the wrong password.
     WrongPassword,
+    /// A destination file could not be created (a directory is in the way,
+    /// or the host refused the name). Carries the ready-to-print message.
+    Create(String),
     /// Underlying I/O error.
     Io(io::Error),
 }
@@ -219,6 +226,16 @@ impl RarError {
         }
     }
 
+    /// A destination file could not be created (WinRAR's exit 9): a
+    /// final-component directory is in the way, or the host refused the name.
+    pub fn create(path: &std::path::Path, reason: impl Into<String>) -> Self {
+        Self::Create(format!(
+            "cannot create {}: {}",
+            path.display(),
+            reason.into()
+        ))
+    }
+
     /// `unique_entry` (or an extractor selector) found no such member.
     pub fn member_not_found(name: impl Into<String>) -> Self {
         Self::MemberNotFound { name: name.into() }
@@ -252,6 +269,7 @@ impl RarError {
             Self::ArchiveLocked => ErrorCode::ArchiveLocked,
             Self::Cancelled => ErrorCode::Cancelled,
             Self::WrongPassword => ErrorCode::WrongPassword,
+            Self::Create(_) => ErrorCode::Create,
             Self::Io(_) => ErrorCode::Io,
         }
     }
@@ -295,6 +313,7 @@ impl fmt::Display for RarError {
             RarError::ArchiveLocked => write!(f, "archive is locked"),
             RarError::Cancelled => write!(f, "operation cancelled"),
             RarError::WrongPassword => write!(f, "encrypted: wrong password"),
+            RarError::Create(msg) => write!(f, "{msg}"),
             RarError::Io(e) => write!(f, "I/O error: {e}"),
         }
     }

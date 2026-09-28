@@ -14,7 +14,22 @@ use crate::error::{RarError, RarResult};
 /// dot/space becomes `_`, and an exact reserved device name gets a leading
 /// `_`. With `allow_incompatible` (WinRAR's `-oni`) the name is kept as
 /// written apart from `:`.
+/// Test-only convenience wrapper: the production paths use
+/// [`sanitize_archive_path_corrected`] so they can report a device-name
+/// correction.
+#[cfg(test)]
 pub(crate) fn sanitize_archive_path(name: &str, allow_incompatible: bool) -> RarResult<String> {
+    sanitize_archive_path_corrected(name, allow_incompatible).map(|(name, _)| name)
+}
+
+/// [`sanitize_archive_path`], also reporting whether a reserved device name
+/// was corrected. WinRAR prints its `Attempting to correct the invalid file
+/// or directory name` warning for exactly that case (the trailing-dot and
+/// colon corrections are silent).
+pub(crate) fn sanitize_archive_path_corrected(
+    name: &str,
+    allow_incompatible: bool,
+) -> RarResult<(String, bool)> {
     if name.is_empty() {
         return Err(RarError::security("empty entry name"));
     }
@@ -28,6 +43,7 @@ pub(crate) fn sanitize_archive_path(name: &str, allow_incompatible: bool) -> Rar
         )));
     }
     let mut out = String::new();
+    let mut corrected = false;
     for comp in normalized.split('/') {
         if comp.is_empty() || comp == "." {
             continue;
@@ -37,7 +53,8 @@ pub(crate) fn sanitize_archive_path(name: &str, allow_incompatible: bool) -> Rar
                 "entry name {name:?} contains a '..' traversal component"
             )));
         }
-        let comp = sanitize_component(comp, allow_incompatible);
+        let (comp, fixed) = sanitize_component(comp, allow_incompatible);
+        corrected |= fixed;
         if !out.is_empty() {
             out.push('/');
         }
@@ -48,7 +65,7 @@ pub(crate) fn sanitize_archive_path(name: &str, allow_incompatible: bool) -> Rar
             "entry name {name:?} resolves to an empty path"
         )));
     }
-    Ok(out)
+    Ok((out, corrected))
 }
 
 /// Correct one Windows-hostile path component the way WinRAR's default does:
@@ -65,23 +82,25 @@ pub(crate) fn sanitize_archive_path(name: &str, allow_incompatible: bool) -> Rar
 /// ordinary file on modern Windows, and WinRAR does not correct it either.
 /// POSIX has none of these hazards, so the component is returned unchanged.
 #[cfg(windows)]
-fn sanitize_component(component: &str, allow_incompatible: bool) -> String {
+fn sanitize_component(component: &str, allow_incompatible: bool) -> (String, bool) {
     let mut result = component.replace(':', "_");
     if result.ends_with('.') || result.ends_with(' ') {
         result.pop();
         result.push('_');
     }
+    let mut corrected = false;
     if !allow_incompatible && is_reserved_device_name(&result) {
         result.insert(0, '_');
+        corrected = true;
     }
-    result
+    (result, corrected)
 }
 
 /// POSIX has no device names, trailing-dot normalization or ADS semantics, so
 /// every component is already unambiguous and stays as written.
 #[cfg(not(windows))]
-fn sanitize_component(component: &str, _allow_incompatible: bool) -> String {
-    component.to_string()
+fn sanitize_component(component: &str, _allow_incompatible: bool) -> (String, bool) {
+    (component.to_string(), false)
 }
 
 /// Whether the whole component is one of Windows' reserved device names.

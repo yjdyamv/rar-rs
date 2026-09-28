@@ -129,6 +129,7 @@ pub fn exit_code_for(code: ErrorCode) -> i32 {
         ErrorCode::Cancelled => EXIT_USER_BREAK,
         ErrorCode::InvalidOption => EXIT_BAD_COMMAND,
         ErrorCode::MemberNotFound | ErrorCode::AmbiguousMember => EXIT_NO_FILES,
+        ErrorCode::Create => EXIT_CREATE,
         ErrorCode::LimitExceeded => EXIT_MEMORY,
         ErrorCode::Format
         | ErrorCode::InvalidState

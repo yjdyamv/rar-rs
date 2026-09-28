@@ -12,7 +12,7 @@ use crate::format::rar5::write as rar5_write;
 use crate::format::shared::entry_ext::RedirectSpec;
 #[cfg(any(unix, windows))]
 use crate::fs::safe_path::resolve_redirect_target;
-use crate::fs::safe_path::sanitize_archive_path;
+use crate::fs::safe_path::sanitize_archive_path_corrected;
 
 /// Restore a stored Unix mode (`chmod`), mirroring official UnRAR's rule.
 ///
@@ -609,16 +609,29 @@ pub(crate) fn safe_dest_path(cx: &dyn Engine, dest_dir: &Path, name: &str) -> Ra
 /// callers that resolve with options not installed in the read context
 /// (see `members::resolve_dest_path_with`).
 pub(crate) fn safe_dest_path_with(
-    _cx: &dyn Engine,
+    cx: &dyn Engine,
     dest_dir: &Path,
     name: &str,
     safe_paths: bool,
     allow_incompatible_names: bool,
 ) -> RarResult<PathBuf> {
-    let sanitized = if safe_paths {
-        sanitize_archive_path(name, allow_incompatible_names)?
+    safe_dest_path_with_correction(cx, dest_dir, name, safe_paths, allow_incompatible_names)
+        .map(|(path, _)| path)
+}
+
+/// [`safe_dest_path_with`], also reporting whether a reserved device name was
+/// corrected (WinRAR's "attempting to correct the invalid ... name" warning).
+pub(crate) fn safe_dest_path_with_correction(
+    _cx: &dyn Engine,
+    dest_dir: &Path,
+    name: &str,
+    safe_paths: bool,
+    allow_incompatible_names: bool,
+) -> RarResult<(PathBuf, bool)> {
+    let (sanitized, corrected) = if safe_paths {
+        sanitize_archive_path_corrected(name, allow_incompatible_names)?
     } else {
-        name.replace('\\', "/")
+        (name.replace('\\', "/"), false)
     };
     let dest_path = dest_dir.join(&sanitized);
     if safe_paths && let Some(parent) = dest_path.parent() {
@@ -637,7 +650,7 @@ pub(crate) fn safe_dest_path_with(
             )));
         }
     }
-    Ok(dest_path)
+    Ok((dest_path, corrected))
 }
 
 /// The archive-relative, slash-separated directory that holds a link
