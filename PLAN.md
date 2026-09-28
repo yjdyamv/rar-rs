@@ -80,9 +80,13 @@
 按本地安装的 RAR 7.30 beta 1 `Rar.txt` + `WhatsNew.txt` 与实测逐项核对，
 以下都是与官方可见行为的偏离（按影响排序）：
 
-- [ ] **`la`/`lba`/`va`/`vba` 命令被拒**（7.30 新增，`Rar.txt` 的 `l[a,b,t]`/
-      `v[a,b,t]`）：官方 exit 0，我们 `unknown command` exit 7。另外服务块列表
-      （`lt` 已显示 STM 流、`lta`/`vta` 还有 `Service: EOF`）我们完全不列。
+- [ ] **服务块列表未实现**（7.30 的 `a`
+      修饰符）：`la`/`lba`/`va`/`vba`/`lta`/`vta` 已接受（不再 `unknown command`
+      exit 7），但 `a` 要求的服务记录行未渲染——官方 `lt`/`la` 会多出 STM
+      流行、`lta`/`vta` 末尾还有 `Service: EOF`，我们完全 不列（别名目前等同其无
+      `a` 形式，已在 `docs/CLI.md` 写明）。修法：把 `ReadState.streams`
+      的元数据（名字/大小/方法/CRC）经一个新的公开访问器暴露，
+      再在单行与技术列表里逐成员追加。
 - [ ] **`-limt<sec>` 未接**（`Rar.txt` 运行时限；官方超时报 exit 15）：
       `rar t -limt1` 官方 exit 0，我们 `unexpected argument '-l'` exit 7。库已有
       cancel 钩子，落地只需一个计时器并把超时与用户取消区分（exit 15 vs 255）。
@@ -182,6 +186,10 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   归档时仍把旧版本改名成字面 `name;N` （RAR5 官方写 VERSION
   记录）——官方能读，但默认抽取会把两者都解出来；改成写 VERSION
   记录需要给编辑器加一个「设版本」操作（RAR4 无此记录，仍用字面名）。
+- **`la`/`lba`/`va`/`vba` 列表别名被拒**（2026-09-28 对拍官方 7.30 beta
+  1）：官方这四个 7.30 新增的命令 exit 0，我们 `unknown command` exit
+  7（`Rar.txt` 的 `l[a,b,t]` / `v[a,b,t]`）。现按 `visible_aliases`
+  接受，等同其无 `a` 形式；`a` 要求的服务块行 仍未渲染（见「待办」）。
 - **裸 `-v` 不再被当成 `--volume-size`**（2026-09-28 对拍官方 7.30 beta
   1）：官方裸 `-v`（无尺寸）在创建时是「卷大小自适应」（本机硬盘上即单文件），在
   `l`/`v` 列表时 是「从命名卷起的全部卷」。我们把它翻成需要取值的
