@@ -1091,11 +1091,12 @@ mod extract_attributes {
     }
 }
 
-mod extract_over_a_directory {
-    //! A regular-file member whose destination is an existing directory:
-    //! WinRAR 7.30 replaces an *empty* directory with the file, while a
-    //! non-empty one is a create error. Either way the staged
-    //! `.name.rar5tmp-*` sibling must not survive the attempt.
+mod extract_type_mismatch {
+    //! A member whose destination is taken by the other kind of entry:
+    //! WinRAR replaces an *empty* directory with a file and a file with a
+    //! directory member once overwrite is allowed, while a non-empty
+    //! directory is a create error. Either way the staged `.name.rar5tmp-*`
+    //! sibling must not survive the attempt.
 
     #[allow(unused_imports)] // the merged modules share the parent's support import
     use super::*;
@@ -1155,6 +1156,30 @@ mod extract_over_a_directory {
         );
         assert!(out.join("f.txt").is_dir(), "the directory is left intact");
         assert!(!staged_temp_left(&out), "no staged temp may survive");
+    }
+
+    #[test]
+    fn a_file_is_replaced_by_a_directory() {
+        let dir = make_temp_dir();
+        let archive = dir.path().join("archive.rar");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("empty")).unwrap();
+        {
+            let mut writer = ArchiveWriter::create(&archive).unwrap();
+            writer.add_directory(src.join("empty"), "empty").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("empty"), b"in the way").unwrap();
+        let mut reader = ArchiveReader::open(&archive).unwrap();
+        reader.extract_all(&out).unwrap();
+
+        assert!(
+            out.join("empty").is_dir(),
+            "a file in the way must be replaced by the directory member"
+        );
     }
 }
 
