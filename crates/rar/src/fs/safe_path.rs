@@ -170,7 +170,7 @@ fn component_is_ambiguous(component: &str) -> bool {
 
 /// POSIX has no device names and no trailing-dot normalization, so every
 /// component that survived the checks above is unambiguous.
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn component_is_ambiguous(_component: &str) -> bool {
     false
 }
@@ -312,7 +312,7 @@ mod tests {
     /// platform-scoped on purpose. `foo:bar` in particular is an ordinary
     /// filename on Linux, matching official unrar.
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     fn posix_accepts_names_windows_would_correct() {
         use super::component_is_ambiguous;
         assert!(!component_is_ambiguous("CON"));

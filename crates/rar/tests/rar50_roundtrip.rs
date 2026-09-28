@@ -197,19 +197,9 @@ fn extract_rejects_unsafe_entry_names() {
     let dir = make_temp_dir();
     let out = dir.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
-    // Names that escape on any host; a drive/ADS colon is a Windows host
-    // hazard only: POSIX keeps `C:/windows/x` as an ordinary relative name
-    // (official unrar does the same), so it is refused on Windows and
-    // extracted literally elsewhere (see `fs::safe_path::component_is_ambiguous`).
-    let drive_letter_names: &[&str] = if cfg!(windows) {
-        &["C:/windows/x"]
-    } else {
-        &[]
-    };
-    for bad in ["../evil.txt", "/etc/passwd", "a/../../b"]
-        .into_iter()
-        .chain(drive_letter_names.iter().copied())
-    {
+    // Names that escape on any host are refused; a drive/ADS colon is a
+    // Windows host hazard that is *corrected* (`:` -> `_`), not refused.
+    for bad in ["../evil.txt", "/etc/passwd", "a/../../b"] {
         let path = dir
             .path()
             .join(format!("evil-{}.rar", bad.replace(['/', ':'], "_")));
@@ -227,21 +217,24 @@ fn extract_rejects_unsafe_entry_names() {
     assert!(!out.join("evil.txt").exists());
     assert!(!dir.path().join("evil.txt").exists());
 
-    // The POSIX counterpart: a drive-looking name lands as a literal child
-    // of the destination instead of being refused.
-    #[cfg(not(windows))]
+    // A drive-looking name is an ordinary relative path on POSIX and a
+    // sanitized one on Windows.
+    let path = dir.path().join("drive-letter.rar");
     {
-        let path = dir.path().join("drive-letter.rar");
-        {
-            let mut rar = rar_rs::ArchiveWriter::create(&path).unwrap();
-            rar.add_bytes("C:/windows/x", b"nope", opts(0)).unwrap();
-            rar.finish().unwrap();
-        }
-        let mut rar = ArchiveReader::open(&path).unwrap();
-        rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default())
-            .expect("a drive-looking name is an ordinary relative path on POSIX");
-        assert_eq!(std::fs::read(out.join("C:/windows/x")).unwrap(), b"nope");
+        let mut rar = rar_rs::ArchiveWriter::create(&path).unwrap();
+        rar.add_bytes("C:/windows/x", b"nope", opts(0)).unwrap();
+        rar.finish().unwrap();
     }
+    let mut rar = ArchiveReader::open(&path).unwrap();
+    rar.extract_all_with_options(&out, rar_rs::ExtractOptions::default())
+        .expect("a drive-looking name is extracted after host correction");
+    #[cfg(not(windows))]
+    assert_eq!(std::fs::read(out.join("C:/windows/x")).unwrap(), b"nope");
+    #[cfg(windows)]
+    assert_eq!(
+        std::fs::read(out.join("C_").join("windows").join("x")).unwrap(),
+        b"nope"
+    );
 }
 
 #[test]
