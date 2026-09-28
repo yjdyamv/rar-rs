@@ -14,12 +14,14 @@ pub(crate) fn open_editor(
     path: impl AsRef<std::path::Path>,
     password: Option<&str>,
 ) -> Result<rar_rs::ArchiveEditor, String> {
-    match password {
+    let mut editor = match password {
         Some(pw) if !pw.is_empty() => {
-            rar_rs::ArchiveEditor::open_with_password(path, pw).map_err(|e| format!("open: {e}"))
+            rar_rs::ArchiveEditor::open_with_password(path, pw).map_err(|e| format!("open: {e}"))?
         }
-        _ => rar_rs::ArchiveEditor::open(path).map_err(|e| format!("open: {e}")),
-    }
+        _ => rar_rs::ArchiveEditor::open(path).map_err(|e| format!("open: {e}"))?,
+    };
+    editor.set_cancel_flag(crate::ops::time_limit_flag());
+    Ok(editor)
 }
 
 /// Resolve delete names onto an [`rar_rs::EditPlan`] with the legacy `rar d`
@@ -207,8 +209,7 @@ pub(crate) fn cmd_move(
         if let Some(size) = dictionary {
             append_opts = append_opts.dictionary_size(size);
         }
-        rar_rs::ArchiveWriter::append_with(archive_path, append_opts)
-            .map_err(|e| format!("open: {e}"))?
+        crate::ops::append_writer(archive_path, append_opts).map_err(|e| format!("open: {e}"))?
     } else {
         let ts = time::parse_ts_specs(&args.ts_specs)?;
         let mut writer_opts = rar_rs::WriterOptions::new()
@@ -230,8 +231,7 @@ pub(crate) fn cmd_move(
         if let Some(size) = dictionary {
             writer_opts = writer_opts.dictionary_size(size);
         }
-        rar_rs::ArchiveWriter::create_with(archive_path, writer_opts)
-            .map_err(|e| format!("create: {e}"))?
+        crate::ops::create_writer(archive_path, writer_opts).map_err(|e| format!("create: {e}"))?
     };
     let options = rar_rs::EntryWriteOptions::new().compression_level(
         rar_rs::CompressionLevel::try_from(args.level).map_err(|e| format!("level: {e}"))?,
@@ -293,6 +293,7 @@ pub(crate) fn cmd_change(args: &ChangeArgs) -> CliResult<()> {
             .map_err(|e| format!("open: {e}"))?,
         _ => rar_rs::ArchiveEditor::open(&args.archive).map_err(|e| format!("open: {e}"))?,
     };
+    editor.set_cancel_flag(crate::ops::time_limit_flag());
     let names: Vec<String> = editor
         .entries()
         .map(|entry| entry.name().to_string())

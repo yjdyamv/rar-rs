@@ -84,6 +84,7 @@ pub(crate) fn cmd_comment_write(args: &CommentWriteArgs) -> CliResult<()> {
     }
     let mut rar = rar_rs::ArchiveReader::open_with(&args.archive, options)
         .map_err(|e| format!("open: {e}"))?;
+    rar.set_cancel_flag(crate::ops::time_limit_flag());
     let Some(comment) = rar.comment().map_err(|e| format!("cw: {e}"))? else {
         info!("Comment is not present");
         return Ok(());
