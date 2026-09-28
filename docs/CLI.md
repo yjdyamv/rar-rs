@@ -57,10 +57,12 @@ never a silent dump into a `<name>/` folder.
 | `i`         |       | Show archive info (file/dir counts, total & packed size, ratio)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `i<string>` |       | Find a string inside members (`ic`/`ih` variants); **`i` alone is Info, not search**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
-WinRAR 7.30's `a` list modifier is accepted on the single-line commands (`la`,
-`lba`, `va`, `vba`); it asks for service records (NTFS streams) to be included,
-which our listing does not render yet, so those aliases currently print the same
-table as their non-`a` forms (`lta`/`vta` likewise omit them).
+Service records: the technical modes show a member's NTFS streams (`-os`) as
+their own blocks (`rar lt`/`vt` by default), `lta`/`vta` add the trailing
+`Service: EOF` marker, and `rar la`/`va`/`lba`/`vba` add one `STM:name` row per
+stream. UnRAR differs: only its `lta`/`vta` list streams (also with the EOF
+marker), while `lt`/`vt` and the single-line modes stay stream-free — we match
+both tools.
 
 Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 `--work-dir <path>` (`-w<path>`; the directory WinRAR uses for temporary files —

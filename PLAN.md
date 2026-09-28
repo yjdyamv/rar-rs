@@ -6,7 +6,7 @@
 > 也丢」；以及**抽取时用文件替换同名空目录**（官方 7.30 行为）——并顺带把 7.30
 > `Rar.txt` 逐项审查发现的缺口记入「待办」（`-ver` 读取、裸 `-v`、`la`/`va`
 > 别名、 `-limt`、`-da`/`-df` exit
-> 14、时间过滤修饰符已修；余下服务块列表、保留名清洗、 非空目录退出码）。
+> 14、时间过滤修饰符、服务块列表已修；余下保留名清洗、非空目录退出码）。
 > 前轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志
 > （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O 失败）；并给 napi
 > 补 `oldNumbering`、改正其 `volumeSize` 文档。更前轮：**RAR4
@@ -82,13 +82,6 @@
 按本地安装的 RAR 7.30 beta 1 `Rar.txt` + `WhatsNew.txt` 与实测逐项核对，
 以下都是与官方可见行为的偏离（按影响排序）：
 
-- [ ] **服务块列表未实现**（7.30 的 `a`
-      修饰符）：`la`/`lba`/`va`/`vba`/`lta`/`vta` 已接受（不再 `unknown command`
-      exit 7），但 `a` 要求的服务记录行未渲染——官方 `lt`/`la` 会多出 STM
-      流行、`lta`/`vta` 末尾还有 `Service: EOF`，我们完全 不列（别名目前等同其无
-      `a` 形式，已在 `docs/CLI.md` 写明）。修法：把 `ReadState.streams`
-      的元数据（名字/大小/方法/CRC）经一个新的公开访问器暴露，
-      再在单行与技术列表里逐成员追加。
 - [ ] **Windows 保留/歧义成员名我们整轮拒绝**：`sanitize_archive_path` 对设备名
       （`aux.txt`）、尾部点/空格、`:` 直接报 `Security` 并中止，官方默认是
       **清洗**（去尾部点/空格、设备名前加 `_`）后正常抽取，`-oni` 才按原名。实测
@@ -163,6 +156,15 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **服务块（NTFS 流）列表**（2026-09-28 对拍官方 7.30 beta 1 `rar` 与 7.23
+  `unrar`）：新增公开 `StreamInfo` +
+  `ArchiveReader::streams()`（只取元数据、不解码 载荷），列表按官方渲染 STM
+  行——`rar lt`/`vt` 默认列 STM 块，`lta`/`vta` 末尾还有
+  `Service: EOF`；`rar la`/`va`/`lba`/`vba` 的单行/裸列表追加 `STM:name`
+  行。**两台 工具的默认不同**：官方 `UnRAR` 的 `lt`/`vt`/`la`/`lba`
+  **不**列流，只有 `lta`/`vta` 列（也带 EOF），故按二进制分派。契约由
+  `cli_behavior::cli_service_block_listing_shows_ntfs_streams` 与
+  `cli_a_list_modifiers_are_accepted` 钉住。
 - **`-limt<sec>` 运行时限**（2026-09-28 对拍官方 7.30 beta 1）：官方超时报 exit
   15 + `Timeout exceeded.`；我们此前 `unexpected argument '-l'` exit
   7。现新增全局 `--time-limit`：CLI 装一个计时线程置共享 cancel
