@@ -19,6 +19,7 @@ impl RarArchive {
     /// every kept block, recompression ops for the affected solid chains,
     /// and the dropped QO/RR service records (the RR percentage is parsed
     /// so the record can be rebuilt).
+    #[allow(clippy::too_many_arguments)] // mirrors the rewrite state machine
     pub(super) fn plan_rewrite(
         &mut self,
         reader: &mut File,
@@ -26,6 +27,7 @@ impl RarArchive {
         chains: &[(usize, usize)],
         force_rr: Option<u8>,
         rename_map: Option<&std::collections::HashMap<usize, String>>,
+        version_map: Option<&std::collections::HashMap<usize, u64>>,
         comment: Option<&[u8]>,
     ) -> RarResult<RewritePlan> {
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
@@ -110,15 +112,31 @@ impl RarArchive {
                         // A rename re-serializes the header in plaintext (it
                         // must be re-encrypted for `-hp`); every other kept
                         // member copies its original on-disk header bytes.
-                        let (header_bytes, rebuild_header) =
-                            match rename_map.and_then(|m| m.get(&idx)) {
-                                Some(new_name) => {
-                                    let mut fh = self.entries[idx].header.clone();
-                                    fh.name = new_name.clone();
-                                    (fh.to_bytes(), true)
-                                }
-                                None => (meta.header_bytes, false),
-                            };
+                        // Marking an old file version (`-ver`) rebuilds the
+                        // header too, with a fresh VERSION extra record.
+                        let renamed = rename_map.and_then(|m| m.get(&idx));
+                        let version = version_map.and_then(|m| m.get(&idx));
+                        let (header_bytes, rebuild_header) = if renamed.is_some()
+                            || version.is_some()
+                        {
+                            let mut fh = self.entries[idx].header.clone();
+                            if let Some(new_name) = renamed {
+                                fh.name = new_name.clone();
+                            }
+                            if let Some(version) = version {
+                                fh.version = Some(*version);
+                                fh.extra_data = crate::format::rar5::headers::retain_extra_records(
+                                    &fh.extra_data,
+                                    &[crate::format::rar5::EXTRA_FILE_VERSION],
+                                );
+                                fh.extra_data.extend_from_slice(
+                                    &crate::format::rar5::headers::version_extra_record(*version),
+                                );
+                            }
+                            (fh.to_bytes(), true)
+                        } else {
+                            (meta.header_bytes, false)
+                        };
                         ops.push(RewriteOp::CopyBlock {
                             rebuild_header,
                             qo_header: if capture_qo {

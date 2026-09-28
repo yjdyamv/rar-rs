@@ -4,7 +4,6 @@ use crate::args::archive_version;
 use crate::args::resolve_dict_switch;
 use crate::args::{FilesArgs, collect_inputs};
 use crate::common;
-use crate::edit::editor_chained_rename_plan;
 use crate::edit::editor_delete_plan;
 use crate::edit::open_editor;
 use crate::error::CliResult;
@@ -198,65 +197,10 @@ fn cmd_update_freshen(
                 // like the legacy sequential calls.
                 let mut editor = open_editor(staged_path, password.as_deref())
                     .map_err(|error| format!("open staged archive: {error}"))?;
-                let max_versions = if version_spec.is_empty() {
-                    None
-                } else {
-                    version_spec.parse::<u32>().ok().filter(|count| *count > 0)
-                };
-                let mut renames = Vec::new();
-                let mut to_drop = Vec::new();
-                for name in &to_delete {
-                    let mut versions: Vec<(u32, String)> = editor
-                        .entries()
-                        .filter_map(|entry| {
-                            let member = entry.name();
-                            if member == *name {
-                                Some((0, member.to_string()))
-                            } else if let Some(suffix) = member.strip_prefix(&format!("{name};"))
-                                && let Ok(version) = suffix.parse::<u32>()
-                            {
-                                Some((version, member.to_string()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    versions.sort_by_key(|(version, _)| *version);
-                    for (version, member) in versions.iter().rev() {
-                        let new_suffix = version
-                            .checked_add(1)
-                            .ok_or_else(|| format!("version number overflow for {member}"))?;
-                        if max_versions.is_some_and(|limit| new_suffix > limit) {
-                            to_drop.push(member.clone());
-                        } else {
-                            let new_name = if *version == 0 {
-                                format!("{name};1")
-                            } else {
-                                format!("{name};{new_suffix}")
-                            };
-                            renames.push((member.clone(), new_name));
-                        }
-                    }
-                }
-                if !renames.is_empty() {
-                    let pairs: Vec<(&str, &str)> = renames
-                        .iter()
-                        .map(|(old, new)| (old.as_str(), new.as_str()))
-                        .collect();
-                    let plan = editor_chained_rename_plan(&editor, &pairs)
-                        .map_err(|error| format!("rename staged members: {error}"))?;
-                    editor
-                        .apply(plan)
-                        .map_err(|error| format!("rename staged members: {error}"))?;
-                }
-                if !to_drop.is_empty() {
-                    let names: Vec<&str> = to_drop.iter().map(String::as_str).collect();
-                    let plan = editor_delete_plan(&editor, &names)
-                        .map_err(|error| format!("delete staged versions: {error}"))?;
-                    editor
-                        .apply(plan)
-                        .map_err(|error| format!("delete staged versions: {error}"))?;
-                }
+                let edits = crate::edit::version_edits(&editor, &to_delete, version_spec)
+                    .map_err(|error| format!("version staged members: {error}"))?;
+                crate::edit::apply_version_edits(&mut editor, edits)
+                    .map_err(|error| format!("version staged members: {error}"))?;
             } else {
                 // Plain replacement delete (no version control) runs through
                 // the editor role in one atomic rewrite.

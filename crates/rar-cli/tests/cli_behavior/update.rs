@@ -49,37 +49,46 @@ fn cli_version_control_keeps_previous_versions() {
         assert!(status.success(), "u {flag} must succeed");
     };
 
-    // First update with -ver: old version kept as `ver.txt;1`.
+    /// The id of `ver.txt` at `version` (`None` = the current member).
+    fn version_id(rar: &rar_rs::ArchiveReader, version: Option<u64>) -> rar_rs::EntryId {
+        rar.entries()
+            .find(|entry| entry.name() == "ver.txt" && entry.file_version() == version)
+            .unwrap_or_else(|| panic!("ver.txt version {version:?} must be present"))
+            .id()
+    }
+
+    // First update with -ver: the old version is recorded in the header (the
+    // RAR5 VERSION extra record), not in the member name.
     update(b"v2", 10, "-ver");
     {
         let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
-        let vt_id = rar.unique_entry("ver.txt").unwrap();
-        assert_eq!(rar.read_entry(vt_id).unwrap(), b"v2");
-        let vt1_id = rar.unique_entry("ver.txt;1").unwrap();
-        assert_eq!(rar.read_entry(vt1_id).unwrap(), b"v1");
+        let id = version_id(&rar, None);
+        assert_eq!(rar.read_entry(id).unwrap(), b"v2");
+        let id = version_id(&rar, Some(1));
+        assert_eq!(rar.read_entry(id).unwrap(), b"v1");
     }
 
-    // Second update: the chain shifts (ver.txt;1 -> ver.txt;2).
+    // Second update: the chain shifts (version 1 becomes version 2).
     update(b"v3", 20, "-ver");
     {
         let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
-        let vt_id = rar.unique_entry("ver.txt").unwrap();
-        assert_eq!(rar.read_entry(vt_id).unwrap(), b"v3");
-        let vt1_id = rar.unique_entry("ver.txt;1").unwrap();
-        assert_eq!(rar.read_entry(vt1_id).unwrap(), b"v2");
-        let vt2_id = rar.unique_entry("ver.txt;2").unwrap();
-        assert_eq!(rar.read_entry(vt2_id).unwrap(), b"v1");
+        let id = version_id(&rar, None);
+        assert_eq!(rar.read_entry(id).unwrap(), b"v3");
+        let id = version_id(&rar, Some(1));
+        assert_eq!(rar.read_entry(id).unwrap(), b"v2");
+        let id = version_id(&rar, Some(2));
+        assert_eq!(rar.read_entry(id).unwrap(), b"v1");
     }
 
     // -ver1 caps the history at one previous version.
     update(b"v4", 30, "-ver1");
     {
         let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
-        let vt_id = rar.unique_entry("ver.txt").unwrap();
-        assert_eq!(rar.read_entry(vt_id).unwrap(), b"v4");
-        let vt1_id = rar.unique_entry("ver.txt;1").unwrap();
-        assert_eq!(rar.read_entry(vt1_id).unwrap(), b"v3");
-        assert!(!rar.entries().any(|e| e.name() == "ver.txt;2"));
+        let id = version_id(&rar, None);
+        assert_eq!(rar.read_entry(id).unwrap(), b"v4");
+        let id = version_id(&rar, Some(1));
+        assert_eq!(rar.read_entry(id).unwrap(), b"v3");
+        assert!(!rar.entries().any(|e| e.file_version() == Some(2)));
     }
 }
 

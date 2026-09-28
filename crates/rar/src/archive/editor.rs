@@ -110,6 +110,10 @@ pub enum EditOp {
     /// Rename the member identified by the ID (like `rar rn`); a directory
     /// rename is expanded to its descendants.
     Rename(EntryId, String),
+    /// Mark the member identified by the ID as an old file version (WinRAR
+    /// `-ver`): its RAR5 header gets a VERSION extra record with this number.
+    /// RAR 1.5–4.x has no such record and rejects the op.
+    SetFileVersion(EntryId, u64),
     /// Replace the archive comment (like `rar c`); empty bytes remove the
     /// existing comment. Only valid on single-volume archives.
     SetComment(Vec<u8>),
@@ -159,6 +163,16 @@ impl EditPlan {
     #[must_use]
     pub fn rename(mut self, id: EntryId, new_name: impl Into<String>) -> Self {
         self.ops.push(EditOp::Rename(id, new_name.into()));
+        self
+    }
+
+    /// Queue an old-version marking of the member identified by `id`
+    /// (WinRAR `-ver`): its RAR5 header records this version number. RAR
+    /// 1.5–4.x keeps versions in the member name instead, so the legacy
+    /// editor rejects the op.
+    #[must_use]
+    pub fn set_file_version(mut self, id: EntryId, version: u64) -> Self {
+        self.ops.push(EditOp::SetFileVersion(id, version));
         self
     }
 
@@ -268,6 +282,7 @@ impl ArchiveEditor {
         // rewrite starts; a stale ID fails the whole plan up front.
         let mut deletes = Vec::with_capacity(plan.ops.len());
         let mut renames = Vec::with_capacity(plan.ops.len());
+        let mut versions = Vec::with_capacity(plan.ops.len());
         let mut comment: Option<Vec<u8>> = None;
         let mut force_rr: Option<u8> = None;
         for op in &plan.ops {
@@ -275,6 +290,9 @@ impl ArchiveEditor {
                 EditOp::Delete(id) => deletes.push(self.resolve_id(*id)?),
                 EditOp::Rename(id, new_name) => {
                     renames.push((self.resolve_id(*id)?, new_name.clone()))
+                }
+                EditOp::SetFileVersion(id, version) => {
+                    versions.push((self.resolve_id(*id)?, *version))
                 }
                 EditOp::SetComment(bytes) => {
                     if comment.is_some() {
@@ -307,9 +325,9 @@ impl ArchiveEditor {
                 }
             }
         }
-        let summary = self
-            .archive
-            .edit_plan(&deletes, &renames, force_rr, comment.as_deref())?;
+        let summary =
+            self.archive
+                .edit_plan(&deletes, &renames, &versions, force_rr, comment.as_deref())?;
         self.archive.reset_catalog_token()?;
         Ok(EditReport {
             deleted: summary.deleted,
@@ -337,6 +355,13 @@ impl ArchiveEditor {
                     // Resolve against the catalog like the RAR5 path: a
                     // stale ID fails the whole plan before any rewrite.
                     renames.push((self.resolve_id(*id)?, new_name.clone()));
+                }
+                EditOp::SetFileVersion(_, _) => {
+                    // RAR 1.5–4.x has no VERSION extra record: WinRAR keeps
+                    // versions in the member name there.
+                    return Err(RarError::unsupported(
+                        "file versions are only supported for RAR5 archives; RAR 1.5-4.x keeps ;N in the name",
+                    ));
                 }
                 EditOp::SetComment(bytes) => {
                     if comment.is_some() {

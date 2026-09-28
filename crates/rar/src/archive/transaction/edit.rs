@@ -19,6 +19,7 @@ impl RarArchive {
         &mut self,
         delete_indexes: &[usize],
         renames: &[(usize, String)],
+        versions: &[(usize, u64)],
         force_rr: Option<u8>,
         comment: Option<&[u8]>,
     ) -> RarResult<EditSummary> {
@@ -49,7 +50,7 @@ impl RarArchive {
             ));
         }
         self.ensure_write_ctx();
-        if (!renames.is_empty() || force_rr.is_some() || comment.is_some())
+        if (!renames.is_empty() || !versions.is_empty() || force_rr.is_some() || comment.is_some())
             && self.main_header_is_locked()?
         {
             return Err(RarError::ArchiveLocked);
@@ -78,8 +79,21 @@ impl RarArchive {
                 ));
             }
         }
+        let mut version_map = std::collections::HashMap::with_capacity(versions.len());
+        for (idx, version) in versions {
+            if *idx >= self.entries.len() {
+                return Err(RarError::StaleEntryId);
+            }
+            if deleted[*idx] {
+                return Err(RarError::invalid_option(
+                    "cannot version a member that the same edit deletes",
+                ));
+            }
+            version_map.insert(*idx, *version);
+        }
 
         let (map, renamed_count) = super::super::rename::build_rename_map(&self.entries, renames)?;
+        let renamed_count = renamed_count + version_map.len();
         if deleted_count == 0 && renamed_count == 0 && force_rr.is_none() && comment.is_none() {
             return Err(RarError::format("no members to edit"));
         }
@@ -142,7 +156,7 @@ impl RarArchive {
             }
         }
 
-        self.rewrite_edit(deleted, &chains, &map, force_rr, comment)?;
+        self.rewrite_edit(deleted, &chains, &map, &version_map, force_rr, comment)?;
         Ok(EditSummary {
             deleted: deleted_count,
             renamed: renamed_count,
@@ -236,10 +250,12 @@ impl RarArchive {
         deleted: Vec<bool>,
         chains: &[(usize, usize)],
         map: &std::collections::HashMap<usize, String>,
+        versions: &std::collections::HashMap<usize, u64>,
         force_rr: Option<u8>,
         comment: Option<&[u8]>,
     ) -> RarResult<()> {
         let rename_map = (!map.is_empty()).then_some(map);
+        let version_map = (!versions.is_empty()).then_some(versions);
         // Comment changes are validated out of the multi-volume path above
         // (`rewrite_multivolume` cannot carry them).
         debug_assert!(
@@ -247,6 +263,13 @@ impl RarArchive {
             "comment edits must be single-volume"
         );
         if self.volume_paths.len() > 1 {
+            // The volume-set rewriter carries renames but not version
+            // records (official RAR refuses to modify volume sets at all).
+            if version_map.is_some() {
+                return Err(RarError::unsupported(
+                    "file versions are not supported on multi-volume sets",
+                ));
+            }
             // Probe the main header before the multi-volume rewrite. The
             // probe derives header encryption (and the locked flag) from the
             // file; a delete-only plan would otherwise skip it, and
@@ -273,6 +296,7 @@ impl RarArchive {
                 chains,
                 force_rr,
                 rename_map,
+                version_map,
                 comment,
                 &src_path,
                 &tmp_path,
@@ -438,11 +462,20 @@ impl RarArchive {
         chains: &[(usize, usize)],
         force_rr: Option<u8>,
         rename_map: Option<&std::collections::HashMap<usize, String>>,
+        version_map: Option<&std::collections::HashMap<usize, u64>>,
         comment: Option<&[u8]>,
         src_path: &Path,
         tmp_path: &Path,
     ) -> RarResult<()> {
-        let plan = self.plan_rewrite(reader, deleted, chains, force_rr, rename_map, comment)?;
+        let plan = self.plan_rewrite(
+            reader,
+            deleted,
+            chains,
+            force_rr,
+            rename_map,
+            version_map,
+            comment,
+        )?;
         self.execute_rewrite(&plan, src_path, tmp_path)?;
         Ok(())
     }

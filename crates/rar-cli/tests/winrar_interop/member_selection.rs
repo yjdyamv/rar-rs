@@ -339,3 +339,61 @@ fn file_versions_follow_winrar() {
     assert_eq!(extract(&["-ver1"], &[], "only1"), ["f.txt"]);
     assert_eq!(extract(&[], &["f.txt;1"], "explicit"), ["f.txt;1"]);
 }
+
+/// Our RAR5 `-ver` writer must record the old version in the header's VERSION
+/// extra record (not in the member name), so WinRAR lists `name;N` and its
+/// default extraction keeps only the current version.
+#[test]
+fn our_rar5_file_versions_are_read_by_winrar() {
+    let Some((official, _unrar)) = official_tools() else {
+        return;
+    };
+    let dir = temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("f.txt");
+    std::fs::write(&file, "first\n").unwrap();
+    // Pin the mtimes: the second source is newer, so `a` replaces it.
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(base)
+        .unwrap();
+    let (code, out) = run_in(
+        Path::new(OUR_RAR),
+        &["a", "-idq", "-m0", "v.rar", "f.txt"],
+        &src,
+    );
+    assert_eq!(code, Some(0), "{out}");
+    std::fs::write(&file, "second\n").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(base + std::time::Duration::from_secs(10))
+        .unwrap();
+    let (code, out) = run_in(
+        Path::new(OUR_RAR),
+        &["a", "-idq", "-m0", "-ver", "v.rar", "f.txt"],
+        &src,
+    );
+    assert_eq!(code, Some(0), "our a -ver: {out}");
+
+    let (_, listing) = run_in(&official, &["lb", "v.rar"], &src);
+    assert!(
+        listing.contains("f.txt;1"),
+        "official must read the version record: {listing}"
+    );
+    let dest_dir = src.join("default");
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest = dest_arg(&dest_dir);
+    let (code, out) = run_in(&official, &["x", "-idq", "-o+", "v.rar", &dest], &src);
+    assert_eq!(code, Some(0), "official x: {out}");
+    assert_eq!(
+        dir_entries(&dest_dir),
+        ["f.txt"],
+        "the default extraction keeps only the current version"
+    );
+}
