@@ -23,7 +23,7 @@ pub(crate) use ctx::{
     CatalogOps, Engine, EngineState, HeaderCryptoOps, Parts, StreamOps, VolumeOps, WriteServices,
 };
 pub use discovery::discover_volumes;
-pub use entry::{ArchiveEntry, BatchEntry};
+pub use entry::{ArchiveEntry, BatchEntry, StreamInfo};
 #[cfg(feature = "parallel")]
 pub(crate) use entry::{BatchPrepareCtx, PreparedEntry};
 pub(crate) use plan::MemberPlan;

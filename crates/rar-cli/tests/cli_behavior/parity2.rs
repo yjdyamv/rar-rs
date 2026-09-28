@@ -673,14 +673,18 @@ fn cli_a_list_modifiers_are_accepted() {
         assert!(out.status.success(), "{binary} {command} failed: {out:?}");
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
-    // Both binaries accept the aliases (official `rar` and `unrar` do).
+    // Both binaries accept the aliases (official `rar` and `unrar` do). On a
+    // stream-free archive the single-line `a` forms match their plain form;
+    // the technical `a` forms add the trailing `Service: EOF` marker.
     for binary in [RAR_CLI, UNRAR_CLI] {
         assert_eq!(run(binary, "la"), run(binary, "l"));
         assert_eq!(run(binary, "lba"), run(binary, "lb"));
         assert_eq!(run(binary, "va"), run(binary, "v"));
         assert_eq!(run(binary, "vba"), run(binary, "vb"));
-        assert_eq!(run(binary, "lta"), run(binary, "lt"));
-        assert_eq!(run(binary, "vta"), run(binary, "vt"));
+        assert!(run(binary, "lta").contains("Service: EOF"));
+        assert!(!run(binary, "lt").contains("Service: EOF"));
+        assert!(run(binary, "vta").contains("Service: EOF"));
+        assert!(!run(binary, "vt").contains("Service: EOF"));
     }
 }
 

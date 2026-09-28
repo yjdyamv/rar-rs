@@ -1920,3 +1920,45 @@ fn cli_listing_uses_the_quick_open_record() {
         "a full scan must hit the corrupt header"
     );
 }
+
+/// Service-block listing: WinRAR's technical modes show NTFS streams (`lt`),
+/// `lta`/`vta` add the `Service: EOF` marker, and the `a` modifier adds a
+/// stream row to the single-line modes (`la`/`lba`).
+#[cfg(windows)]
+#[test]
+fn cli_service_block_listing_shows_ntfs_streams() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("f.txt");
+    std::fs::write(&file, b"main").unwrap();
+    std::fs::write(format!("{}:ads", file.display()), b"stream payload").unwrap();
+
+    let archive = dir.path().join("s.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-os", "-m0", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(&src)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let list = |command: &str| {
+        let out = std::process::Command::new(RAR_CLI)
+            .arg(command)
+            .arg(&archive)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let lt = list("lt");
+    assert!(lt.contains("Name: STM"), "{lt}");
+    assert!(lt.contains("Target: :ads"), "{lt}");
+    assert!(!lt.contains("Service: EOF"), "{lt}");
+    assert!(list("lta").contains("Service: EOF"));
+    assert!(list("lba").contains("STM:ads"));
+    assert!(list("la").contains("STM:ads"));
+    assert!(!list("lb").contains("STM"));
+    assert!(!list("l").contains("STM"));
+}

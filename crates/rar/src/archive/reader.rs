@@ -418,6 +418,27 @@ impl ArchiveReader {
         Entries::new(self.archive.catalog_token(), &self.archive.entries)
     }
 
+    /// NTFS alternate data streams (`-os`) attached to members, in archive
+    /// order. Metadata only — the payload is not decoded, so this is safe to
+    /// call for a listing (and works with a wrong password, like WinRAR's
+    /// technical listing of a locked archive).
+    pub fn streams(&self) -> Vec<crate::StreamInfo> {
+        self.archive
+            .read_ctx()
+            .streams
+            .iter()
+            .map(|stream| crate::StreamInfo {
+                owner_index: stream.owner_index,
+                name: stream.name.clone(),
+                data_size: stream.data_size,
+                unpacked_size: stream.unpacked_size,
+                method: stream.method,
+                dict_size_log: stream.dict_size_log,
+                crc32: stream.crc32,
+            })
+            .collect()
+    }
+
     /// Whether a legacy volume set used the newer `.partN.rar` numbering
     /// (`MHD_NEWNUMBERING`); display-only.
     pub fn is_new_numbering(&self) -> bool {

@@ -272,3 +272,23 @@ impl ArchiveEntry {
         self.header.comment.as_deref()
     }
 }
+
+/// Metadata for one NTFS alternate data stream (`-os`) attached to a member:
+/// enough for listing without decoding the payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamInfo {
+    /// Catalog index of the owning member.
+    pub owner_index: usize,
+    /// Stream name including the leading `:` (e.g. `:stream1`).
+    pub name: String,
+    /// Packed (stored) size in bytes.
+    pub data_size: u64,
+    /// Unpacked stream size in bytes.
+    pub unpacked_size: u64,
+    /// Compression method code (`0` = STORE).
+    pub method: u8,
+    /// Dictionary size log2, as stored in the stream block.
+    pub dict_size_log: u8,
+    /// Stored CRC32 over the decoded stream payload.
+    pub crc32: Option<u32>,
+}
