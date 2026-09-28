@@ -1091,6 +1091,73 @@ mod extract_attributes {
     }
 }
 
+mod extract_over_a_directory {
+    //! A regular-file member whose destination is an existing directory:
+    //! WinRAR 7.30 replaces an *empty* directory with the file, while a
+    //! non-empty one is a create error. Either way the staged
+    //! `.name.rar5tmp-*` sibling must not survive the attempt.
+
+    #[allow(unused_imports)] // the merged modules share the parent's support import
+    use super::*;
+
+    use rar_rs::{ArchiveReader, ArchiveWriter, EntryWriteOptions};
+
+    fn archive_with(archive: &std::path::Path) {
+        let mut writer = ArchiveWriter::create(archive).unwrap();
+        writer
+            .add_bytes("f.txt", b"payload", EntryWriteOptions::new())
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    fn staged_temp_left(dest: &std::path::Path) -> bool {
+        std::fs::read_dir(dest).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("rar5tmp")
+        })
+    }
+
+    #[test]
+    fn an_empty_directory_is_replaced_by_the_file() {
+        let dir = make_temp_dir();
+        let archive = dir.path().join("archive.rar");
+        archive_with(&archive);
+
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(out.join("f.txt")).unwrap();
+        let mut reader = ArchiveReader::open(&archive).unwrap();
+        reader.extract_all(&out).unwrap();
+
+        assert!(
+            out.join("f.txt").is_file(),
+            "an empty folder in the way must be replaced by the file"
+        );
+        assert_eq!(std::fs::read(out.join("f.txt")).unwrap(), b"payload");
+        assert!(!staged_temp_left(&out), "no staged temp may survive");
+    }
+
+    #[test]
+    fn a_non_empty_directory_fails_and_leaves_no_temp() {
+        let dir = make_temp_dir();
+        let archive = dir.path().join("archive.rar");
+        archive_with(&archive);
+
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(out.join("f.txt")).unwrap();
+        std::fs::write(out.join("f.txt").join("inner"), b"x").unwrap();
+        let mut reader = ArchiveReader::open(&archive).unwrap();
+        assert!(
+            reader.extract_all(&out).is_err(),
+            "a non-empty directory in the way must fail"
+        );
+        assert!(out.join("f.txt").is_dir(), "the directory is left intact");
+        assert!(!staged_temp_left(&out), "no staged temp may survive");
+    }
+}
+
 mod model_api_compat {
     //! Wire model API: the promoted `wire` surface exposes the archive model
     //! structs together with their parsing/serialization helpers (the former

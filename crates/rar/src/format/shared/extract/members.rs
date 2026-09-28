@@ -79,6 +79,33 @@ fn member_mtime(hdr: &crate::model::FileHeader) -> Option<std::time::SystemTime>
     )
 }
 
+/// Install a staged member temp over its destination.
+///
+/// Regular files take the atomic [`replace_file`] path. A directory in the
+/// way is handled the way WinRAR 7.30 does: an *empty* directory carrying the
+/// member's name is replaced by the file once the overwrite policy allowed the
+/// write (WhatsNew 7.30 beta 1: "If empty folder with the same name as
+/// unpacking file exists and overwrite has been confirmed by a user, such
+/// folder is replaced by the file"; older WinRAR failed with "Access is
+/// denied"), while a non-empty directory is a create error. The directory
+/// case has to be explicit on Windows, where `ReplaceFileW` cannot replace a
+/// directory — and a failed install removes the staged temp rather than
+/// leaving a stray `.name.rar5tmp-*` sibling behind.
+fn install_member_file(tmp_path: &Path, dest_path: &Path) -> RarResult<()> {
+    let result = if dest_path.is_dir() {
+        match fs::remove_dir(dest_path) {
+            Ok(()) => replace_file(tmp_path, dest_path),
+            Err(error) => Err(RarError::Io(error)),
+        }
+    } else {
+        replace_file(tmp_path, dest_path)
+    };
+    if result.is_err() {
+        let _ = fs::remove_file(tmp_path);
+    }
+    result
+}
+
 /// Materialize one member file through a temp sibling of `dest_path`.
 ///
 /// `produce` writes the member's bytes and reports the member's outcome:
@@ -106,11 +133,11 @@ where
         Ok(())
     })();
     match result {
-        Ok(()) => replace_file(&tmp_path, dest_path),
+        Ok(()) => install_member_file(&tmp_path, dest_path),
         Err(e) => {
             if keep_broken {
                 // `-kb`: keep the partially extracted file.
-                let _ = replace_file(&tmp_path, dest_path);
+                let _ = install_member_file(&tmp_path, dest_path);
             } else {
                 let _ = fs::remove_file(&tmp_path);
             }
