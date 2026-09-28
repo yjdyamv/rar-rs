@@ -221,6 +221,32 @@ fn format_does_not_depend_on_the_archive_engine() {
     );
 }
 
+/// `recovery` and `wire` sit *below* the archive engine too: recovery reuses
+/// the RAR4 envelope reader over `format`, and the public `wire` surface
+/// re-exports format types. Neither may name `archive`, so that
+/// `archive::reconstruct_archive_path` (which needs both) stays the only place
+/// that composes them.
+#[test]
+fn recovery_and_wire_do_not_depend_on_the_archive_engine() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut layers = vec!["archive".to_string()];
+    layers.extend(crate_root_reexports(
+        &manifest_dir.join("src/lib.rs"),
+        "archive",
+    ));
+    let layers = layers.iter().map(String::as_str).collect::<Vec<_>>();
+    let recovery = layer_references(&manifest_dir.join("src/recovery"), &layers);
+    assert!(
+        recovery.is_empty(),
+        "src/recovery must not name archive (module path or re-exported item): {recovery:?}"
+    );
+    let wire = layer_references_in(&[manifest_dir.join("src/wire.rs")], manifest_dir, &layers);
+    assert!(
+        wire.is_empty(),
+        "src/wire must not name archive (module path or re-exported item): {wire:?}"
+    );
+}
+
 /// Everything `format` is allowed to sit on must not reference it back:
 /// `engine` (the `Engine` seam), the codec/crypto/fs/model leaves, the
 /// option layer, and the root vocabulary (`detect`/`version`/`vint`).
@@ -255,5 +281,40 @@ fn layers_below_format_do_not_depend_on_it() {
     assert!(
         offenders.is_empty(),
         "layers below format must not depend on it: {offenders:?}"
+    );
+}
+
+/// The root vocabulary files are true leaves: `detect`/`version`/`vint`/
+/// `time`/`error`/`platform`/`io_util`/`parallel`/`write_progress`/`crc32`/
+/// `features` must not reference any higher layer. (They have no outbound
+/// edges today; a future need must fail here so the ordering is re-reviewed
+/// instead of silently inverted.)
+#[test]
+fn root_vocabulary_files_stay_leaves() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let upward = [
+        "archive", "format", "engine", "codec", "crypto", "recovery", "wire", "fs", "model",
+        "options",
+    ];
+    let sources: Vec<PathBuf> = [
+        "src/detect.rs",
+        "src/version.rs",
+        "src/vint.rs",
+        "src/time.rs",
+        "src/error.rs",
+        "src/platform.rs",
+        "src/io_util.rs",
+        "src/parallel.rs",
+        "src/write_progress.rs",
+        "src/crc32.rs",
+        "src/features.rs",
+    ]
+    .iter()
+    .map(|file| manifest_dir.join(file))
+    .collect();
+    let offenders = layer_references_in(&sources, manifest_dir, &upward);
+    assert!(
+        offenders.is_empty(),
+        "root vocabulary files must not depend upward: {offenders:?}"
     );
 }
