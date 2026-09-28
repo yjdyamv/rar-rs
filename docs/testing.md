@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-09-22 @ `fbe2f8c`; every timing number here is a
+> Last verified: 2026-09-28 @ `393f1d6`; every timing number here is a
 > host-specific snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing
@@ -19,12 +19,17 @@ fast (it parallelizes across test binaries instead of running them one after
 another) and prints a per-test timing report — the easiest way to find what got
 slow. It is a local convenience only.
 
-**This is the only test gate.** CI does not run tests (2026-09, at the owner's
+**This is the main test gate.** CI runs a deterministic **smoke** subset:
+`cargo test -p rar-rs --locked` and `cargo test -p rar-cli --bins --locked` (the
+library and CLI suites — no official-tool interop, no JS/WASI binding suite).
+That was added 2026-09-28 after a stale assertion shipped with 0.12.0 because
+nothing ran the tests; the JS/WASI binding suites stay local (2026-09, owner's
 request: the WASI binding suite blocked a release on a non-reproducible
-`memory access out of bounds`, and a red run must mean a compile/lint failure,
-not a test flake). CI keeps fmt, the host-path guard, `cargo check`, clippy,
-`cargo deny` and rustdoc; everything under "Running" above is yours to run
-before tagging a release. The Linux half in one command:
+`memory access out of bounds`, and a red run must mean a compile/lint/test-fact
+failure, not a test flake). CI also keeps fmt, the host-path guard,
+`cargo check`, clippy, `cargo deny` and rustdoc; everything under "Running"
+above (including the interop suites and the ignored codec matrix) is still yours
+to run before tagging a release. The Linux half in one command:
 `bash scripts/wsl/ci-linux.sh` (WSL2 — it _is_ the Linux test gate now).
 
 ## The other two platforms
