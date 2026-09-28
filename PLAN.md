@@ -6,7 +6,7 @@
 > 也丢」；以及**抽取时用文件替换同名空目录**（官方 7.30 行为）——并顺带把 7.30
 > `Rar.txt` 逐项审查发现的缺口记入「待办」（`-ver` 读取、裸 `-v`、`la`/`va`
 > 别名、 `-limt`、`-da`/`-df` exit
-> 14、时间过滤修饰符、服务块列表已修；余下保留名清洗、非空目录退出码）。
+> 14、时间过滤修饰符、服务块列表、保留名清洗已修；余下非空目录退出码 #8）。
 > 前轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志
 > （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O 失败）；并给 napi
 > 补 `oldNumbering`、改正其 `volumeSize` 文档。更前轮：**RAR4
@@ -82,11 +82,6 @@
 按本地安装的 RAR 7.30 beta 1 `Rar.txt` + `WhatsNew.txt` 与实测逐项核对，
 以下都是与官方可见行为的偏离（按影响排序）：
 
-- [ ] **Windows 保留/歧义成员名我们整轮拒绝**：`sanitize_archive_path` 对设备名
-      （`aux.txt`）、尾部点/空格、`:` 直接报 `Security` 并中止，官方默认是
-      **清洗**（去尾部点/空格、设备名前加 `_`）后正常抽取，`-oni` 才按原名。实测
-      官方解 `aux.txt` 成员得 `aux.txt`（用 `\\?\` 字面路径），我们 exit 2
-      什么也 不写。`-oni` 目前也只是「接受但不生效」。
 - [ ] **非空目录挡路时的退出码**：我们 fatal(2) vs 官方 create-error(9)；要新增
       `ErrorCode` 变体，属 API 决策（上轮已记在「已修」条目内）。
 
@@ -156,6 +151,26 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
 
 **正确性**
 
+- **Windows 保留/歧义成员名的清洗**（2026-09-28 对拍官方 7.30 beta 1）：此前
+  `sanitize_archive_path` 对设备名（`aux`）、尾部点/空格、`:` 直接报 `Security`
+  并
+  **中止整轮**，官方默认是**改成可用名字**后照常抽取。现按官方实测逐条对齐：`:`
+  → `_`；组件**最后一字节**是 `.`/空格 →
+  `_`（`report.`→`report_`、`a..`→`a._`）；组件
+  **整体**（大小写不敏感）等于保留设备名（`CON`/`AUX`/`NUL`/`COM1..9`/`LPT1..9`/
+  `CONIN$`/`CONOUT$`）→ 前加 `_`；带扩展名的 `aux.txt`/`NUL.log` **不动**（现代
+  Windows 上是普通文件，官方也不改）。新增
+  `ExtractOptions::allow_incompatible_names` （CLI
+  `-oni`）：跳过设备名前缀（保留原名，官方 `-oni` 亦然），但 `:` 与尾部点/空格
+  仍归一到 `_`（官方 `-oni` 对尾部点直接报 `Cannot create` exit
+  9，我们选不丢名字的 安全处理）。安全护栏不变（空名/绝对路径/`..`/NUL
+  仍拒，链接目标仍拒歧义组件）。 契约由
+  `fs::safe_path::tests::windows_ambiguous_components_are_corrected` 与
+  `cli_behavior::cli_windows_hostile_names_are_corrected`
+  钉住。**已知残余**：官方对 设备名修正会打印
+  `WARNING: Attempting to correct the invalid file or directory
+  name`，我们不打印（提示差异，退出码同为
+  0）。
 - **服务块（NTFS 流）列表**（2026-09-28 对拍官方 7.30 beta 1 `rar` 与 7.23
   `unrar`）：新增公开 `StreamInfo` +
   `ArchiveReader::streams()`（只取元数据、不解码 载荷），列表按官方渲染 STM

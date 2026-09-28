@@ -227,10 +227,18 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 
 **Accepted as no-ops** (Windows-only or interactive in WinRAR, like WinRAR's own
 parser): `-ac`, `-ai`, `-ao`, `-e[+]<attr>`, `-dh`, `-ieml`, `-ioff`, `-isnd`,
-`-ri`, `-mlp`, `-oc`, `-oni`, `-am[s,r]`, `-vp`, `-sc`. `-os` is a no-op off
-Windows. **Rejected with an error** rather than silently ignored, because they
-would imply destructive changes: `-dr` (recycle bin), `-dw` (wipe), `-vd` (erase
+`-ri`, `-mlp`, `-oc`, `-am[s,r]`, `-vp`, `-sc`. `-os` is a no-op off Windows.
+**Rejected with an error** rather than silently ignored, because they would
+imply destructive changes: `-dr` (recycle bin), `-dw` (wipe), `-vd` (erase
 disk). A genuinely unknown switch is rejected too (exit 7), like WinRAR.
+
+**`-oni`** is wired: on Windows, extraction otherwise corrects WinRAR-hostile
+member names instead of refusing them - `:` becomes `_`, a trailing dot/space
+becomes `_`, and an exact reserved device name (`aux`, `CON`, `NUL`, `COM1`,
+`lpt9`, ...) gets a leading `_`; a device name with an extension (`aux.txt`) is
+a plain file and stays. `-oni` keeps an exact device name as written (the OS may
+still normalize a trailing dot/space). Empty names, absolute paths, `..` and NUL
+bytes are always rejected, and link targets still refuse ambiguous components.
 
 **An official switch the command has no use for is accepted and ignored**, again
 like WinRAR: `rar l -m5` lists, `t -rr10` tests, `x -m5` extracts. WinRAR parses
