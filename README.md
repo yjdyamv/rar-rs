@@ -1,6 +1,6 @@
 # rar-rs
 
-> Last verified: 2026-09-22 @ `b4b8e04`; implementation details are
+> Last verified: 2026-09-28 @ `135f484`; implementation details are
 > authoritative in the source.
 
 **Pure-Rust RAR archive library and command-line tools.** Create, read, extract,
@@ -29,8 +29,10 @@ RAR/UNRAR binary is required at runtime.
   (plaintext headers) and exiting 3 (RAR5) or 0 (legacy) when a header was lost,
   like WinRAR.
 - **Integrity** — CRC32, BLAKE2sp (`-htb`) and encrypted-data MACs.
-- **Safe extraction** — path sanitization, size limits (opt-in `--max-unpacked`
-  / `--max-total-unpacked`), atomic staging, cooperative cancellation.
+- **Safe extraction** — path containment plus WinRAR-style name sanitization
+  (Windows reserved names, trailing dots/spaces, `:`; `-oni` keeps device
+  names), size limits (opt-in `--max-unpacked` / `--max-total-unpacked`), atomic
+  staging, cooperative cancellation.
 - **Bindings** — Node.js native and WASI bindings under `crates/rar-napi`.
 
 Behavior is validated against WinRAR/UnRAR; current status and accepted

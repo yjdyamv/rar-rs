@@ -1,6 +1,6 @@
 # CONTEXT — rar-rs
 
-> 最后核对：2026-09-28 @ `33fb69d`；实现细节以源码为准。
+> 最后核对：2026-09-28 @ `135f484`；实现细节以源码为准。
 
 领域词汇（本仓库术语的单一来源）。给架构审查和后续 skill 使用；新术语先查这里，
 模糊了就地改。非词汇信息（模块地图、工程状态、限制）不放这里，见文末指针。
@@ -105,7 +105,17 @@
   `write/stream.rs::write_member_streams`（Windows 枚举，batch
   并行自动退回顺序）；读侧 `StreamRecord`（`engine/state.rs`）+
   `extract/decode.rs::read_member_streams`（读取时校验口令/派生密钥、解密、CRC
-  校验；锁定档仍可列表）。
+  校验；锁定档仍可列表）。**列表元数据** `StreamInfo` +
+  `ArchiveReader::streams()` （只名字/大小/方法/CRC，不解码载荷）：`rar lt`/`vt`
+  默认列 STM 块，`lta`/`vta` 加 `Service: EOF`，`la`/`va`/`lba`/`vba` 追
+  `STM:name` 行；UnRAR 只 `lta`/`vta` 列。
+- **File version（VERSION extra 记录，`-ver`）** — RAR5 成员头里的 extra 记录
+  `0x04`，体为 `[flags vint][version vint]`（flags 保留为
+  0）；当前版本不带记录， `name;N` 是读取时对 `version=N` 的渲染。读侧
+  `ArchiveEntry::file_version()`；写侧
+  `EditOp::SetFileVersion`/`EditPlan::set_file_version`（重写头时刷新 extra
+  区）。 RAR 1.5–4.x 无此记录，用名字里的 `;N`（两族由 CLI `version_edits`
+  分派）。
 - **Mark of the Web（MOTW，`-om`）** — 浏览器给下载文件打的 `Zone.Identifier`
   ADS；`-om` 把归档文件自身的该流传播到解出的成员（默认只保留 `ZoneTransfer`
   区与 `ZoneId=`，`1` 全字段，可按扩展名过滤；Windows only）。库侧
@@ -207,8 +217,10 @@
   抽取操作的唯一回报值（2026-09）：`written`（真正写出的文件与创建的链接，按归档序）+
   `skipped`（`-o-` 未动的成员，带目标路径）+
   `refused`（目标逃出目的目录、被安全策略拒绝的链接 ——
-  只拒该链接、不中止整轮，CLI 按 WinRAR 记 exit
-  1）；目录条目不记（创建无文件数据），`-ol-`
+  只拒该链接、不中止整轮，CLI 按 WinRAR 记 exit 1）+ `corrected`（Windows
+  上被改过保留设备名的成员，CLI 逐条向 stderr 打 WinRAR 的
+  `Attempting to correct the invalid ... name`）；目录条目不记（创建无文件
+  数据），`-ol-`
   跳过的链接也不记。`extract_all_with_options`/`extract_ids_with_options`
   返回它，写入循环自己记录，因此不可能与落盘不一致；CLI 的 `Skipping` 行与
   `Extracted N file(s)` 计数直接来自它（预测式
@@ -349,7 +361,12 @@
   Windows）；**禁止手写反斜杠字面量 判定，CI 有 grep
   防护**。**归档成员名是格式空间**：RAR 用反斜杠作分隔符，内部统一 规范化为
   `/`（写侧、`safe_path`、`selector`、展示都做该替换），与主机平台无关； 因此
-  Unix 文件名里的反斜杠无法与目录分隔区分（与官方一致，不做特例）。
+  Unix
+  文件名里的反斜杠无法与目录分隔区分（与官方一致，不做特例）。**主机名清洗**：
+  Windows 上 `fs/safe_path.rs` 按 WinRAR 默认把成员名改成可用形式（`:` 与尾部
+  `.`/空格 置 `_`、保留设备名前加 `_`；带扩展名的 `aux.txt` 不动），`-oni`
+  （`ExtractOptions::allow_incompatible_names`）跳过设备名前缀；空名/绝对/`..`/NUL
+  仍拒，链接目标仍按旧口径拒歧义组件。
 
 ## 分层结构与项目事实
 
