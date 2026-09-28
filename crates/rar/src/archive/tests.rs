@@ -1090,31 +1090,33 @@ fn sanitize_archive_path_rejects_unsafe_names() {
         "./",
     ] {
         assert!(
-            sanitize_archive_path(bad).is_err(),
+            sanitize_archive_path(bad, false).is_err(),
             "{bad:?} should be rejected"
         );
     }
-    // Drive/ADS names mean something different only on Windows; POSIX
-    // treats `:` as an ordinary filename character (official unrar extracts
-    // `foo:bar` on Linux), so the rejection is platform-scoped.
+    // Drive/ADS names no longer reject: on Windows they are corrected the way
+    // WinRAR does (`:` becomes `_`), and POSIX extracts them literally.
     #[cfg(windows)]
     for bad in ["C:/windows", "c:\\windows"] {
         assert!(
-            sanitize_archive_path(bad).is_err(),
-            "{bad:?} should be rejected"
+            sanitize_archive_path(bad, false)
+                .unwrap()
+                .to_ascii_lowercase()
+                .starts_with("c_/"),
+            "{bad:?} should be corrected"
         );
     }
 }
 
 #[test]
 fn sanitize_archive_path_normalizes_safe_names() {
-    assert_eq!(sanitize_archive_path("a/b.txt").unwrap(), "a/b.txt");
-    assert_eq!(sanitize_archive_path("a\\b.txt").unwrap(), "a/b.txt");
+    assert_eq!(sanitize_archive_path("a/b.txt", false).unwrap(), "a/b.txt");
+    assert_eq!(sanitize_archive_path("a\\b.txt", false).unwrap(), "a/b.txt");
     assert_eq!(
-        sanitize_archive_path("./a//b/./c.txt").unwrap(),
+        sanitize_archive_path("./a//b/./c.txt", false).unwrap(),
         "a/b/c.txt"
     );
-    assert_eq!(sanitize_archive_path("dir/").unwrap(), "dir");
+    assert_eq!(sanitize_archive_path("dir/", false).unwrap(), "dir");
 }
 
 /// Names of leftover staging files (`.rar5tmp-*`) in `dir`.

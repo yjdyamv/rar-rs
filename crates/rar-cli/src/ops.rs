@@ -926,6 +926,8 @@ pub struct ExtractRequest {
     pub quiet_answers_yes: bool,
     /// `-ver[n]` selection policy (see [`VersionSelection`]).
     pub version: VersionSelection,
+    /// `-oni`: keep Windows-hostile member names as written.
+    pub allow_names: bool,
 }
 
 impl ExtractRequest {
@@ -966,6 +968,7 @@ impl ExtractRequest {
             set_access_time: self.set_access_time,
             skip_links: self.skip_links,
             allow_unsafe_links: self.allow_unsafe_links,
+            allow_incompatible_names: self.allow_names,
             file_version_suffix: matches!(self.version, VersionSelection::All)
                 || self
                     .names
