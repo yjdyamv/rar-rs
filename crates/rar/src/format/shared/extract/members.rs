@@ -636,7 +636,7 @@ pub(crate) fn resolve_dest_path_with(
         if is_directory_entry(entry) {
             return Ok(Destination::Extract(dest_dir.to_path_buf()));
         }
-        let safe_name = sanitize_archive_path(&member_name)?;
+        let safe_name = sanitize_archive_path(&member_name, options.allow_incompatible_names)?;
         let base = safe_name.rsplit('/').next().unwrap_or(&safe_name);
         dest_dir.join(base)
     } else {
@@ -645,6 +645,7 @@ pub(crate) fn resolve_dest_path_with(
             dest_dir,
             &member_name,
             options.safe_paths,
+            options.allow_incompatible_names,
         )?
     };
 

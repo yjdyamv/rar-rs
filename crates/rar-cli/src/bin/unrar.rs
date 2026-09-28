@@ -462,6 +462,7 @@ fn cmd_extract(
         set_access_time: ts.save_atime,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
+        allow_names: misc.allow_names,
         quiet_answers_yes: false,
         version: common::version_selection(misc.version_control.as_deref())?,
     };
@@ -517,6 +518,7 @@ fn cmd_extract_flat(
         set_access_time: ts.save_atime,
         skip_links: misc.skip_links,
         allow_unsafe_links: misc.unsafe_links,
+        allow_names: misc.allow_names,
         quiet_answers_yes: false,
         version: common::version_selection(misc.version_control.as_deref())?,
     };

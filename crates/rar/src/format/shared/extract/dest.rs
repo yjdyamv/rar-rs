@@ -595,7 +595,14 @@ fn resolved_link_target(
 /// Compute the destination path for an entry name, applying the safe
 /// path policy (sanitization + canonical containment check).
 pub(crate) fn safe_dest_path(cx: &dyn Engine, dest_dir: &Path, name: &str) -> RarResult<PathBuf> {
-    safe_dest_path_with(cx, dest_dir, name, cx.read_ctx().extract_options.safe_paths)
+    let options = &cx.read_ctx().extract_options;
+    safe_dest_path_with(
+        cx,
+        dest_dir,
+        name,
+        options.safe_paths,
+        options.allow_incompatible_names,
+    )
 }
 
 /// [`Self::safe_dest_path`] with an explicit safe-path policy, for
@@ -606,9 +613,10 @@ pub(crate) fn safe_dest_path_with(
     dest_dir: &Path,
     name: &str,
     safe_paths: bool,
+    allow_incompatible_names: bool,
 ) -> RarResult<PathBuf> {
     let sanitized = if safe_paths {
-        sanitize_archive_path(name)?
+        sanitize_archive_path(name, allow_incompatible_names)?
     } else {
         name.replace('\\', "/")
     };

@@ -514,6 +514,13 @@ pub struct ExtractOptions {
     /// (absolute paths, `..`, Windows drive components, NUL bytes) and
     /// verify resolved paths stay inside the destination.
     pub safe_paths: bool,
+    /// Keep Windows-hostile member names as written (WinRAR's `-oni`): a
+    /// reserved device name such as `aux` is extracted literally instead of
+    /// becoming `_aux`, and a trailing dot/space is left alone (the OS may
+    /// still normalize it, which is why WinRAR refuses that case). A no-op on
+    /// POSIX and when [`safe_paths`](Self::safe_paths) is false. `:` still
+    /// becomes `_`, because it names a drive or an alternate data stream.
+    pub allow_incompatible_names: bool,
     /// Maximum uncompressed bytes allowed for a single member
     /// (`None` = unlimited).
     pub max_unpacked_bytes: Option<u64>,
@@ -626,6 +633,7 @@ impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
             safe_paths: true,
+            allow_incompatible_names: false,
             max_unpacked_bytes: Some(4 * 1024 * 1024 * 1024),
             max_total_unpacked_bytes: Some(32 * 1024 * 1024 * 1024),
             threads: None,

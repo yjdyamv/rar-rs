@@ -1962,3 +1962,68 @@ fn cli_service_block_listing_shows_ntfs_streams() {
     assert!(!list("lb").contains("STM"));
     assert!(!list("l").contains("STM"));
 }
+
+/// Windows member names that Win32 would normalize (`report.`) or route to a
+/// device (`aux`) are corrected the way WinRAR's default does — instead of
+/// aborting the whole run with a `Security` error — and `-oni` keeps an exact
+/// device name as written.
+#[cfg(windows)]
+#[test]
+fn cli_windows_hostile_names_are_corrected() {
+    let dir = make_temp_dir();
+    let archive = dir.path().join("names.rar");
+    {
+        let mut writer = rar_rs::ArchiveWriter::create(&archive).unwrap();
+        for (i, name) in ["aux", "aux.txt", "report.", "foo:bar", "sub./x.txt"]
+            .iter()
+            .enumerate()
+        {
+            writer
+                .add_bytes(
+                    name,
+                    format!("c{i}").as_bytes(),
+                    rar_rs::EntryWriteOptions::new(),
+                )
+                .unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    let dest = dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let output = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-o+", "-idq", "--dest"])
+        .arg(&dest)
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "hostile names must extract, not abort: {}\n{}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut names: Vec<String> = std::fs::read_dir(&dest)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["_aux", "aux.txt", "foo_bar", "report_", "sub_"]);
+    assert!(dest.join("sub_").join("x.txt").is_file(), "nested member");
+
+    // `-oni` keeps the exact device name as written.
+    let oni = dir.path().join("oni");
+    std::fs::create_dir_all(&oni).unwrap();
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-o+", "-idq", "-oni", "--dest"])
+        .arg(&oni)
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        oni.join("aux").is_file(),
+        "-oni must keep the device name literal"
+    );
+}

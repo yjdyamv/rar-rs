@@ -6,11 +6,15 @@ use crate::error::{RarError, RarResult};
 /// Sanitize an archive member name for safe extraction.
 ///
 /// Rejects empty names, absolute paths, `..` traversal components and NUL
-/// bytes, plus the host hazards checked by [`component_is_ambiguous`]
-/// (Windows drive/ADS `:` components, device names, trailing dots/spaces).
-/// Backslashes are treated as separators and redundant `.`/empty
+/// bytes. Backslashes are treated as separators and redundant `.`/empty
 /// components are dropped.
-pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
+///
+/// Windows-only name hazards are **corrected** the way WinRAR does rather
+/// than rejected (see [`sanitize_component`]): `:` becomes `_`, a trailing
+/// dot/space becomes `_`, and an exact reserved device name gets a leading
+/// `_`. With `allow_incompatible` (WinRAR's `-oni`) the name is kept as
+/// written apart from `:`.
+pub(crate) fn sanitize_archive_path(name: &str, allow_incompatible: bool) -> RarResult<String> {
     if name.is_empty() {
         return Err(RarError::security("empty entry name"));
     }
@@ -33,15 +37,11 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
                 "entry name {name:?} contains a '..' traversal component"
             )));
         }
-        if component_is_ambiguous(comp) {
-            return Err(RarError::security(format!(
-                "entry name {name:?} contains the platform-ambiguous component {comp:?}"
-            )));
-        }
+        let comp = sanitize_component(comp, allow_incompatible);
         if !out.is_empty() {
             out.push('/');
         }
-        out.push_str(comp);
+        out.push_str(&comp);
     }
     if out.is_empty() {
         return Err(RarError::security(format!(
@@ -49,6 +49,57 @@ pub(crate) fn sanitize_archive_path(name: &str) -> RarResult<String> {
         )));
     }
     Ok(out)
+}
+
+/// Correct one Windows-hostile path component the way WinRAR's default does:
+///
+/// - `:` becomes `_` (it names a drive or an alternate data stream, never a
+///   file), even under `-oni`;
+/// - a trailing dot or space becomes `_` (Win32 strips it otherwise, so a
+///   literal name cannot round-trip); WinRAR's `-oni` refuses that case
+///   outright, we keep the safe correction;
+/// - an exact reserved device name (`CON`, `AUX`, `NUL`, `COM1`–`COM9`, ...)
+///   gets a leading `_`, unless `-oni` asked for the name as written.
+///
+/// A device name *with* an extension (`aux.txt`) is left alone: it is an
+/// ordinary file on modern Windows, and WinRAR does not correct it either.
+/// POSIX has none of these hazards, so the component is returned unchanged.
+#[cfg(windows)]
+fn sanitize_component(component: &str, allow_incompatible: bool) -> String {
+    let mut result = component.replace(':', "_");
+    if result.ends_with('.') || result.ends_with(' ') {
+        result.pop();
+        result.push('_');
+    }
+    if !allow_incompatible && is_reserved_device_name(&result) {
+        result.insert(0, '_');
+    }
+    result
+}
+
+/// POSIX has no device names, trailing-dot normalization or ADS semantics, so
+/// every component is already unambiguous and stays as written.
+#[cfg(not(windows))]
+fn sanitize_component(component: &str, _allow_incompatible: bool) -> String {
+    component.to_string()
+}
+
+/// Whether the whole component is one of Windows' reserved device names.
+/// Only an exact match counts (`aux.txt` is a plain file).
+#[cfg(windows)]
+fn is_reserved_device_name(component: &str) -> bool {
+    let upper = component.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    if matches!(
+        bytes,
+        b"CON" | b"PRN" | b"AUX" | b"NUL" | b"CONIN$" | b"CONOUT$"
+    ) {
+        return true;
+    }
+    bytes.len() == 4
+        && matches!(&bytes[..3], b"COM" | b"LPT")
+        && bytes[3].is_ascii_digit()
+        && bytes[3] != b'0'
 }
 
 /// Whether a path component means something different on this platform than
@@ -172,89 +223,85 @@ pub(crate) fn resolve_redirect_target(link_dir: &str, target: &str) -> RarResult
 
 #[cfg(test)]
 mod tests {
-    use super::{component_is_ambiguous, resolve_redirect_target, sanitize_archive_path};
+    use super::{resolve_redirect_target, sanitize_archive_path};
 
     #[test]
     fn sanitize_rejects_unsafe_member_names() {
-        assert!(sanitize_archive_path("a/b.txt").is_ok());
-        assert!(sanitize_archive_path("").is_err());
-        assert!(sanitize_archive_path("a\0b").is_err());
-        assert!(sanitize_archive_path("/etc/passwd").is_err());
-        assert!(sanitize_archive_path("a/../b").is_err());
+        assert!(sanitize_archive_path("a/b.txt", false).is_ok());
+        assert!(sanitize_archive_path("", false).is_err());
+        assert!(sanitize_archive_path("a\0b", false).is_err());
+        assert!(sanitize_archive_path("/etc/passwd", false).is_err());
+        assert!(sanitize_archive_path("a/../b", false).is_err());
         // Redundant components are dropped, not rejected.
-        assert_eq!(sanitize_archive_path("a/./b//c").unwrap(), "a/b/c");
+        assert_eq!(sanitize_archive_path("a/./b//c", false).unwrap(), "a/b/c");
     }
 
-    /// On Windows these names either open a device or get normalized into a
-    /// different path than the one that was written, so they must be refused
-    /// rather than silently redirected.
+    /// Windows **corrects** these names the way WinRAR's default does instead
+    /// of rejecting them: `:` becomes `_`, a trailing dot/space becomes `_`,
+    /// and an exact device name gets a leading `_`. Under `-oni` (`true`)
+    /// only the colon is still replaced.
     #[test]
     #[cfg(windows)]
-    fn windows_ambiguous_components_are_rejected() {
-        for component in [
+    fn windows_ambiguous_components_are_corrected() {
+        for (input, default, oni) in [
             // Colons name drives / alternate data streams on Windows.
-            "C:",
-            "C:/x",
-            "name:stream",
-            "foo:bar",
-            // Trailing dots and spaces are stripped by Win32, so `".. "`
-            // opens as `".."`.
-            ".. ",
-            "...",
-            "report.",
-            "name ",
-            // Legacy device names, with and without an extension.
-            "CON",
-            "con",
-            "NUL.txt",
-            "aux",
-            "COM1",
-            "com9",
-            "LPT1.log",
-            // Win32 strips trailing dots and spaces *before* the reserved-name
-            // test, so the stem here is the device, not the literal name.
-            "CON .txt",
-            "NUL .log",
-            "aux  ",
-            "COM1 .txt",
-            // The console/pipe device names.
-            "CONIN$",
-            "conout$",
+            ("C:", "C_", "C_"),
+            ("C:/x", "C_/x", "C_/x"),
+            ("name:stream", "name_stream", "name_stream"),
+            ("foo:bar", "foo_bar", "foo_bar"),
+            // Trailing dots and spaces are stripped by Win32; WinRAR replaces
+            // the final character with `_`.
+            ("report.", "report_", "report_"),
+            ("name ", "name_", "name_"),
+            ("a..", "a._", "a._"),
+            ("a ..", "a ._", "a ._"),
+            // Exact legacy device names get a leading `_`; `-oni` keeps them
+            // as written. An extension makes an ordinary file either way.
+            ("aux", "_aux", "aux"),
+            ("AUX", "_AUX", "AUX"),
+            ("CON", "_CON", "CON"),
+            ("NUL", "_NUL", "NUL"),
+            ("COM1", "_COM1", "COM1"),
+            ("com9", "_com9", "com9"),
+            ("LPT1", "_LPT1", "LPT1"),
+            ("CONIN$", "_CONIN$", "CONIN$"),
+            ("aux.txt", "aux.txt", "aux.txt"),
+            ("NUL.log", "NUL.log", "NUL.log"),
+            // The trailing dot is corrected *before* the device test, so this
+            // is a plain name afterwards.
+            ("con.", "con_", "con_"),
         ] {
-            assert!(
-                component_is_ambiguous(component),
-                "{component:?} should be ambiguous on Windows"
+            assert_eq!(
+                sanitize_archive_path(input, false).unwrap(),
+                default,
+                "{input:?} default"
             );
-            assert!(
-                sanitize_archive_path(component).is_err(),
-                "{component:?} should be rejected"
-            );
-        }
-        // `con.txt.bak` is a device too (only the stem matters), so it is not
-        // in this list; `COM0` and `LPT10` are not reserved names, and a
-        // stem that only *looks* like one after stripping is a plain name
-        // when the strip leaves something else (`CONX`).
-        for component in ["report", "COM", "COM0", "LPT10", "a.b", "CONX", "NULX.txt"] {
-            assert!(
-                !component_is_ambiguous(component),
-                "{component:?} should be a plain name"
+            assert_eq!(
+                sanitize_archive_path(input, true).unwrap(),
+                oni,
+                "{input:?} under -oni"
             );
         }
+        // `.. ` is corrected to `.._`, so it can never walk out; the exact
+        // `..` component is still rejected.
+        assert_eq!(sanitize_archive_path(".. ", false).unwrap(), ".._");
+        assert!(sanitize_archive_path("../x", false).is_err());
     }
 
     /// POSIX has neither device names, trailing-dot normalization nor ADS
-    /// semantics, so the same names stay legal there — the check is
+    /// semantics, so the same names stay legal there — the correction is
     /// platform-scoped on purpose. `foo:bar` in particular is an ordinary
     /// filename on Linux, matching official unrar.
     #[test]
     #[cfg(not(windows))]
-    fn posix_accepts_names_windows_would_reject() {
+    fn posix_accepts_names_windows_would_correct() {
+        use super::component_is_ambiguous;
         assert!(!component_is_ambiguous("CON"));
         assert!(!component_is_ambiguous("report."));
         assert!(!component_is_ambiguous("foo:bar"));
-        assert_eq!(sanitize_archive_path("report.").unwrap(), "report.");
-        assert_eq!(sanitize_archive_path("foo:bar").unwrap(), "foo:bar");
-        assert_eq!(sanitize_archive_path("C:/x").unwrap(), "C:/x");
+        assert_eq!(sanitize_archive_path("report.", false).unwrap(), "report.");
+        assert_eq!(sanitize_archive_path("foo:bar", false).unwrap(), "foo:bar");
+        assert_eq!(sanitize_archive_path("C:/x", false).unwrap(), "C:/x");
         assert_eq!(
             resolve_redirect_target("dir", "foo:bar").unwrap(),
             ["dir", "foo:bar"]
