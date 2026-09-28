@@ -236,9 +236,13 @@ disk). A genuinely unknown switch is rejected too (exit 7), like WinRAR.
 member names instead of refusing them - `:` becomes `_`, a trailing dot/space
 becomes `_`, and an exact reserved device name (`aux`, `CON`, `NUL`, `COM1`,
 `lpt9`, ...) gets a leading `_`; a device name with an extension (`aux.txt`) is
-a plain file and stays. `-oni` keeps an exact device name as written (the OS may
-still normalize a trailing dot/space). Empty names, absolute paths, `..` and NUL
-bytes are always rejected, and link targets still refuse ambiguous components.
+a plain file and stays. A corrected device name prints WinRAR's
+`WARNING: Attempting to correct the invalid file or directory name` on stderr
+(`-idq` does not suppress it). `-oni` keeps an exact device name as written (the
+OS may still normalize a trailing dot/space). Empty names, absolute paths, `..`
+and NUL bytes are always rejected, and link targets still refuse ambiguous
+components. A file over a non-empty directory is a create error (exit 9), like
+WinRAR.
 
 **An official switch the command has no use for is accepted and ignored**, again
 like WinRAR: `rar l -m5` lists, `t -rr10` tests, `x -m5` extracts. WinRAR parses

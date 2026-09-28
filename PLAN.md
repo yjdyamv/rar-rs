@@ -5,11 +5,10 @@
 > 对拍官方 6.23/7.23 钉住「官方只额外保留这一位，offline/pinned/no-scrub
 > 也丢」；以及**抽取时用文件替换同名空目录**（官方 7.30 行为）——并顺带把 7.30
 > `Rar.txt` 逐项审查发现的缺口记入「待办」（`-ver` 读取、裸 `-v`、`la`/`va`
-> 别名、 `-limt`、`-da`/`-df` exit
-> 14、时间过滤修饰符、服务块列表、保留名清洗已修；余下非空目录退出码 #8）。
-> 前轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13 忽略该标志
-> （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O 失败）；并给 napi
-> 补 `oldNumbering`、改正其 `volumeSize` 文档。更前轮：**RAR4
+> 别名、 `-limt`、`-da`/`-df` exit 14、时间过滤修饰符、服务块列表、保留名清洗、
+> 非空目录 exit 9 均已修）。 前轮：**`-vn` 限定 RAR 1.5–4.x**——RAR5/RAR13
+> 忽略该标志 （此前它泄漏到共用的命名助手，让 RAR5 分卷创建在安装阶段 I/O
+> 失败）；并给 napi 补 `oldNumbering`、改正其 `volumeSize` 文档。更前轮：**RAR4
 > 分卷创建对齐官方新式 命名 + `.rev` trailer 布局**——创建默认改
 > `base.partNN.rar`（零填充）+ 每卷主头 `MHD_NEWNUMBERING`
 >
@@ -80,10 +79,9 @@
 ### 2026-09-28 官方 7.30 文档审查发现的缺口（待决定）
 
 按本地安装的 RAR 7.30 beta 1 `Rar.txt` + `WhatsNew.txt` 与实测逐项核对，
-以下都是与官方可见行为的偏离（按影响排序）：
-
-- [ ] **非空目录挡路时的退出码**：我们 fatal(2) vs 官方 create-error(9)；要新增
-      `ErrorCode` 变体，属 API 决策（上轮已记在「已修」条目内）。
+下列缺口已全部落地（详见「已修」）：`-ver` 读+写、裸 `-v`、`la`/`va` 别名
++服务块列表、`-limt`、`-da`/`-df` exit 14、时间过滤修饰符、Windows 保留名
+清洗、非空目录 exit 9。**当前无待决定项。**
 
 **有意不做（设计决定，别当缺口修）：**
 
@@ -164,13 +162,12 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   `-oni`）：跳过设备名前缀（保留原名，官方 `-oni` 亦然），但 `:` 与尾部点/空格
   仍归一到 `_`（官方 `-oni` 对尾部点直接报 `Cannot create` exit
   9，我们选不丢名字的 安全处理）。安全护栏不变（空名/绝对路径/`..`/NUL
-  仍拒，链接目标仍拒歧义组件）。 契约由
+  仍拒，链接目标仍拒歧义组件）。官方对设备名修正会在 **stderr** 打印
+  `WARNING: Attempting to correct the invalid file or directory name`（`-idq`
+  不抑制）， 我们也逐条打印，由 `ExtractionReport::corrected` 携带。契约由
   `fs::safe_path::tests::windows_ambiguous_components_are_corrected` 与
-  `cli_behavior::cli_windows_hostile_names_are_corrected`
-  钉住。**已知残余**：官方对 设备名修正会打印
-  `WARNING: Attempting to correct the invalid file or directory
-  name`，我们不打印（提示差异，退出码同为
-  0）。
+  `cli_behavior::cli_windows_hostile_names_are_corrected`（含 warning
+  断言）钉住。
 - **服务块（NTFS 流）列表**（2026-09-28 对拍官方 7.30 beta 1 `rar` 与 7.23
   `unrar`）：新增公开 `StreamInfo` +
   `ArchiveReader::streams()`（只取元数据、不解码 载荷），列表按官方渲染 STM
@@ -251,8 +248,14 @@ seq 6058 B）。各日期、各口径的实测表（level ladder、与 WinRAR
   目录才报 `Directory with such name already exists`，exit 9；WhatsNew 7.30 第 8
   条）。现安装文件前先试删空目录、创建目录前先删非目录，且安装失败一律清掉暂存文件
   （此前必留，`-kb` 路径同此）。契约由 `rar5_edge_cases::extract_type_mismatch`
-  三个 用例钉住。**已知残余**：非空目录的退出码仍为 fatal(2)，官方 9（要新增
-  `ErrorCode`，属 API 决策）。
+  三个 用例钉住。非空目录的退出码独立记在下条。
+- **非空目录挡路报 create-error exit 9**（2026-09-28 对拍官方
+  7.30）：`install_member_file` 对非空目录先前报 `RarError::Io` → CLI
+  fatal(2)，官方是 `Cannot create <path>` +
+  `Directory with such name already exists` exit 9。现新增 `ErrorCode::Create` /
+  `RarError::create(path, reason)`（`#[non_exhaustive]` 枚举加变体，非破坏），
+  `install_member_file` 走它，CLI 映射 `EXIT_CREATE`(9)。契约由
+  `cli_behavior::cli_non_empty_directory_is_a_create_error` 钉住。
 - **Windows `NOT_CONTENT_INDEXED` 属性位**（2026-09-28 对拍官方 6.23/7.23）：
   `platform.rs` 的 `STORED_DOS_ATTRIBUTES` 与抽取侧 `dest.rs` 的掩码都漏了
   `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED`（`0x2000`）——从「内容未索引」目录继承该位的
