@@ -2084,7 +2084,6 @@ fn cli_library_error_categories_reach_the_exit_code() {
     };
 
     // Wrong password on a header-encrypted archive (`u` used to exit 2).
-    let hp = dir.path().join("hp.rar");
     assert!(run(&["a", "-hpsecret", "-idq", "hp.rar", "f.txt"]).is_some_and(|c| c == 0));
     assert_eq!(
         run(&["u", "-pwrong", "-idq", "hp.rar", "f.txt"]),
@@ -2093,7 +2092,6 @@ fn cli_library_error_categories_reach_the_exit_code() {
     );
 
     // Locked archive (`u`/`ch`/`c` used to exit 2).
-    let locked = dir.path().join("locked.rar");
     assert!(run(&["a", "-idq", "locked.rar", "f.txt"]).is_some_and(|c| c == 0));
     assert!(run(&["k", "-idq", "locked.rar"]).is_some_and(|c| c == 0));
     // Make the source newer than the archived copy so `u` actually plans a
