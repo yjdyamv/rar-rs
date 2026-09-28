@@ -224,9 +224,13 @@ fn archive_details(rar: &ArchiveReader, view: &VolumeView) -> String {
     details
 }
 
-/// DOS/Windows attribute flags in WinRAR's `..A.SH.` column order.
+/// DOS/Windows attribute flags in WinRAR's `lt` column order: `I` (not
+/// content indexed), `A`, `D`, `S`, `H`, `R`.
 fn dos_attributes(attrs: u32) -> String {
     let mut chars = [b'.'; 7];
+    if attrs & 0x2000 != 0 {
+        chars[0] = b'I';
+    }
     if attrs & 0x20 != 0 {
         chars[2] = b'A';
     }
@@ -1000,6 +1004,15 @@ mod tests {
             options.max_dict_size,
             Some(ExtractOptions::DEFAULT_MAX_DICT_SIZE)
         );
+    }
+
+    /// `lt`/`v` render the DOS attribute cell in WinRAR's column order; the
+    /// not-content-indexed bit is the first column (`I.A....`).
+    #[test]
+    fn dos_attribute_column_renders_the_not_content_indexed_bit() {
+        assert_eq!(super::dos_attributes(0x20), "..A....");
+        assert_eq!(super::dos_attributes(0x2020), "I.A....");
+        assert_eq!(super::dos_attributes(0x10), "...D...");
     }
 
     /// Disk extraction streams, so the request clears the in-memory size caps
