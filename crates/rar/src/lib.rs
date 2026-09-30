@@ -86,9 +86,9 @@ mod write_progress;
 pub use archive::{
     AppendOptions, ArchiveEditor, ArchiveEntry, ArchiveReader, ArchiveWriter, BatchEntry,
     CompressionLevel, EditOp, EditPlan, EditReport, Entries, EntryId, EntryMatches, EntryRef,
-    EntryWriteOptions, ExtractionReport, OpenOptions, ReconstructReport, ScanStrategy, SolidMode,
-    StreamInfo, ThreadCount, VerificationFailure, VerificationReport, WriteEntry, WriteReport,
-    WriterOptions, discover_volumes, reconstruct_archive_path,
+    EntryWriteOptions, ExtractionFailure, ExtractionReport, OpenOptions, ReconstructReport,
+    ScanStrategy, SolidMode, StreamInfo, ThreadCount, VerificationFailure, VerificationReport,
+    WriteEntry, WriteReport, WriterOptions, discover_volumes, reconstruct_archive_path,
 };
 // Root re-exports of the public codec surface; the full item set lives at
 // `codec::lzss_huff`. The `parallel`-gated MT internals (`EncoderState`,
@@ -103,8 +103,9 @@ pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
 pub use fs::atomic::StagedCopy;
 pub use options::{
-    DictionarySize, ExtractOptions, FilterMode, FilterOptions, MarkOfTheWeb, OverwriteChoice,
-    OverwritePrompt, SolidReset, parse_dict_bytes, parse_dict_size,
+    DictionarySize, ExtractErrorPolicy, ExtractOptions, ExtractionCallback, ExtractionProgress,
+    FilterMode, FilterOptions, MarkOfTheWeb, OverwriteChoice, OverwritePrompt, SolidReset,
+    parse_dict_bytes, parse_dict_size,
 };
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use recovery::rev50::{build_recovery_volumes_for_set, plan_recovery_volume_count};

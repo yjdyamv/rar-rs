@@ -185,12 +185,62 @@ where
 /// root (WinRAR's "Skipping the potentially unsafe ... link") is recorded
 /// separately in `refused`. The report is the writer's own account — it cannot
 /// disagree with what landed on disk, unlike a caller-side prediction.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// `failures` is populated only under
+/// [`ExtractErrorPolicy::Collect`](crate::ExtractErrorPolicy::Collect); with
+/// the default `Abort` policy the first failing member ends the run and is
+/// returned as the error instead, leaving no report to inspect.
+///
+/// Not `PartialEq`: the errors it can carry hold I/O sources, so two reports
+/// of the same extraction are not comparable in general. Compare
+/// [`written`](Self::written) and friends individually. Not `Clone` either:
+/// a report owns its failures, and a failure cannot be duplicated.
+#[derive(Debug, Default)]
 pub struct ExtractionReport {
     written: Vec<PathBuf>,
     skipped: Vec<PathBuf>,
     refused: Vec<PathBuf>,
     corrected: Vec<String>,
+    failures: Vec<ExtractionFailure>,
+}
+
+/// One member an extraction could not produce, under
+/// [`ExtractErrorPolicy::Collect`](crate::ExtractErrorPolicy::Collect).
+///
+/// Not `Clone`: an error can hold a non-clonable I/O source. Keep the failure
+/// in the report and borrow from it, or take it out with
+/// [`into_parts`](Self::into_parts).
+#[derive(Debug)]
+pub struct ExtractionFailure {
+    /// The member's stored name, so a front end can name it without
+    /// resolving an id against a reader that may already be gone.
+    name: String,
+    /// Archive-order catalog index of the member.
+    index: usize,
+    /// The failure itself: decode, integrity check, or install.
+    error: RarError,
+}
+
+impl ExtractionFailure {
+    /// The stored name of the member that failed.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The member's archive-order position in the catalog.
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+
+    /// The error that stopped this member.
+    pub const fn error(&self) -> &RarError {
+        &self.error
+    }
+
+    /// Consume the failure, yielding the member name and its error.
+    pub fn into_parts(self) -> (String, RarError) {
+        (self.name, self.error)
+    }
 }
 
 impl ExtractionReport {
@@ -236,6 +286,35 @@ impl ExtractionReport {
         &self.corrected
     }
 
+    /// Members this run could not extract, in archive order.
+    ///
+    /// Populated only under
+    /// [`ExtractErrorPolicy::Collect`](crate::ExtractErrorPolicy::Collect);
+    /// the default `Abort` policy returns the first failure as an error
+    /// instead, so a caller never sees a report that silently hid a failure.
+    pub fn failures(&self) -> &[ExtractionFailure] {
+        &self.failures
+    }
+
+    /// Number of members that could not be extracted.
+    pub fn failed_count(&self) -> usize {
+        self.failures.len()
+    }
+
+    /// Take the collected failures, consuming the report.
+    pub fn into_failures(self) -> Vec<ExtractionFailure> {
+        self.failures
+    }
+
+    /// Whether this run extracted nothing at all.
+    ///
+    /// True for a genuinely empty archive and for a run whose every member
+    /// was skipped or refused; a caller that must not report "extracted" for a
+    /// wholly failed run should check [`Self::failed_count`] as well.
+    pub fn is_empty(&self) -> bool {
+        self.written.is_empty() && self.skipped.is_empty() && self.refused.is_empty()
+    }
+
     pub(crate) fn record_written(&mut self, path: PathBuf) {
         self.written.push(path);
     }
@@ -250,6 +329,10 @@ impl ExtractionReport {
 
     pub(crate) fn record_corrected(&mut self, name: String) {
         self.corrected.push(name);
+    }
+
+    pub(crate) fn record_failure(&mut self, failure: ExtractionFailure) {
+        self.failures.push(failure);
     }
 }
 
@@ -284,7 +367,7 @@ pub(crate) fn validate_entry_limits(cx: &dyn Engine, idx: usize) -> RarResult<()
 pub(crate) fn extract_all_with_options(
     cx: &mut dyn Engine,
     dest_dir: impl AsRef<Path>,
-    opts: crate::options::ExtractOptions,
+    mut opts: crate::options::ExtractOptions,
 ) -> RarResult<ExtractionReport> {
     let dest = dest_dir.as_ref();
     fs::create_dir_all(dest)?;
@@ -293,9 +376,35 @@ pub(crate) fn extract_all_with_options(
     // with the scanned catalog before extraction restores streams.
     crate::format::shared::extract::ensure_full_catalog(cx)?;
 
+    // The progress total is the whole catalog's uncompressed size, known only
+    // after the full catalog exists. Wrapping the caller's callback here keeps
+    // the reporting monotonic across the serial path's per-member completion
+    // and the parallel path's replay.
+    let progress = {
+        let total: u64 = cx
+            .entries()
+            .iter()
+            .map(|entry| entry.header.unpacked_size)
+            .fold(0u64, u64::saturating_add);
+        opts.on_progress.take().map(|sink| {
+            // Move the caller's closure into the run's tracker. A poisoned
+            // sink yields `None` and the run proceeds without progress,
+            // matching the writer's "a bad callback cannot break the
+            // operation" policy.
+            let callback: Option<crate::options::ExtractionCallback> = sink
+                .lock()
+                .ok()
+                .map(|mut guard| guard.take())
+                .unwrap_or(None);
+            let mut tracker = crate::write_progress::ProgressTracker::new(callback);
+            tracker.set_total(total);
+            std::sync::Arc::new(std::sync::Mutex::new(tracker))
+        })
+    };
+
     #[cfg(feature = "parallel")]
     {
-        if let Some(report) = extract_all_parallel(cx, dest, opts.clone())? {
+        if let Some(report) = extract_all_parallel(cx, dest, opts.clone(), progress.as_ref())? {
             return Ok(report);
         }
     }
@@ -324,8 +433,34 @@ pub(crate) fn extract_all_with_options(
                 ),
             ));
         }
-        extract_entry(cx, index, entry, dest, &mut report)?;
+        match extract_entry(cx, index, entry, dest, &mut report) {
+            Ok(_path) => {
+                if let Some(progress) = &progress {
+                    progress.lock().expect("progress lock").report(
+                        index,
+                        entry.header.unpacked_size,
+                        entry.header.unpacked_size,
+                    );
+                }
+            }
+            // A cancellation is the caller's own request: it is never a
+            // per-member failure and always ends the run.
+            Err(error) if error.code() == crate::ErrorCode::Cancelled => return Err(error),
+            Err(error) => match opts.error_policy {
+                crate::options::ExtractErrorPolicy::Abort => return Err(error),
+                crate::options::ExtractErrorPolicy::Collect => {
+                    report.record_failure(ExtractionFailure {
+                        name: entry.name().to_string(),
+                        index,
+                        error,
+                    });
+                }
+            },
+        }
     }
+    // Under `Collect` the report is the outcome even when nothing landed:
+    // `failed_count()` and `is_empty()` let the caller decide whether an
+    // all-failed run is an error, instead of this layer guessing.
     Ok(report)
 }
 
@@ -347,6 +482,7 @@ fn extract_all_parallel(
     cx: &mut dyn Engine,
     dest: &Path,
     opts: crate::options::ExtractOptions,
+    progress: Option<&std::sync::Arc<std::sync::Mutex<crate::write_progress::ProgressTracker>>>,
 ) -> RarResult<Option<ExtractionReport>> {
     use rayon::prelude::*;
 
@@ -358,7 +494,17 @@ fn extract_all_parallel(
     if opts.prompt_overwrite {
         return Ok(None);
     }
-    if cx.progress_slot().is_some() || cx.entries().len() < PARALLEL_MIN_MEMBERS {
+    // Per-member outcomes need archive order and a decision per member: the
+    // parallel path decodes every member up front, so `Abort` could not stop
+    // at the first failure and `Collect` would report a failure the serial
+    // ordering had already passed. Both go to the serial path.
+    if opts.error_policy != crate::options::ExtractErrorPolicy::Abort {
+        return Ok(None);
+    }
+    if cx.progress_slot().is_some()
+        || progress.is_some()
+        || cx.entries().len() < PARALLEL_MIN_MEMBERS
+    {
         return Ok(None);
     }
     for (i, e) in cx.entries().iter().enumerate() {
@@ -517,6 +663,13 @@ fn extract_all_parallel(
             Ok(())
         })?;
         finish_member(cx, idx, &entry, dest_path, &mut report)?;
+        if let Some(progress) = progress {
+            progress.lock().expect("progress lock").report(
+                idx,
+                entry.header.unpacked_size,
+                entry.header.unpacked_size,
+            );
+        }
     }
     Ok(Some(report))
 }
