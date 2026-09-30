@@ -1,6 +1,6 @@
 # rar-rs
 
-> Last verified: 2026-09-28 @ `135f484`; implementation details are
+> Last verified: 2026-09-28 @ `a5e6685`; implementation details are
 > authoritative in the source.
 
 **Pure-Rust RAR archive library and command-line tools.** Create, read, extract,
@@ -35,8 +35,9 @@ RAR/UNRAR binary is required at runtime.
   staging, cooperative cancellation.
 - **Bindings** — Node.js native and WASI bindings under `crates/rar-napi`.
 
-Behavior is validated against WinRAR/UnRAR; current status and accepted
-divergences live in [PLAN.md](PLAN.md).
+Behavior is validated against WinRAR/UnRAR; current status and next steps live
+in [PLAN.md](PLAN.md), and the rules that must not be re-litigated in
+[docs/PITFALLS.md](docs/PITFALLS.md).
 
 ## Build
 
@@ -117,26 +118,28 @@ Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   and appending to any multi-volume set are refused, as the official `rar` does.
 - **RAR5 header-encrypted (`-hp`) sets**: rename, `ch`, archive comments and
   delete (single- and multi-volume) all work — rewritten headers are
-  re-encrypted and the comment rides as a plaintext data area. `-hp` still
-  cannot be combined with inline recovery records (use `.rev` volumes), and
+  re-encrypted and the comment rides as a plaintext data area. Inline recovery
+  records may be combined with `-hp` (they are rebuilt on every edit), but
   `-k`/lock stays refused until the encrypted main-header patch can grow.
 - **RAR4 solid chains** stay sequential; only RAR5 gets chunk-level MT.
 - Filter types 4–7 are rejected; KDF strength is capped at 2²⁴ iterations
   (default 2¹⁵).
 
 The complete list of deliberate refusals and known interop differences is in
-[PLAN.md](PLAN.md)「一致拒绝」「已知小差异」.
+[docs/PITFALLS.md](docs/PITFALLS.md) and [PLAN.md](PLAN.md)「已知小差异」.
 
 ## Documentation
 
 Index: **[docs/README.md](docs/README.md)**. Reading order:
 
 1. This file — build and quick start.
-2. [docs/CLI.md](docs/CLI.md) — commands and switches.
+2. [docs/CLI.md](docs/CLI.md) — commands, switches and exit codes.
 3. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map and design notes.
 4. [CONTEXT.md](CONTEXT.md) — domain vocabulary.
-5. [PLAN.md](PLAN.md) — status, next steps, limitations.
-6. [docs/FORMAT_RAR5_RAR7.html](docs/FORMAT_RAR5_RAR7.html) — byte-level format
+5. [PLAN.md](PLAN.md) — next steps and open issues.
+6. [docs/PITFALLS.md](docs/PITFALLS.md) — long-lived rules; read before changing
+   behavior.
+7. [docs/FORMAT_RAR5_RAR7.html](docs/FORMAT_RAR5_RAR7.html) — byte-level format
    reference.
 
 ## Legal

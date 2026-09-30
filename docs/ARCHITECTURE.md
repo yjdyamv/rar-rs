@@ -1,13 +1,15 @@
 # 架构与模块布局
 
-> 最后核对：2026-09-28 @ `135f484`（本轮：7.30 审查落地后的文档核对）；
-> 实现细节以源码为准。
+> 最后核对：2026-09-28 @ `a5e6685`（本轮：把架构级规则从 `PLAN.md` 收进本文件与
+> [`PITFALLS.md`](PITFALLS.md)）；实现细节以源码为准。
 
 库 crate `crates/rar`（crate 名 `rar-rs`）的模块地图与设计不变量。
 
 - 用户面向的概览：[`../README.md`](../README.md)
 - 磁盘格式权威参考：[`FORMAT_RAR5_RAR7.html`](FORMAT_RAR5_RAR7.html)
-- 命令行面：[`CLI.md`](CLI.md)
+- 命令行面：[`CLI.md`](CLI.md)（含退出码表）
+- 长期规则与地雷：[`PITFALLS.md`](PITFALLS.md)（本文件只写**为什么**这么分层，
+  那条规则**是什么**在那边）
 - 工程状态与下一步：[`../PLAN.md`](../PLAN.md)（功能矩阵与限制在那边，本文件不复制）
 
 ## 1 · Workspace
@@ -27,7 +29,7 @@ AES / HMAC / SHA / rand / zeroize，`parallel` / `simd` 可选）。
 `[package]
 version`，以及 `crates/rar-napi/package.json` 的
 `version`。绑定产物（原生 `.node` 与 wasm）都出自
-`rar-rs-napi`，**没有独立版本号**——「napi 版本」就是 「wasm 版本」。另有两处要与
+`rar-rs-napi`，**没有独立版本号**——「napi 版本」就是「wasm 版本」。另有两处要与
 `crates/rar` 对齐：
 
 - 根 `Cargo.toml` 的 `[workspace.dependencies] rar-rs` 的 `version`：不等时
@@ -36,7 +38,7 @@ version`，以及 `crates/rar-napi/package.json` 的
   package.json。
 
 改版本号还要刷新 `Cargo.lock` 与 `fuzz/Cargo.lock`（两个 CI 检查都带
-`--locked`）。 四者一致由 `lint` job 的 "Workspace versions agree"
+`--locked`）。四者一致由 `lint` job 的 "Workspace versions agree"
 步骤守住。**当前同为 `0.12.0`。**
 
 ## 2 · 模块地图
@@ -85,8 +87,9 @@ version`，以及 `crates/rar-napi/package.json` 的
 `archive` 与 `format` **之下**的共享词汇层（`engine` 只依赖
 `{codec, crypto, fs, model, options}`，绝不依赖 `archive`/`format`）：
 
-- `engine/ctx.rs` — `Engine` 族接口与 `Parts` 拆借视图。接口按能力分为六个
-  对象安全 trait：`EngineState`（状态块 + 容器身份）、`CatalogOps`（成员目录）、
+- `engine/ctx.rs` — `Engine` 族接口与 `Parts`
+  拆借视图。接口按能力分为六个对象安全 trait：`EngineState`（状态块 +
+  容器身份）、`CatalogOps`（成员目录）、
   `StreamOps`（底层流）、`HeaderCryptoOps`（存档级头加密 `-hp`）、`VolumeOps`
   （卷集与字节记账）、`WriteServices`（并行/进度/取消 + 单点写服务）； `Engine`
   本身只剩一个 blanket impl 的总接口，因此族代码仍取 `cx: &mut dyn Engine`（只读
@@ -98,8 +101,8 @@ version`，以及 `crates/rar-napi/package.json` 的
   `push_entry` / `clear_catalog` / `replace_catalog`（catalog 只能经引擎增删，
   顺序与 payload-offset 身份不被绕过）、`bytes_written` / `add_bytes_written` /
   `current_volume_index`（卷字节记账单一入口）、`record_quick_open_entry`、
-  `begin_solid_member`（RAR5 链状态播种 + 成员帧开始）。`Parts` 一次借出同一
-  结构体的不相交字段 （`entries` + `stream` + `read` + `password` +
+  `begin_solid_member`（RAR5 链状态播种 + 成员帧开始）。`Parts`
+  一次借出同一结构体的不相交字段（`entries` + `stream` + `read` + `password` +
   `cancel`），保留转换前的借用形状。
   引擎**行为**（`write_block_header`、`start_next_volume`、`report_progress` …）
   仍取整个 `Engine`，所以 `Parts` 借用在调用服务前结束。
@@ -121,8 +124,8 @@ version`，以及 `crates/rar-napi/package.json` 的
   `open`/`solid`/`decode`/`verify`；`members`/`dest`/`read` 在
   `format/shared/extract/`）、`write/{mod,add,emit,stream,batch,engine,
   filter_policy,layout,windows}`。
-- `format/rar4/` — 内部：老容器族。`envelope.rs` 是块信封与 `-hp` 头解密的**唯一
-  读取器**；另有扫描 /
+- `format/rar4/` — 内部：老容器族。`envelope.rs` 是块信封与 `-hp`
+  头解密的**唯一读取器**；另有扫描 /
   头解析、解码门面。写侧按角色分文件：`write/{mod,member,
   emit,encode,stream,batch,cbc}`（与
   `format/rar5/write/` 同形）。
@@ -131,8 +134,8 @@ version`，以及 `crates/rar-napi/package.json` 的
 - `format/shared/` — 内部：跨格式读写。读编排（`extract/`：`open`/`members`/
   `dest`/`read` + 每操作唯一 family match，并行抽取仅 RAR5）、跨卷分片合并
   （`split.rs`）、legacy 时间换算（`legacy_time.rs`；civil 原语在公开的
-  `crate::time`）、跨族校验和（`checksum.rs`：RAR13 文件头与 RAR4 分卷片段共用
-  的 16 位滚动和）、通用 writer 适配器（`engine.rs`）、流访问（`stream.rs`）、
+  `crate::time`）、跨族校验和（`checksum.rs`：RAR13 文件头与 RAR4 分卷片段共用的
+  16 位滚动和）、通用 writer 适配器（`engine.rs`）、流访问（`stream.rs`）、
   格式中性成员写门面（`write_ops.rs`：`add*` 分发 + solid 链重置）。
 
 `format/shared` 不是“与格式无关”，而是**派发与适配层**：跨族的 family
@@ -155,12 +158,12 @@ match（`extract/mod.rs`、`write_ops.rs`）集中在这里，RAR5-only 的概�
   RR，按 `plan`/`gf16`/`encode`/`repair`/`stream` 分文件）、`parity`（`.rev` /
   重建卷的 staged 安装值）、`rev50`（RAR5 `.rev`）、`rev3`（RAR 1.5–4.x
   `.rev`，GF(2^8)；同形分文件 `trailer`/`name`/`layout`/`build`/`repair` +
-  `rs8`）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持 入口如
+  `rs8`）、`legacy`（PROTECT_HEAD / NEWSUB 修复）。受支持入口如
   `repair_archive_path`、`rebuild_missing_volumes`、
   `build_recovery_volumes_for_set`。
 
 三棵树默认 `pub(crate)`（2026-09 删除 `raw` feature 后永久如此）：它们是 wire
-级与 底层原语，不属于受支持的 API；外部真正需要的子集（块信封 + varint +
+级与底层原语，不属于受支持的 API；外部真正需要的子集（块信封 + varint +
 模型结构 + 恢复构建 + 加密原语）经常驻 `wire` 模块导出。理由见
 [`adr/0007-raw-feature-retired.md`](adr/0007-raw-feature-retired.md)。
 
@@ -180,10 +183,10 @@ match（`extract/mod.rs`、`write_ops.rs`）集中在这里，RAR5-only 的概�
   `detect`，`DictionarySize`/`MAX_METADATA_BYTES` 在 `options`）；
 - `engine`/`codec`/`crypto`/`fs`/`model`/`options`/`detect`/`version` 等
   `format` 之下的层不得反向命名 `format`；
-- `format` 的族模块之间不互相取值（`checksum`、DOS 时间、`max_packed_bytes` 等
-  跨族原语在 `format/shared`）；
+- `format` 的族模块之间不互相取值（`checksum`、DOS 时间、`max_packed_bytes`
+  等跨族原语在 `format/shared`）；
 - 角色门面（reader/writer/editor）不得命名
-  `format`/`codec`/`crypto`/`recovery`， 需要时经 `archive/ops.rs`
+  `format`/`codec`/`crypto`/`recovery`，需要时经 `archive/ops.rs`
   的方法接缝转发；
 - `recovery` 在 `format` **之上**（复用 RAR4 信封 + `REPAIR` 策略），反向禁止。
 
@@ -192,25 +195,27 @@ match（`extract/mod.rs`、`write_ops.rs`）集中在这里，RAR5-only 的概�
 **有界内存。** 成员从不整块进内存。
 
 - STORE（含加密 STORE）按 1 MiB 块直拷进归档。
-- 压缩成员走 **spill 文件**（`SpillGuard`，`*.spill-*`）：逐窗压缩，压缩字节先写
-  进归档旁的临时文件，同时算明文 CRC/BLAKE2；等 packed 大小与校验和齐了才写成员
-  头，再把 spill 流式拷入。所以磁盘上有一份 packed 大小的中间文件，内存只驻留
-  **编码器状态 + I/O 缓冲**。
+- 压缩成员走 **spill
+  文件**（`SpillGuard`，`*.spill-*`）：逐窗压缩，压缩字节先写进归档旁的临时文件，同时算明文
+  CRC/BLAKE2；等 packed 大小与校验和齐了才写成员头，再把 spill
+  流式拷入。所以磁盘上有一份 packed 大小的中间文件，内存只驻留 **编码器状态 +
+  I/O 缓冲**。
 - 内存量级：近程 tail ≤ `min(dict, NEAR_WINDOW_MAX = 8 MiB)`；短程 match finder
   的 head/prev（或 BT4
   son，页按插入惰性提交）与近程窗口同阶；长程采样历史（`-mcl` 风格）≤
-  `min(dict, LONG_RANGE_MAX = 128 MiB)` 字节 + 每 16 B 一个样本、≤50% 负载
-  的采样表。并行（`parallel` + `-mt>1`）时成员按
-  `clamp(8 MiB × 线程数, 24 MiB, 64 MiB)` 切片、每片带 ≤ 8 MiB tail 上下文；顺序
-  路径每 4 MiB 读块立即 flush（≈ 4 MiB 读 + 1 MiB BufReader）；拷贝阶段 1 MiB。
+  `min(dict, LONG_RANGE_MAX = 128 MiB)` 字节 + 每 16 B 一个样本、≤50%
+  负载的采样表。并行（`parallel` + `-mt>1`）时成员按
+  `clamp(8 MiB × 线程数, 24 MiB, 64 MiB)` 切片、每片带 ≤ 8 MiB tail
+  上下文；顺序路径每 4 MiB 读块立即 flush（≈ 4 MiB 读 + 1 MiB
+  BufReader）；拷贝阶段 1 MiB。
 - 实测（release，1 GiB 高度可压成员，默认 32 MiB 字典）：m1 顺序峰值 ≈ 130 MB，
   m3/m5 顺序 ≈ 365 MB（BT4 son 数组 + 长程采样历史为主），`-mt8` m3 ≈ 840 MB。
   **内存与成员大小无关，但随线程数增长。**
 - 压缩发射块合并到 ≤ 4 MiB（每块独立 Huffman 表，符号流分布漂移时提前闭合）；
   解析侧分块预算上限 128 KiB（`MAX_BLOCK_SIZE`，只为价格局部化）。
-- 内存 API（`encode()` / `encode_chunked`，ADR 0003 决策 3 保留的公开面）仍物化
-  输入与输出。提取侧对称：解码直接写目标并裁剪窗口（legacy `MAX_HISTORY` 1/4
-  MiB， RAR5 = 字典），不物化成员。
+- 内存 API（`encode()` / `encode_chunked`，ADR 0003 决策 3
+  保留的公开面）仍物化输入与输出。提取侧对称：解码直接写目标并裁剪窗口（legacy
+  `MAX_HISTORY` 1/4 MiB， RAR5 = 字典），不物化成员。
 - RAR4 各代流式：v29 用其 LZ 流式引擎；v20 用**窗口多块**编码器
   （`encode_member_windowed_streaming`，64 KiB 一块、块间位连续、`ParseState`
   续传匹配状态）；v15 与 RAR13 用 `Unpack15Encoder::encode_member_streaming`
@@ -228,10 +233,10 @@ rename。链接目标同样过清洗与包含性校验：junction 重建为真 N
 
 **Solid 与 `-mt`（写路径）。** 连续压缩成员共享一个 LZ 窗口（更好的比率）。RAR5
 solid 链同样走 chunk 级 MT（`encode_chunked_mt`）：窗口经共享 tail
-与长距离表延续， 只有解析层与顺序路径分歧（已文档化的小幅 ratio 差异）。非 solid
+与长距离表延续，只有解析层与顺序路径分歧（已文档化的小幅 ratio 差异）。非 solid
 成员各自独立窗口， `add_batch_parallel` 只在非 solid 时启用；RAR4 老编码器的
-solid 链保持串行。结论与实测见 [`../PLAN.md`](../PLAN.md)「性能」段的 06
-判决行。
+solid 链保持串行。压缩性能的契约与已否决方向见 [`../PLAN.md`](../PLAN.md) 的「P2
+性能」段。
 
 **Quick-open 与取消。** `open_quick` 只读主头 + QO 记录，列目录是 O(QO) 而非
 O(归档)；没有 QO 时回退全扫。长任务通过共享 `AtomicBool`
@@ -241,14 +246,24 @@ O(归档)；没有 QO 时回退全扫。长任务通过共享 `AtomicBool`
 （不是整个归档），因此能修远大于 RAM 的归档；完好时不写输出，失败时不留残留。
 
 **多卷提交是一个事务。** `fs::atomic::commit_files` 先把已存在的目标卷 park
-到隐藏 旁路，再安装暂存的卷集；任一步失败就整体回滚（安装过的退回暂存名、park
-的原件 归位），所以失败的提交只呈现「完整新集」或「原样旧集」，不会新旧混排。
+到隐藏旁路，再安装暂存的卷集；任一步失败就整体回滚（安装过的退回暂存名、park
+的原件归位），所以失败的提交只呈现「完整新集」或「原样旧集」，不会新旧混排。
 `StagedSet::park` 还能把既有 final 按调用方命名入 journal（rev3 损坏卷 →
 `*.bad`）：rollback 还原、成功保留，kill 落在 park 与 install 之间也由 recovery
 还原。更短的覆盖还会 retire 旧集的残留分卷与旧 `.rev`。提交写 journal +
 committed 标记，进程在 rename 序列中途被 kill
 时，下次写打开会回滚未完成的提交或收尾已完成
 的提交（`atomic::recover_interrupted_commit`；**只在写路径触发**，读打开不动盘）。
+
+**失败即 abort（写路径）。** `ArchiveWriter` 与 `ArchiveEditor` 在任一 `?`
+早退时都不得提交半成品：多卷重写把挂载段拆成
+`write_staged_volume_set`，失败时在其外恢复 path/volume 状态、摘除 `pending`
+并清除暂存文件。契约由 `multivolume_edit_recovers_state_after_an_abort` 钉住。
+
+**目录记录是可选的，语义由 CLI 决定。** `-ed` 一个目录记录都不写（属性靠成员路径
+重建、时间丢失），`-ed1`
+只排除不含文件的目录（子树有文件的目录保留）。两者都只是
+「写不写目录条目」，不是过滤器。
 
 ## 4 · CLI 与测试布局
 
@@ -266,9 +281,9 @@ CLI crate `crates/rar-cli` 产出 `rar` 与 `unrar`：
 
 测试：`crates/rar/tests/`（`rar50_roundtrip`、`format_assertions`、`rewrite_tests`、
 `official_interop`、`rar4_*`、`rar13_*`、`cancel_flag`、`quick_open_listing`
-等； 官方 rar/unrar 由 `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` 门控）；
+等；官方 rar/unrar 由 `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` 门控）；
 `crates/rar-cli/tests/cli_behavior/` 与 `winrar_interop/`（按域拆分 +
-`support`， 后者需本机 WinRAR）。怎么跑、耗时与坑见
+`support`，后者需本机 WinRAR）。怎么跑、耗时与坑见
 [`testing.md`](testing.md)；fuzz 目标见
 [`../fuzz/README.md`](../fuzz/README.md)；CI 见
 [`.github/workflows/CI.yml`](../.github/workflows/CI.yml)。
