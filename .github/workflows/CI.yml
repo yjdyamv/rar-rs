@@ -200,11 +200,18 @@ jobs:
       - name: Build addon (native)
         if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
-        run: npx napi build --platform --release
+        run: npx napi build --platform --release --js binding.js --dts binding.d.ts
+      - name: Typecheck the binding's public types
+        if: env.RUN_HEAVY == 'true'
+        working-directory: crates/rar-napi
+        # Needs the generated `binding.d.ts`, so it runs after the build.
+        # `rar-rs.d.ts` is hand-written; `__test__/types.test-d.ts` asserts the
+        # surface a consumer sees, so a typing regression fails here.
+        run: npm run typecheck
       - name: Build WASM addon
         if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
-        run: npx napi build --platform --release --target wasm32-wasip1-threads
+        run: npx napi build --platform --release --target wasm32-wasip1-threads --js binding.wasi.cjs --dts binding.wasi.d.cts
       - name: Patch WASI loader for Windows host paths
         if: env.RUN_HEAVY == 'true'
         working-directory: crates/rar-napi
@@ -220,39 +227,39 @@ jobs:
           - host: macos-latest
             target: aarch64-apple-darwin
             addon: rar-rs-napi.darwin-arm64.node
-            build: npx napi build --platform --release --target aarch64-apple-darwin
+            build: npx napi build --platform --release --target aarch64-apple-darwin --js binding.js --dts binding.d.ts
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             addon: rar-rs-napi.win32-x64-msvc.node
-            build: npx napi build --platform --release --target x86_64-pc-windows-msvc
+            build: npx napi build --platform --release --target x86_64-pc-windows-msvc --js binding.js --dts binding.d.ts
           - host: windows-latest
             target: i686-pc-windows-msvc
             addon: rar-rs-napi.win32-ia32-msvc.node
-            build: npx napi build --platform --release --target i686-pc-windows-msvc
+            build: npx napi build --platform --release --target i686-pc-windows-msvc --js binding.js --dts binding.d.ts
           - host: windows-latest
             target: aarch64-pc-windows-msvc
             addon: rar-rs-napi.win32-arm64-msvc.node
-            build: npx napi build --platform --release --target aarch64-pc-windows-msvc
+            build: npx napi build --platform --release --target aarch64-pc-windows-msvc --js binding.js --dts binding.d.ts
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             addon: rar-rs-napi.linux-x64-gnu.node
-            build: npx napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
+            build: npx napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross --js binding.js --dts binding.d.ts
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
             addon: rar-rs-napi.linux-x64-musl.node
-            build: npx napi build --platform --release --target x86_64-unknown-linux-musl -x
+            build: npx napi build --platform --release --target x86_64-unknown-linux-musl -x --js binding.js --dts binding.d.ts
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             addon: rar-rs-napi.linux-arm64-gnu.node
-            build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
+            build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross --js binding.js --dts binding.d.ts
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
             addon: rar-rs-napi.linux-arm64-musl.node
-            build: npx napi build --platform --release --target aarch64-unknown-linux-musl -x
+            build: npx napi build --platform --release --target aarch64-unknown-linux-musl -x --js binding.js --dts binding.d.ts
           - host: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
             addon: rar-rs-napi.linux-arm-gnueabihf.node
-            build: npx napi build --platform --release --target armv7-unknown-linux-gnueabihf --use-napi-cross
+            build: npx napi build --platform --release --target armv7-unknown-linux-gnueabihf --use-napi-cross --js binding.js --dts binding.d.ts
     steps:
       - uses: actions/checkout@v7
       - name: Setup node
@@ -325,8 +332,8 @@ jobs:
           name: bindings-${{ matrix.settings.target }}
           path: |
             crates/rar-napi/${{ matrix.settings.addon }}
-            crates/rar-napi/index.js
-            crates/rar-napi/index.d.ts
+            crates/rar-napi/binding.js
+            crates/rar-napi/binding.d.ts
           if-no-files-found: error
   build-wasm:
     name: build - wasm32-wasip1-threads
@@ -349,7 +356,7 @@ jobs:
         run: npm ci
       - name: Build WASM
         working-directory: crates/rar-napi
-        run: npx napi build --platform --release --target wasm32-wasip1-threads
+        run: npx napi build --platform --release --target wasm32-wasip1-threads --js binding.wasi.cjs --dts binding.wasi.d.cts
         shell: bash
       - name: Patch WASI loader for Windows host paths
         working-directory: crates/rar-napi
@@ -362,14 +369,12 @@ jobs:
           path: |
             crates/rar-napi/rar-rs-napi.wasm32-wasi.wasm
             crates/rar-napi/rar-rs-napi.wasm32-wasi.debug.wasm
-            crates/rar-napi/rar-rs-napi.wasi.cjs
-            crates/rar-napi/rar-rs-napi.wasi.d.cts
-            crates/rar-napi/rar-rs-napi.wasi-browser.js
+            crates/rar-napi/binding.wasi.cjs
+            crates/rar-napi/binding.wasi.d.cts
+            crates/rar-napi/binding.wasi-browser.js
             crates/rar-napi/wasi-path-map.cjs
             crates/rar-napi/wasi-worker.mjs
             crates/rar-napi/wasi-worker-browser.mjs
-            crates/rar-napi/index.js
-            crates/rar-napi/index.d.ts
           if-no-files-found: error
   release:
     name: Release (${{ github.ref_name }})
@@ -459,9 +464,9 @@ jobs:
           # file must fail this step rather than produce a partial release.
           cp wasm/rar-rs-napi.wasm32-wasi.wasm \
              wasm/rar-rs-napi.wasm32-wasi.debug.wasm \
-             wasm/rar-rs-napi.wasi.cjs \
-             wasm/rar-rs-napi.wasi.d.cts \
-             wasm/rar-rs-napi.wasi-browser.js \
+             wasm/binding.wasi.cjs \
+             wasm/binding.wasi.d.cts \
+             wasm/binding.wasi-browser.js \
              wasm/wasi-path-map.cjs \
              wasm/wasi-worker.mjs \
              wasm/wasi-worker-browser.mjs release/
@@ -483,8 +488,10 @@ jobs:
             done
             cp "$source" "release/$name"
           }
-          copy_identical_generated_file index.js
-          copy_identical_generated_file index.d.ts
+          # The generated loader and its types are identical on every target,
+          # so the release ships one copy of each.
+          copy_identical_generated_file binding.js
+          copy_identical_generated_file binding.d.ts
 
           cp LICENSE NOTICE THIRD_PARTY_LICENSES.md release/
 

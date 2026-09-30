@@ -19,7 +19,7 @@ edition = "2024"
 # THIRD_PARTY_LICENSES.md rather than folded into this field, so a
 # redistributor has to read those as well.
 license = "BSD-2-Clause"
-repository = "https://codeberg.org/librar/rar-rs"
+repository = "https://github.com/yjdyamv/rar-rs"
 description = "Pure-Rust library and tools for RAR 1.5-4.x, RAR5, and RAR7 archives"
 
 [workspace.dependencies]

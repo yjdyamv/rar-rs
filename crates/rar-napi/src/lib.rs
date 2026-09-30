@@ -258,6 +258,76 @@ pub struct ExtractArchiveOptions {
   /// Write a member that carries a VERSION extra record as `name;N` instead
   /// of `name` (WinRAR's `-ver` extraction). Off by default.
   pub file_version_suffix: Option<bool>,
+  /// Keep going when a member fails, instead of stopping at the first one.
+  ///
+  /// Off by default (WinRAR's behaviour: the first failure ends the run and
+  /// rejects the call). When on, the call resolves and names every member it
+  /// could not extract in `failures`, so a UI can report them individually.
+  /// Cancel is never collected: it always rejects.
+  pub collect_errors: Option<bool>,
+}
+
+/// One member an extraction could not produce.
+#[napi(object)]
+pub struct MemberFailure {
+  /// The member's stored name.
+  pub name: String,
+  /// The member's position in the archive catalog.
+  pub index: f64,
+  /// Why it failed, as a human-readable message.
+  pub message: String,
+}
+
+/// What an extraction did, member by member.
+#[napi(object)]
+pub struct ExtractionResult {
+  /// Destination paths this run wrote, in archive order.
+  pub written: Vec<String>,
+  /// Destination paths the skip-existing policy left untouched (`-o-`).
+  pub skipped: Vec<String>,
+  /// Link members refused because their target escapes the destination.
+  pub refused: Vec<String>,
+  /// Stored names corrected for the host (Windows reserved device names).
+  pub corrected: Vec<String>,
+  /// Members that failed. Empty unless `collectErrors` is set.
+  pub failures: Vec<MemberFailure>,
+}
+
+impl ExtractionResult {
+  pub(crate) fn from_report(report: rar_rs::ExtractionReport) -> Self {
+    let path_strings = |paths: &[std::path::PathBuf]| -> Vec<String> {
+      paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+    };
+    let written = path_strings(report.written());
+    let skipped = path_strings(report.skipped());
+    let refused = path_strings(report.refused());
+    let corrected = report.corrected().to_vec();
+    // `ExtractionReport` owns its failures and is not `Clone`, so consume it
+    // rather than cloning names out.
+    let failures = report
+      .into_failures()
+      .into_iter()
+      .map(|failure| {
+        let index = failure.index();
+        let (name, error) = failure.into_parts();
+        MemberFailure {
+          name,
+          index: index as f64,
+          message: error.to_string(),
+        }
+      })
+      .collect();
+    Self {
+      written,
+      skipped,
+      refused,
+      corrected,
+      failures,
+    }
+  }
 }
 
 #[cfg(test)]

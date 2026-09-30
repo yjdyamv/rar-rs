@@ -288,6 +288,29 @@ function mapCommentArgs(
   ]
 }
 
+/**
+ * `setMemberComment` (archive path, member name, comment, password).
+ *
+ * The member name is an archive-internal name, not a host path, so only the
+ * archive path is translated.
+ */
+function mapMemberCommentArgs(
+  archivePath,
+  member,
+  comment,
+  password,
+  platform = process.platform,
+) {
+  return [
+    typeof archivePath === 'string'
+      ? toGuestPath(archivePath, platform)
+      : archivePath,
+    member,
+    comment,
+    password,
+  ]
+}
+
 function mapRecoveryArgs(
   archivePath,
   percent,
@@ -327,6 +350,7 @@ module.exports = {
   mapExtractMemberArgs,
   mapRenameArgs,
   mapCommentArgs,
+  mapMemberCommentArgs,
   mapRecoveryArgs,
   mapLockArgs,
 }

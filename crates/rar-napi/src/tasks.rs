@@ -15,7 +15,7 @@ use crate::guard::run_guarded;
 use crate::options::{checked_js_integer, checked_optional_js_integer, parse_dict_size};
 use crate::{
   AppendArchiveOptions, CreateArchiveOptions, CreateResult, EntryInfo, EntryInput,
-  ExtractArchiveOptions, ProgressData, RenameEntry,
+  ExtractArchiveOptions, ExtractionResult, ProgressData, RenameEntry,
 };
 
 /// Maximum per-file size read into memory by the rar-rs library (4 GiB).
@@ -1145,12 +1145,13 @@ pub struct ExtractArchiveTask {
   archive_path: String,
   opts: ExtractArchiveOptions,
   cancel: Option<Arc<AtomicBool>>,
+  progress: Option<ThreadsafeFunction<ProgressData, ()>>,
 }
 
 #[napi]
 impl Task for ExtractArchiveTask {
-  type Output = ();
-  type JsValue = ();
+  type Output = ExtractionResult;
+  type JsValue = ExtractionResult;
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_guarded(|| {
@@ -1164,24 +1165,72 @@ impl Task for ExtractArchiveTask {
       let dest = Path::new(&self.opts.dest_path);
       fs::create_dir_all(dest)
         .map_err(|err| Error::new(Status::GenericFailure, format!("mkdir: {err}")))?;
-      archive
-        .extract_all_with_options(dest, self.opts.to_extract_options()?)
+      let mut extract_options = self.opts.to_extract_options()?;
+      // The library's per-member events may not land on the final byte, so the
+      // task also has to emit an exact terminal event. Remember the last
+      // `(done, total)` the library reported and re-send it once the run is
+      // over, so the stream ends at 100% instead of jumping backwards.
+      let terminal_reading: Arc<std::sync::Mutex<(u64, u64)>> =
+        Arc::new(std::sync::Mutex::new((0, 0)));
+      let terminal = self.progress.take().map(Arc::new);
+      if let Some(tsfn) = terminal.as_ref() {
+        let cb_tsfn = tsfn.clone();
+        let reading = terminal_reading.clone();
+        // The library reports `(bytes written, catalog unpacked total)` for
+        // the whole run, so this side only forwards the pair.
+        let sink: rar_rs::ExtractionProgress = Arc::new(std::sync::Mutex::new(Some(Box::new(
+          move |done: u64, total: u64| {
+            if let Ok(mut last) = reading.lock() {
+              *last = (done, total);
+            }
+            let _ = cb_tsfn.call(
+              Ok(ProgressData {
+                done: done.min(total) as f64,
+                total: total as f64,
+              }),
+              ThreadsafeFunctionCallMode::NonBlocking,
+            );
+          },
+        ))));
+        extract_options.on_progress = Some(sink);
+      }
+      let report = archive
+        .extract_all_with_options(dest, extract_options)
         .map_err(to_napi_error)?;
-      Ok(())
+      if let Some(tsfn) = terminal {
+        let total = terminal_reading.lock().map(|last| last.1).unwrap_or(0);
+        // Only when the library actually reported a total: emitting `1/1` for a
+        // run that reported nothing would look like a byte count.
+        if total > 0 {
+          let _ = tsfn.call(
+            Ok(ProgressData {
+              done: total as f64,
+              total: total as f64,
+            }),
+            ThreadsafeFunctionCallMode::Blocking,
+          );
+        }
+      }
+      Ok(ExtractionResult::from_report(report))
     })
   }
 
-  fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
-    Ok(())
+  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
   }
 }
 
 /// Extract an archive into a directory (fully streaming: no per-member or
 /// total size limits, so arbitrarily large members work).
+///
+/// Resolves with what the run did member by member. With `collectErrors` unset
+/// a failing member rejects the whole call (WinRAR's behaviour); with it set
+/// the call resolves and names each failure in `failures`.
 #[napi]
 pub fn extract_archive(
   archive_path: String,
   opts: ExtractArchiveOptions,
+  on_progress: Option<ThreadsafeFunction<ProgressData, ()>>,
   signal: Option<AbortSignal>,
 ) -> AsyncTask<ExtractArchiveTask> {
   AsyncTask::with_optional_signal(
@@ -1189,6 +1238,7 @@ pub fn extract_archive(
       archive_path,
       opts,
       cancel: abort_flag(signal.as_ref()),
+      progress: on_progress,
     },
     signal,
   )

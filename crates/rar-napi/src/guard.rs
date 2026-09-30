@@ -31,7 +31,13 @@ fn panic_error(payload: &(dyn Any + Send)) -> Error {
     .map(|message| (*message).to_string())
     .or_else(|| payload.downcast_ref::<String>().cloned())
     .unwrap_or_else(|| "non-string panic payload".to_string());
-  Error::new(Status::GenericFailure, format!("internal panic: {detail}"))
+  // Carries the `internal` code so JS can tell a library failure from a bug
+  // in this binding (see `error::message_with_code`).
+  let message = crate::error::message_with_code(
+    crate::error::INTERNAL_CODE,
+    format!("internal panic: {detail}"),
+  );
+  Error::new(Status::GenericFailure, message)
 }
 
 /// Test-only panic injection seam: when `RAR_RS_NAPI_TEST_PANIC` is set,
@@ -81,6 +87,12 @@ mod tests {
     let _lock = test_lock();
     let error = run_guarded(|| -> napi::Result<u32> { panic!("closure panic") }).unwrap_err();
     assert_eq!(error.status, Status::GenericFailure);
+    // The `internal` code marks this as a binding bug, not a library failure.
+    assert!(
+      error.reason.starts_with("[rar-rs:internal] "),
+      "{}",
+      error.reason
+    );
     assert!(error.reason.contains("internal panic"), "{}", error.reason);
     assert!(error.reason.contains("closure panic"), "{}", error.reason);
   }

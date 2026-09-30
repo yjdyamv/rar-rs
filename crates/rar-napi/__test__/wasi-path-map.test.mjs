@@ -16,9 +16,11 @@ import {
   mapExtractMemberArgs,
   mapRenameArgs,
   mapCommentArgs,
+  mapMemberCommentArgs,
   mapRecoveryArgs,
   mapLockArgs,
 } from '../wasi-path-map.cjs'
+import { assertEveryExportIsWrapped } from '../scripts/patch-wasi-loader.mjs'
 
 test('win32 absolute paths map to guest /<DRIVE>:/ paths', () => {
   assert.equal(toGuestPath('C:\\Users\\me\\out.rar', 'win32'), '/C:/Users/me/out.rar')
@@ -336,6 +338,19 @@ test('comment, recovery, and lock args map the archive path only', () => {
   assert.deepEqual(mapLockArgs('C:\\a.rar', 'pw', 'win32'), ['/C:/a.rar', 'pw'])
 })
 
+test('member-comment args map the archive path but not the member name', () => {
+  // The member name is archive-internal: translating it would corrupt it.
+  assert.deepEqual(
+    mapMemberCommentArgs('C:\\a.rar', 'sub\\file.txt', 'note', 'pw', 'win32'),
+    ['/C:/a.rar', 'sub\\file.txt', 'note', 'pw'],
+  )
+  // A `null` comment (remove) and `null` password survive unchanged.
+  assert.deepEqual(
+    mapMemberCommentArgs('/tmp/a.rar', 'file.txt', null, null, 'linux'),
+    ['/tmp/a.rar', 'file.txt', null, null],
+  )
+})
+
 test('WASI patch templates keep async operation contracts', () => {
   const source = readFileSync(
     new URL('../scripts/patch-wasi-loader.mjs', import.meta.url),
@@ -359,7 +374,13 @@ test('WASI patch templates keep async operation contracts', () => {
     source,
     /mapExtractMemberArgs[\s\S]*?destDir,[\s\S]*?password,[\s\S]*?signal,[\s\S]*?\)[\s\S]*?\.then\(\(path\) => __wasiPathMap\.toHostPath\(path\)\)/,
   )
-  for (const fn of ['renameEntries', 'setComment', 'setRecovery', 'lockArchive']) {
+  for (const fn of [
+    'renameEntries',
+    'setComment',
+    'setMemberComment',
+    'setRecovery',
+    'lockArchive',
+  ]) {
     assert.match(
       source,
       new RegExp(`module\\.exports\\.${fn} = function __wasi${fn
@@ -368,4 +389,56 @@ test('WASI patch templates keep async operation contracts', () => {
       `${fn} must be wrapped`,
     )
   }
+  // `setMemberComment` shipped unwrapped once, so the WASI build handed a
+  // Windows host path to the sandbox and failed with ENOENT. It must map its
+  // archive path like `setComment` does.
+  assert.match(
+    source,
+    /mapMemberCommentArgs\([\s\S]*?archivePath,[\s\S]*?member,[\s\S]*?comment,[\s\S]*?password,[\s\S]*?\)/,
+    'setMemberComment must translate its archive path',
+  )
+})
+
+test('a generated export with no wrapper is rejected, not silently skipped', () => {
+  // The drift guard is the structural fix for the missing-`setMemberComment`
+  // bug: an export the table does not know about must fail the build.
+  const withUnknown = [
+    'module.exports.createArchive = __napiModule.exports.createArchive',
+    'module.exports.someNewOperation = __napiModule.exports.someNewOperation',
+  ].join('\n')
+  assert.throws(
+    () => assertEveryExportIsWrapped(withUnknown),
+    /someNewOperation/,
+    'an unwrapped export must be reported',
+  )
+
+  // A table entry with no matching export is also an error (dead wrapper).
+  assert.throws(
+    () => assertEveryExportIsWrapped(''),
+    /no longer exports them/,
+  )
+
+  // The wrapper table must cover exactly the operations the entry point
+  // wraps, so neither layer can gain an operation the other misses.
+  const source = readFileSync(
+    new URL('../scripts/patch-wasi-loader.mjs', import.meta.url),
+    'utf8',
+  )
+  const wrapped = [...source.matchAll(/^ {2}(\w+): LOADER_EXPORTS_/gm)]
+    .map((match) => match[1])
+    .sort()
+  const entry = readFileSync(
+    new URL('../rar-rs.js', import.meta.url),
+    'utf8',
+  )
+  const guarded = [
+    ...entry.matchAll(/^module\.exports\.(\w+) = wrapped\.\1$/gm),
+  ]
+    .map((match) => match[1])
+    .sort()
+  assert.deepEqual(
+    wrapped,
+    guarded,
+    'the WASI wrapper table and the entry point must wrap the same operations',
+  )
 })
