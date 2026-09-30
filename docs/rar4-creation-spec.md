@@ -24,7 +24,7 @@ rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver
 > PPMd 不是独立开关：`-m0` = STORE（WinRAR 定义）；PPMd 由 RAR29 编码器在
 > `-m4`/`-m5`（非 solid）按候选竞争，solid 链内作为与 LZ 并行的模型链、赢者推进
 > （见 `codec/legacy/rar29_encoder.rs`）。方法字节仍按 `-m`
-> 级写（`0x30+m`），块内 首个标志位指示 PPMd。**续模型**：首个 PPMd
+> 级写（`0x30+m`），块内首个标志位指示 PPMd。**续模型**：首个 PPMd
 > 成员发新模型头（0xA7），其后连续的 PPMd
 > 成员发续模型头（0x87）并共享模型，中间夹 LZ 成员则回到新模型；官方 6.23 与
 > 7.23 都能解出。**6.23 的 RAR4 写入器不产 PPMd，所以写入侧没有官方参考。**
@@ -85,16 +85,17 @@ ArchiveWriter::close()
   ENDARC_HEAD(0x7b)
 - flags：低位=块标志，高位=字典大小（压缩块）或额外标志
 - head_size：包含 CRC + type + flags + size 自身的总头大小
-- ENDARC（0x7b）：单卷归档 7 字节（flags `0x4000`、head_size `0x0007`）；**多卷
-  集**每卷 20 字节（flags `0x400e | 0x0001`（非末卷）、head_size `0x0014`、
-  ENDARC 之前**整卷字节**的 CRC-32、从 0 起的卷号、7 个零字节）。多卷集用 零填充
-  `.partNN.rar` 命名并给主头置 `MHD_NEWNUMBERING`（`-vn` 回旧式 `.rar`/`.rNN`
-  且不置该位）；20 字节形式的零尾正是 `.rev` 选 trailer 布局的 判据
+- ENDARC（0x7b）：单卷归档 7 字节（flags `0x4000`、head_size
+  `0x0007`）；**多卷集**每卷 20 字节（flags
+  `0x400e | 0x0001`（非末卷）、head_size `0x0014`、 ENDARC 之前**整卷字节**的
+  CRC-32、从 0 起的卷号、7 个零字节）。多卷集用零填充 `.partNN.rar`
+  命名并给主头置 `MHD_NEWNUMBERING`（`-vn` 回旧式 `.rar`/`.rNN` 且不置该位）；20
+  字节形式的零尾正是 `.rev` 选 trailer 布局的判据
 
 ### FILE_HEAD 序列化
 
 ```
-偏移  大小  字段
+偏移大小字段
 0     2    head_crc16
 2     1    head_type = 0x74
 3     2    flags (FHD_SOLID | FHD_PASSWORD | FHD_UNICODE | FHD_EXTTIME | ...)
@@ -118,7 +119,7 @@ ArchiveWriter::close()
 
 编码器是 `codec/legacy/rar{29,20,15}_encoder.rs` 上的 `Unpack29Encoder` /
 `Unpack20Encoder` / `Unpack15Encoder`，各有 `encode_member(&mut self, input)`
-方法（不是自由函数）。输出 RAR3/4 格式的压缩块 序列（不含
+方法（不是自由函数）。输出 RAR3/4 格式的压缩块序列（不含
 FILE_HEAD，只含压缩数据流）。写管线负责：
 
 1. 调用编码器得到压缩数据 `Vec<u8>`
@@ -139,7 +140,7 @@ RAR2 成员是**LZ 块序列**：块以主表符号 269（end-of-block）结束�
 与 RAR13 = `Unpack15Encoder::encode_member_streaming`（v15 本来是整成员单遍
 自适应流，现改为增量：滚动窗口 ≤ 32 KiB + 一个读取块 + ≤ 259 B 前视，自适应表与
 flag 分组跨块续用，产物与整成员编码**逐字节相同**）；加密由范围发射器
-（`format/rar4/write/cbc.rs`）分代 产生，所以大成员（含 `-p`）不再整块进内存。
+（`format/rar4/write/cbc.rs`）分代产生，所以大成员（含 `-p`）不再整块进内存。
 
 ### 多卷切分
 

@@ -1,7 +1,8 @@
 # Command-Line Reference
 
-> Last verified: 2026-09-28 @ `135f484`; switch coverage is checked against the
-> clap surface, behavior against the tests and the official WinRAR 7.23 tools.
+> Last verified: 2026-09-28 @ `a5e6685`; switch coverage is checked against the
+> clap surface, behavior against the tests and the official WinRAR 7.23 tools,
+> and the exit-code table against `src/error.rs`.
 
 rar-rs ships two binaries, `rar` and `unrar`, modelled on the WinRAR 7.x console
 tools. Every official command is implemented. Switches follow WinRAR 7.23
@@ -259,6 +260,48 @@ never print WinRAR's copyright/trial banner, so `rar l` shows the list without
 it), and `-idn` (WinRAR's "list without member names") is accepted but not
 implemented — the names are still printed. `-iver` prints rar-rs's own version
 string rather than WinRAR's bare `<version> <arch>`.
+
+---
+
+## Exit codes
+
+Single source: [`crates/rar-cli/src/error.rs`](../crates/rar-cli/src/error.rs).
+Both binaries print the message and exit with the code from the library's
+`ErrorCode` where one is available, so a script can tell a wrong password from a
+CRC failure or a locked archive instead of seeing every failure as exit 1.
+
+| Code | Meaning             | Emitted for                                                                                                                      |
+| ---- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | Success             | Also `--help`/`--version`, and a command line with no arguments                                                                  |
+| 1    | Warning             | Non-fatal complaints: skipped members, an unsafe link target, archive members not found by a pattern that otherwise matched      |
+| 2    | Fatal error         | Unclassified failure, including `Format`/`InvalidState`/`Unsupported`/`Security`/`Io` (a genuinely missing archive is 10, not 2) |
+| 3    | CRC / hash mismatch | A member that fails CRC32 or BLAKE2sp verification; also `rar r` when members were dropped or nothing was produced               |
+| 4    | Archive locked      | A write attempt on a `-k`-locked archive                                                                                         |
+| 5    | Write error         | Reserved by the WinRAR table; no current path distinguishes it (see the note below)                                              |
+| 6    | Open error          | Reserved by the WinRAR table; no current path distinguishes it                                                                   |
+| 7    | Bad command line    | Unknown command, unknown switch, a switch missing its value                                                                      |
+| 8    | Not enough memory   | `ErrorCode::LimitExceeded` (an enforced size/catalog/chunk cap)                                                                  |
+| 9    | Create error        | Extraction could not create a destination: a non-empty directory in the way, a hostile name that cannot be corrected             |
+| 10   | No files found      | Missing archive, or a member selector that matched nothing                                                                       |
+| 11   | Wrong password      | `ErrorCode::WrongPassword`/`Encrypted` — RAR4 cannot tell a wrong password from a damaged header, so both land here              |
+| 14   | Delete error        | A `-da`/`-df`/`-dr` source deletion failed                                                                                       |
+| 15   | Timeout exceeded    | `--time-limit` (`-limt<sec>`, `rar` only) expired                                                                                |
+| 255  | User break          | Cooperative cancellation (Ctrl-C, or an API cancel flag)                                                                         |
+
+Codes 5 and 6 are part of WinRAR's documented table
+([`error.rs`](../crates/rar-cli/src/error.rs) keeps them for reference, with
+`#![allow(dead_code)]`) but no rar-rs path currently distinguishes them; the
+4/5/6/8 group is the least exercised part of the parity work.
+
+Two deliberate divergences from the official tools, both about `rar r`:
+
+- **The exit code follows the result, not the container.** Dropped members or no
+  output at all gives 3; a full salvage gives 0. Official `Rar` forks this by
+  container — a corrupt RAR5 header exits 3 while a corrupt legacy header exits
+  0, and RAR 1.3/1.4 report 0 even though they produce nothing. Same "data was
+  lost" fact, different signal; we do not copy it.
+- **`fixed.<name>` is not written when nothing was repaired.** A repair that
+  cannot proceed leaves no artifact.
 
 ---
 
