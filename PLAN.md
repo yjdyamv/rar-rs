@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-28 @ `a5e6685`；实现细节以源码为准。
+> 最后核对：2026-09-30 @ `99d7b79`；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -27,13 +27,19 @@
   repack； `-hp` 与分卷（`rn`/`ch`/`k`/注释）均已支持。
 - **命令面**：官方 `rar` 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt`
   列表变体）；官方 7.30 新增的 `la`/`va`/`lba`/`vba` 与服务块列表已接。
+- **对外两组 API**：Rust 库是角色门面（`ArchiveReader` / `ArchiveWriter` /
+  `ArchiveEditor`）；Node 绑定（`crates/rar-napi`）**手写入口 `rar-rs.js` +
+  `rar-rs.d.ts`**，生成物只叫 `binding.*`，`tsc --noEmit` 在 CI
+  把关。错误类别一路传到消费者（`ErrorCode` → CLI 退出码 /
+  `RarError.rarCode`），提取可选逐成员容错（`ExtractErrorPolicy`）并带进度。
 - **工程**：workspace 三 crate；CI 做 fmt / 路径分隔符守卫 / cargo check（含
   wasm）/ 确定性测试 smoke / 版本一致性 / clippy `-D warnings` / cargo deny /
-  rustdoc；七目标 fuzz；取消钩子；QO 快路径；流式修复；零填充分卷。
+  rustdoc，另加绑定的 `tsc --noEmit` 类型闸门；七目标 fuzz；取消钩子；QO
+  快路径；流式修复；零填充分卷。
 
 ## 下一步
 
-### P0 发布收口（唯一阻塞项）
+### 发布收口（唯一阻塞项）
 
 - [ ] **发布 `rar-rs` 0.12.0**：`cargo package` 已通过校验，三个 crate 的
       `readme` / `keywords` / `documentation` / `categories`
@@ -47,17 +53,40 @@
       `cargo install rar-cli` 能跑；`rar-rs-napi` 的 `.node` 与 wasm 产物照 CI
       release job 的路径复核一次。
 
-### P1 文档人体工学（本次已做，保持即可）
+### 文档人体工学（已做，保持即可）
 
 - [x] **单一来源归位**：历史修复日志移出 `PLAN.md`，可长期复用的规则收进
       [`docs/PITFALLS.md`](docs/PITFALLS.md)（一条一行、由测试钉住），架构级不变量留在
       [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，退出码进
       [`docs/CLI.md`](docs/CLI.md)。`PLAN.md` 从 995 行收到 200 行量级。
+- [x] **公开 API 契约也归 PITFALLS**：错误类别贯通、`ExtractErrorPolicy` 的
+      Abort/Collect 语义、提取进度粒度、生成物与手写物的分名、WASI
+      路径映射表按名维护——见 [`docs/PITFALLS.md`](docs/PITFALLS.md)「公开 API
+      契约」段。
 - [ ] **保持**：新结论写进
       PITFALLS（规则）或本文件（下一步），**不要把过程写回来**。
       文档锚点（`最后核对`）在改行为时同步刷新。
 
-### P2 性能（已 park，未关闭议题）
+### 通用库的对外面（已做一半，剩打包）
+
+- [x] **错误分类贯通到 JS**：库的 16 个 `ErrorCode` 经消息标记 + `rar-rs.js`
+      再水化，变成 `RarError.rarCode`；此前 17 类被压成 2 个 N-API
+      status，"密码错→重问" 与"锁定→只读"无法分辨。
+- [x] **逐成员失败与提取进度**：`ExtractErrorPolicy`（`Abort` 默认 /
+      `Collect`）、
+      `ExtractionReport::failures`、`ExtractOptions::on_progress`；绑定侧
+      `ExtractArchiveOptions.collectErrors` 与 `ExtractionResult.failures`。
+- [x] **手写类型 + 编译闸门**：`rar-rs.d.ts` 为公开面，`npm run typecheck`
+      （`tsc --noEmit` + `__test__/types.test-d.ts` 的编译期断言）进 CI。
+- [ ] **npm 打包（明确暂缓，别自行推进）**：多平台 `optionalDependencies`、 wasm
+      入口、`exports` 子路径、发布工作流。**按用户要求先不做**。开工前需定一个
+      **scope 名**：napi-rs 官方文档警告无 scope 的平台包名（如
+      `rar-rs-win32-x64-msvc`）可能触发 npm 的 spam 检测，建议平台包放 scope
+      下、主包保持 `rar-rs`。
+- [ ] **CI 首跑**：跨平台 build 矩阵与新增的 typecheck 步骤只做过静态修改，
+      首次跑通必须由 CI 证明（本地无法覆盖）。
+
+### 性能（已 park，未关闭议题）
 
 - [ ] **issue 09 — DLL 单线程解析速度**：真实 DLL 上 m3 `-mt1` 落后 WinRAR 约
       5.9x，瓶颈是 BT4
@@ -100,7 +129,7 @@ issue 09）；xml m2/m3 +1.5%（解析差距，非块开销）；text64 MT 片�
 seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 `git log -- docs/issues/compression-perf/` 找回。
 
-### P3 功能缺口（按需，不阻塞发布）
+### 功能缺口（按需，不阻塞发布）
 
 - [ ] **RAR4 solid 归档 MT**：legacy solid
       链保持串行；成员级并行需跨成员共享窗口，属结构性代价（RAR5 的 chunk 级 MT
@@ -112,7 +141,7 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 
 - **老编码器块级 MT（v15/v20 单个大成员）**：v20 已有「多窗口并行解析 +
   顺序写位流」 的骨架，但需要每窗口独立的 match finder
-  状态与确定性窗口边界才能保证字节一致，收益 仅「老格式大成员的创建速度」（官方
+  状态与确定性窗口边界才能保证字节一致，收益仅「老格式大成员的创建速度」（官方
   7.23 已移除 `-ma4`）；v15 另受自适应表限制。
 - **PPMd 块级
   MT**：单自适应模型，切块会改变输出（结构上不可行）；成员级并行已有。
@@ -146,7 +175,7 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 
 - [`compression-perf/`](docs/issues/compression-perf/) —
   04（窗口级不可压缩跳过）、 09（DLL 解析速度）、15（价格驱动解析），均对应上面
-  P2 的清单项。
+  「性能」段的清单项。
 
 ## 一致拒绝（别"修"）
 

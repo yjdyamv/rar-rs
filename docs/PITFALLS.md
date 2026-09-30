@@ -1,11 +1,12 @@
 # 不变量与地雷（改代码前先看）
 
-> 最后核对：2026-09-28 @ `a5e6685`；实现细节以源码为准。
+> 最后核对：2026-09-30 @ `99d7b79`；实现细节以源码为准。
 
 本文件是**长期规则**的单一来源：所有「改回去就是 bug」「看着像 bug 其实是设计」
 「与官方有意不同」的结论都收在这里，**一条一行**。这里的每条都由源码或测试钉住
 （括号里是契约）；过程、日期、实测表与被否方案的论证留在 git 历史，本文件不维护
-CHANGELOG。
+CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
+契约」段）：库与绑定是同一套设计约束的两个出口，分散到两个文件只会让它们漂移。
 
 相关：[`../PLAN.md`](../PLAN.md)（下一步与开放议题）·
 [`ARCHITECTURE.md`](ARCHITECTURE.md)（模块地图与设计不变量）·
@@ -212,3 +213,58 @@ CHANGELOG。
 - **标记编译门用 `cfg(unix)`/`cfg(windows)`，别用格式常量**：`OS_WINDOWS`
   是格式常量不是编译门；`wasm32-wasip1-threads` 既非 unix 也非 windows，漏门会让
   CI 红。
+
+## 公开 API 契约（库与绑定）
+
+- **错误类别必须一路传到消费者**：库的 `ErrorCode`（16
+  类）是稳定分类，**不许**在某一层被压成"参数错/一般失败"两个桶——CLI 用它映射 11
+  个退出码，绑定用它填 `RarError.rarCode`。napi-rs 只能经 `napi_create_error`
+  抛错，而它唯一可配的字段 `code` 被锁死为 status 串，**Rust
+  侧无法挂自定义属性**；因此类别随消息走（`[rar-rs:<code>] …`，`src/error.rs` 的
+  `message_with_code`），由手写入口 `rar-rs.js` 解析成
+  `RarError { code, rarCode }`。契约由
+  `error::tests::every_library_category_keeps_its_code_and_status` 与 JS
+  `every rejection is a RarError carrying a stable rarCode` 钉住。
+- **无标记的错误按 status 判类，不许一律当 internal**：绑定自己做的标量校验
+  （`level`/`threads`/`volumeSize`/条目的 `kind`·`path`·`data`）抛的是裸
+  `InvalidArg`，那是调用方**能修**的参数错 → `invalid_option`；只有 `internal`
+  才是绑定自身的 bug（panic 防火墙）。把两者混为一谈会让消费者以为要用例上报。
+- **`ExtractErrorPolicy`
+  的两种语义都要在文档里说清**：`Abort`（默认＝官方）在第一个失败成员处中止并返回该错误；`Collect`
+  记录进 `ExtractionReport::failures` 后继续，
+  **整轮仍算成功**（是否把"部分成功"当失败由调用方判断，本层不猜）。**取消永不收集**，始终中止。绑定侧即
+  `ExtractArchiveOptions.collectErrors` + `ExtractionResult.failures`。
+- **并行提取必须给逐成员语义让路**：开了进度回调、或策略不是 `Abort` 时，
+  `extract_all_parallel` 一律返回 `None`
+  退回串行——它先把所有成员解码完，"在第一个失败处停下"根本无法实现，与其猜不如让路。改这些条件前先想清楚顺序语义。
+- **提取进度的粒度是逐成员，且不许倒退**：成员经临时兄弟文件**原子安装**，中途没有可发布的字节数；因此
+  `on_progress` 的 `bytes_written`
+  在一个成员落盘后才前进（单个巨成员会长时间只报很少）。终态事件必须重发**库给出的真实总量**，写
+  `done: 1, total: 1` 会让消费者看到进度从 80000/80000 倒退到
+  1/1；库从未报告过总量时 **不发**终态事件（否则 1/1 会被读成字节数）。
+- **`ExtractionReport` / `ExtractOptions` 的派生是刻意的**：报告不能 `Clone`/
+  `PartialEq`（`failures` 里的 `RarError` 含 I/O
+  源，两者都不成立），要取出失败用 `into_failures()`；`ExtractOptions` 可
+  `Clone`（内部的进度 sink 是 `Arc<Mutex<..>>`），但 `PartialEq`
+  是手写的——**比较时忽略进度回调**，闭包不可比。
+- **生成物与手写物必须分名，别和生成器抢文件名**：`napi build --platform --js
+  binding.js --dts binding.d.ts`
+  决定生成物叫 `binding.*`；**手写入口是 `rar-rs.js`（错误再水化）+
+  `rar-rs.d.ts`（公开类型）+ `wasi-path-map.cjs`**，它们必须跟踪、不能出现在
+  `crates/rar-napi/.gitignore` 里。历史教训：入口曾叫 `index.js`，于是
+  `napi build`
+  会把包入口整个删掉（生成器的"重写入口"步骤），每次手写包装都得靠事后打补丁。
+- **WASI 路径映射表按名字维护，并让漂移失败于构建**：`patch-wasi-loader.mjs`
+  的包装表必须以导出名作键，且 `assertEveryExportIsWrapped` 在生成 loader
+  出现表里没有的导出时 **让构建失败**。按下标维护的表曾经漏掉
+  `setMemberComment`，使 WASI 后端把 Windows 主机路径直接交给沙箱并
+  ENOENT；`mapMemberCommentArgs`
+  只翻归档路径，**成员名是归档内名，翻了就坏**。JS 侧由
+  `__test__/wasi-path-map.test.mjs` 钉住。
+- **仓库 URL 以远端为准**：根 `Cargo.toml` 的 `repository` 与
+  `crates/rar-napi/package.json` 的 `repository`/`homepage`/`bugs`
+  必须同源。曾长期写着一个不存在的 codeberg 路径，而真实远端是 GitHub（三个
+  crate 的 metadata 一起错）。
+- **`.d.ts` 必须被编译**：`npm run typecheck`（`tsc --noEmit` 加
+  `__test__/types.test-d.ts` 的编译期断言）是它的闸门，CI 在 build 之后运行。
+  挡住的是：公开面里声明了实现没有的东西。
