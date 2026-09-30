@@ -286,6 +286,17 @@ impl ExtractArchiveOptions {
       allow_unsafe_links: self.allow_unsafe_links.unwrap_or(false),
       allow_incompatible_names: self.allow_incompatible_names.unwrap_or(false),
       file_version_suffix: self.file_version_suffix.unwrap_or(false),
+      // The default matters: `Abort` rejects the whole call on the first
+      // failing member (WinRAR's behaviour), `Collect` resolves and reports
+      // each failure in `ExtractionResult.failures`.
+      error_policy: if self.collect_errors.unwrap_or(false) {
+        rar_rs::ExtractErrorPolicy::Collect
+      } else {
+        rar_rs::ExtractErrorPolicy::Abort
+      },
+      // Installed by the task once it has the JS callback; see
+      // `ExtractArchiveTask::compute`.
+      on_progress: None,
     })
   }
 }

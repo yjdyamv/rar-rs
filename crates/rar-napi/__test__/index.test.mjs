@@ -17,7 +17,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createArchive } from '../index.js'
+import { createArchive } from '../rar-rs.js'
 
 const RAR5_SIG = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00])
 const RAR4_SIG = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00])
@@ -238,7 +238,7 @@ test('creates 10+ volumes in natural discovery order', async () => {
 test('createArchive oldNumbering selects the old-style RAR4 volume names', async () => {
   const dir = tempDir()
   try {
-    const { readMember } = await import('../index.js')
+    const { readMember } = await import('../rar-rs.js')
     const payload = Buffer.alloc(90_000, 0x42)
 
     const modern = join(dir, 'modern.rar')
@@ -399,7 +399,7 @@ test('rejects invalid JS numeric options with InvalidArg', async () => {
       outPath: archive,
       entries: [{ kind: 'bytes', name: 'a.bin', data: Buffer.from([1]) }],
     })
-    const { extractArchive } = await import('../index.js')
+    const { extractArchive } = await import('../rar-rs.js')
     for (const value of [-1, 1.5, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
       await assert.rejects(
         extractArchive(archive, {
@@ -421,7 +421,7 @@ test('rejects invalid JS numeric options with InvalidArg', async () => {
         maxDictSize: 1,
       }),
       (error) => {
-        assert.equal(error.code, 'InvalidArg')
+        assert.equal(error.rarCode, 'limit_exceeded')
         return true
       },
     )
@@ -433,7 +433,7 @@ test('rejects invalid JS numeric options with InvalidArg', async () => {
 test('accepts the new writer options and validates solidReset', async () => {
   const dir = tempDir()
   try {
-    const { listEntriesDetailed } = await import('../index.js')
+    const { listEntriesDetailed } = await import('../rar-rs.js')
     const out = join(dir, 'opts.rar')
     await createArchive({
       outPath: out,
@@ -459,7 +459,7 @@ test('accepts the new writer options and validates solidReset', async () => {
         entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('x') }],
       }),
       (error) => {
-        assert.equal(error.code, 'InvalidArg')
+        assert.equal(error.rarCode, 'invalid_option')
         return true
       },
     )
@@ -471,7 +471,7 @@ test('accepts the new writer options and validates solidReset', async () => {
         entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('x') }],
       }),
       (error) => {
-        assert.equal(error.code, 'InvalidArg')
+        assert.equal(error.rarCode, 'invalid_option')
         return true
       },
     )
@@ -533,7 +533,7 @@ test('rejects unknown entry kinds', async () => {
 test('creates redirect members (file copy) after the data batch', async () => {
   const dir = tempDir()
   try {
-    const { extractArchive, listEntries } = await import('../index.js')
+    const { extractArchive, listEntries } = await import('../rar-rs.js')
     const out = join(dir, 'links.rar')
     await createArchive({
       outPath: out,
@@ -610,7 +610,7 @@ test('creates and reads back legacy RAR 1.5/2.x members (format rar15/rar2)', as
       // The RAR4 container carries the 7-byte `Rar!\x1a\x07\x00` signature.
       assert.deepEqual(await readFileHead(out, 7), RAR4_SIG)
 
-      const { listEntriesDetailed, extractArchive } = await import('../index.js')
+      const { listEntriesDetailed, extractArchive } = await import('../rar-rs.js')
       const entries = await listEntriesDetailed(out)
       assert.equal(entries.length, 2)
       const text = entries.find((e) => e.name === 'text.txt')
@@ -646,7 +646,7 @@ test('creates and reads back a RAR 1.3/1.4 archive (format rar13)', async () => 
     // The DOS-era container carries the 4-byte `RE~^` signature.
     assert.deepEqual(await readFileHead(out, 4), RAR13_SIG)
 
-    const { listEntriesDetailed, extractArchive } = await import('../index.js')
+    const { listEntriesDetailed, extractArchive } = await import('../rar-rs.js')
     const entries = await listEntriesDetailed(out)
     assert.equal(entries.length, 2)
     const text = entries.find((e) => e.name === 'text.txt')
@@ -666,7 +666,7 @@ test('creates and reads back a RAR 1.3/1.4 archive (format rar13)', async () => 
 test('legacy rar15/rar2 writers compose solid + member password + header encryption', async () => {
   const dir = tempDir()
   try {
-    const { listEntriesDetailed, extractArchive } = await import('../index.js')
+    const { listEntriesDetailed, extractArchive } = await import('../rar-rs.js')
     for (const [fmt, version] of [
       ['rar2', 'v20'],
       ['rar15', 'v15'],
@@ -720,7 +720,7 @@ test('appendEntries keeps existing members and listEntries/deleteEntries work', 
       entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('alpha') }],
     })
 
-    const { appendEntries, listEntries, deleteEntries } = await import('../index.js')
+    const { appendEntries, listEntries, deleteEntries } = await import('../rar-rs.js')
     const res = await appendEntries({
       archivePath: out,
       level: 3,
@@ -739,7 +739,9 @@ test('appendEntries keeps existing members and listEntries/deleteEntries work', 
     assert.deepEqual(names, ['dir/b.txt'])
 
     await assert.rejects(listEntries(join(dir, 'missing.rar')), (error) => {
-      assert.equal(error.code, 'GenericFailure')
+      // A missing archive is an io failure, not an argument error (the CLI
+      // maps that category onto its exit 10).
+      assert.equal(error.rarCode, 'io')
       return true
     })
   } finally {
@@ -758,7 +760,7 @@ test('extractArchive restores members byte-identically (incl. flat and password)
       entries: [{ kind: 'bytes', name: 'sub/data.txt', data: payload }],
     })
 
-    const { extractArchive } = await import('../index.js')
+    const { extractArchive } = await import('../rar-rs.js')
     // Wrong password fails.
     await assert.rejects(
       extractArchive(out, { destPath: join(dir, 'bad'), password: 'nope' }),
@@ -788,7 +790,7 @@ test('listEntriesDetailed reports sizes and methods', async () => {
         { kind: 'bytes', name: 'b.bin', data: Buffer.alloc(4096, 7) },
       ],
     })
-    const { listEntriesDetailed } = await import('../index.js')
+    const { listEntriesDetailed } = await import('../rar-rs.js')
     const pendingEntries = listEntriesDetailed(out)
     assert.equal(
       typeof pendingEntries.then,
@@ -818,7 +820,7 @@ test('dictSize accepts powers of two up to 4 GiB and rejects invalid values', as
       dictSize: '64m',
       entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('data') }],
     })
-    const { listEntriesDetailed } = await import('../index.js')
+    const { listEntriesDetailed } = await import('../rar-rs.js')
     const entries = await listEntriesDetailed(out)
     assert.equal(entries.length, 1)
 
@@ -851,7 +853,8 @@ test('dictSize accepts powers of two up to 4 GiB and rejects invalid values', as
       /invalid dictionary size/,
     )
     // A syntactically valid dictionary above the core maximum reaches
-    // RarError::InvalidOption and must retain the InvalidArg code.
+    // `RarError::InvalidOption`, so the category is `invalid_option` (its
+    // N-API status stays `InvalidArg`).
     await assert.rejects(
       createArchive({
         outPath: join(dir, 'bad3.rar'),
@@ -859,6 +862,7 @@ test('dictSize accepts powers of two up to 4 GiB and rejects invalid values', as
         entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('data') }],
       }),
       (error) => {
+        assert.equal(error.rarCode, 'invalid_option')
         assert.equal(error.code, 'InvalidArg')
         return true
       },
@@ -945,7 +949,7 @@ test('listEntriesQuick matches listEntriesDetailed on a quickOpen archive', asyn
         { kind: 'bytes', name: 'b.bin', data: Buffer.alloc(8192, 3) },
       ],
     })
-    const { listEntriesDetailed, listEntriesQuick } = await import('../index.js')
+    const { listEntriesDetailed, listEntriesQuick } = await import('../rar-rs.js')
     const full = await listEntriesDetailed(out)
     const quick = await listEntriesQuick(out)
     assert.deepEqual(quick, full, 'QO fast path must list identically')
@@ -965,7 +969,7 @@ test('readMember returns a single member byte-exact', async () => {
     writeFileSync(src, content)
     const rar = join(dir, 'a.rar')
     await createArchive({ outPath: rar, entries: [{ kind: 'file', path: src }] })
-    const { readMember } = await import('../index.js')
+    const { readMember } = await import('../rar-rs.js')
     const pendingRead = readMember(rar, 'preview.txt')
     assert.equal(typeof pendingRead.then, 'function', 'readMember must be async')
     const data = Buffer.from(await pendingRead)
@@ -980,10 +984,136 @@ test('readMember returns a single member byte-exact', async () => {
   }
 })
 
+test('every rejection is a RarError carrying a stable rarCode', async () => {
+  const dir = tempDir()
+  try {
+    const mod = await import('../rar-rs.js')
+    const { createArchive, extractArchive, listEntries, readMember } = mod
+    const archive = join(dir, 'x.rar')
+    await createArchive({
+      outPath: archive,
+      password: 'pw',
+      entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('body') }],
+    })
+
+    // Each case names the category a caller would branch on, and the N-API
+    // status it also carries. Before this contract existed, the first five
+    // were all indistinguishable `InvalidArg`s and the last two were both
+    // `GenericFailure`.
+    const cases = [
+      ['wrong password', () => extractArchive(archive, { destPath: join(dir, 'o1'), password: 'nope' }), 'wrong_password', 'GenericFailure'],
+      ['missing member', () => readMember(archive, 'nope.txt', 'pw'), 'member_not_found', 'InvalidArg'],
+      ['malformed archive', async () => {
+        const bad = join(dir, 'bad.rar')
+        writeFileSync(bad, Buffer.from('not a rar archive'))
+        return listEntries(bad)
+      }, 'format', 'GenericFailure'],
+      ['missing archive', () => listEntries(join(dir, 'absent.rar')), 'io', 'GenericFailure'],
+      ['bad scalar option', () => createArchive({
+        outPath: join(dir, 'y.rar'),
+        level: 1.5,
+        entries: [{ kind: 'bytes', name: 'a', data: Buffer.from('x') }],
+      }), 'invalid_option', 'InvalidArg'],
+      ['bad entry kind', () => createArchive({
+        outPath: join(dir, 'z.rar'),
+        entries: [{ kind: 'gzip', name: 'a' }],
+      }), 'invalid_option', 'InvalidArg'],
+    ]
+
+    for (const [label, run, rarCode, status] of cases) {
+      await assert.rejects(run(), (error) => {
+        assert.equal(error.name, 'RarError', `${label}: class`)
+        assert.equal(error.rarCode, rarCode, `${label}: rarCode`)
+        assert.equal(error.code, status, `${label}: napi status`)
+        assert.ok(mod.isRarError(error), `${label}: isRarError`)
+        assert.ok(error instanceof mod.RarError, `${label}: instanceof`)
+        // The message never leaks the transport marker to the caller.
+        assert.doesNotMatch(error.message, /\[rar-rs:/, `${label}: marker stripped`)
+        return true
+      })
+    }
+
+    // A successful call is unaffected by the wrapping.
+    const names = await listEntries(archive, 'pw')
+    assert.deepEqual(names, ['a.txt'])
+    assert.equal(mod.isRarError(new Error('plain')), false)
+    assert.equal(mod.isCancellationError(new Error('plain')), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('extractArchive is structured and can collect per-member failures', async () => {
+  const dir = tempDir()
+  try {
+    const { extractArchive } = await import('../rar-rs.js')
+    const archive = join(dir, 'x.rar')
+    // Stored members so a byte flip is isolated to one of them.
+    await createArchive({
+      outPath: archive,
+      level: 0,
+      entries: [
+        { kind: 'bytes', name: 'good.bin', data: Buffer.alloc(40000, 0x41) },
+        { kind: 'bytes', name: 'bad.bin', data: Buffer.alloc(40000, 0x42) },
+      ],
+    })
+
+    // A clean run reports what landed and no failures.
+    const clean = await extractArchive(archive, { destPath: join(dir, 'clean') })
+    assert.deepEqual(
+      clean.written.map((p) => p.split(/[\\/]/).pop()).sort(),
+      ['bad.bin', 'good.bin'],
+    )
+    assert.deepEqual(clean.failures, [])
+    assert.deepEqual(clean.skipped, [])
+
+    // Corrupt payload bytes inside the first member.
+    const bytes = Buffer.from(readFileSync(archive))
+    for (let i = 200; i < 260; i++) bytes[i] ^= 0xff
+    const broken = join(dir, 'broken.rar')
+    writeFileSync(broken, bytes)
+
+    // Default: the first failing member rejects the whole call.
+    await assert.rejects(
+      extractArchive(broken, { destPath: join(dir, 'abort') }),
+      (error) => error.rarCode === 'crc_mismatch',
+    )
+
+    // collectErrors: the call resolves, names the failure, and still writes
+    // the members that were intact.
+    const collected = await extractArchive(broken, {
+      destPath: join(dir, 'collect'),
+      collectErrors: true,
+    })
+    assert.equal(collected.failures.length, 1, 'exactly one member is damaged')
+    assert.equal(collected.failures[0].name, 'good.bin')
+    assert.equal(typeof collected.failures[0].index, 'number')
+    assert.match(collected.failures[0].message, /CRC/i)
+    assert.equal(collected.written.length, 1, 'the intact member still lands')
+
+    // Progress is reported, monotonic, and ends at 100%.
+    const events = []
+    await extractArchive(
+      archive,
+      { destPath: join(dir, 'progress') },
+      (_err, p) => events.push([p.done, p.total]),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.ok(events.length > 0, 'no progress events')
+    for (let i = 1; i < events.length; i++) {
+      assert.ok(events[i][0] >= events[i - 1][0], `progress went backwards at ${i}`)
+    }
+    const [done, total] = events.at(-1)
+    assert.ok(total > 0 && done === total, `must end at 100%, got ${done}/${total}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('core errors expose stable napi codes and archive testing is async', async () => {
   const dir = tempDir()
   try {
-    const { listEntries, readMember, testArchive } = await import('../index.js')
+    const { listEntries, readMember, testArchive } = await import('../rar-rs.js')
     const plain = join(dir, 'plain.rar')
     await createArchive({
       outPath: plain,
@@ -991,7 +1121,7 @@ test('core errors expose stable napi codes and archive testing is async', async 
     })
 
     await assert.rejects(readMember(plain, 'missing.txt'), (error) => {
-      assert.equal(error.code, 'InvalidArg')
+      assert.equal(error.rarCode, 'member_not_found')
       return true
     })
 
@@ -1002,14 +1132,14 @@ test('core errors expose stable napi codes and archive testing is async', async 
       entries: [{ kind: 'bytes', name: 'secret.txt', data: Buffer.from('secret') }],
     })
     await assert.rejects(readMember(encrypted, 'secret.txt', 'wrong'), (error) => {
-      assert.equal(error.code, 'InvalidArg')
+      assert.equal(error.rarCode, 'wrong_password')
       return true
     })
 
     const malformed = join(dir, 'malformed.rar')
     writeFileSync(malformed, Buffer.from('not a rar archive'))
     await assert.rejects(listEntries(malformed), (error) => {
-      assert.equal(error.code, 'InvalidArg')
+      assert.equal(error.rarCode, 'format')
       return true
     })
 
@@ -1051,7 +1181,7 @@ test('listEntriesQuick falls back on an archive without quickOpen', async () => 
       outPath: out,
       entries: [{ kind: 'bytes', name: 'x.txt', data: Buffer.from('plain') }],
     })
-    const { listEntriesQuick } = await import('../index.js')
+    const { listEntriesQuick } = await import('../rar-rs.js')
     const quick = await listEntriesQuick(out)
     assert.equal(quick.length, 1)
     assert.equal(quick[0].name, 'x.txt')
@@ -1082,7 +1212,7 @@ test('repairArchive streams a damaged archive back to byte-exact', async () => {
     const damaged = join(dir, 'damaged.rar')
     writeFileSync(damaged, bytes)
 
-    const { repairArchive } = await import('../index.js')
+    const { repairArchive } = await import('../rar-rs.js')
     const fixed = join(dir, 'fixed.rar')
     assert.equal(await repairArchive(damaged, fixed), true, 'damage must be reported')
     assert.equal(existsSync(fixed), true)
@@ -1100,7 +1230,7 @@ test('repairArchive streams a damaged archive back to byte-exact', async () => {
 test('rebuildMissingVolumes restores a deleted middle volume from .rev parity', async () => {
   const dir = tempDir()
   try {
-    const { rebuildMissingVolumes, listEntries, readMember } = await import('../index.js')
+    const { rebuildMissingVolumes, listEntries, readMember } = await import('../rar-rs.js')
     // Incompressible payloads (level 0) so the set splits at volume_size.
     const payloadA = Buffer.alloc(120_000)
     const payloadB = Buffer.alloc(60_000)
@@ -1173,7 +1303,7 @@ test('renameEntries renames members by name (like rar rn)', async () => {
       ],
     })
 
-    const { renameEntries, listEntries, readMember } = await import('../index.js')
+    const { renameEntries, listEntries, readMember } = await import('../rar-rs.js')
     const pendingRename = renameEntries(out, [{ from: 'alpha.txt', to: 'renamed.txt' }])
     assert.equal(typeof pendingRename.then, 'function', 'renameEntries must be async')
     assert.equal(await pendingRename, 1)
@@ -1203,7 +1333,7 @@ test('setComment sets and removes the archive comment (like rar c)', async () =>
       entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('alpha') }],
     })
 
-    const { setComment } = await import('../index.js')
+    const { setComment } = await import('../rar-rs.js')
     const pendingComment = setComment(out, 'my-comment-marker-42')
     assert.equal(typeof pendingComment.then, 'function', 'setComment must be async')
 
@@ -1237,7 +1367,7 @@ test('setRecovery rebuilds the inline recovery record (like rar rr)', async () =
     // No recovery record yet.
     await createArchive({ outPath: good, entries: [{ kind: 'file', path: src }] })
 
-    const { setRecovery, repairArchive } = await import('../index.js')
+    const { setRecovery, repairArchive } = await import('../rar-rs.js')
     await setRecovery(good, 10)
 
     // Corrupt protected data and repair: must now be byte-exact.
@@ -1268,7 +1398,7 @@ test('lockArchive makes the archive read-only (like rar k)', async () => {
       entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('alpha') }],
     })
 
-    const { lockArchive, deleteEntries } = await import('../index.js')
+    const { lockArchive, deleteEntries } = await import('../rar-rs.js')
     await lockArchive(out)
     await assert.rejects(deleteEntries(out, ['a.txt']), (error) => {
       assert.equal(error.code, 'GenericFailure')
@@ -1292,7 +1422,7 @@ test('listEntriesDetailed reports extended metadata (crc32, dates, version, soli
       ],
     })
 
-    const { listEntriesDetailed } = await import('../index.js')
+    const { listEntriesDetailed } = await import('../rar-rs.js')
     const entries = await listEntriesDetailed(out)
     assert.equal(entries.length, 2)
     const a = entries.find((e) => e.name === 'a.txt')
@@ -1326,7 +1456,7 @@ test('listEntriesDetailed reports extended metadata (crc32, dates, version, soli
 test('createArchive format selects rar4, rar5, and rar7 containers', async () => {
   const dir = tempDir()
   try {
-    const { listEntriesDetailed, readMember } = await import('../index.js')
+    const { listEntriesDetailed, readMember } = await import('../rar-rs.js')
 
     // RAR4 (legacy 7-byte signature, unp_ver 29 from the RAR4 pipeline).
     const r4 = join(dir, 'legacy.rar')
@@ -1432,7 +1562,7 @@ test('extractMember streams one member to a directory', async () => {
       ],
     })
 
-    const { extractMember } = await import('../index.js')
+    const { extractMember } = await import('../rar-rs.js')
     const dest = join(dir, 'out')
     const pending = extractMember(out, 'sub/target.txt', dest)
     assert.equal(typeof pending.then, 'function', 'extractMember must be async')
@@ -1470,7 +1600,7 @@ test('extractArchive honors overwrite policies (skipExisting, autoRename)', asyn
       entries: [{ kind: 'bytes', name: 'notes/a.txt', data: Buffer.from('new conent ') }],
     })
 
-    const { extractArchive, readMember } = await import('../index.js')
+    const { extractArchive, readMember } = await import('../rar-rs.js')
 
     // flat: true so members land directly in the destination (basename) and
     // the pre-seeded files below collide with the extraction targets.
@@ -1515,7 +1645,7 @@ test('extractArchive honors freshen and update (-f/-u)', async () => {
       outPath: out,
       entries: [{ kind: 'bytes', name: 'a.txt', data: Buffer.from('archived') }],
     })
-    const { extractArchive } = await import('../index.js')
+    const { extractArchive } = await import('../rar-rs.js')
     const old = new Date('2001-01-01T00:00:00Z')
     const future = new Date('2035-01-01T00:00:00Z')
 
@@ -1567,18 +1697,20 @@ test('extractArchive enforces the size limits and threads option', async () => {
       outPath: out,
       entries: [{ kind: 'bytes', name: 'big.bin', data: payload }],
     })
-    const { extractArchive } = await import('../index.js')
+    const { extractArchive } = await import('../rar-rs.js')
 
     await assert.rejects(
       extractArchive(out, { destPath: join(dir, 'per-member'), maxUnpackedBytes: 100 }),
-      (error) => error.code === 'InvalidArg',
+      // The per-member cap is enforced by the library, so it reports the
+      // `limit_exceeded` category rather than the JS argument status.
+      (error) => error.rarCode === 'limit_exceeded',
     )
     await assert.rejects(
       extractArchive(out, {
         destPath: join(dir, 'total'),
         maxTotalUnpackedBytes: 100,
       }),
-      (error) => error.code === 'InvalidArg',
+      (error) => error.rarCode === 'limit_exceeded',
     )
 
     // Unset or 0 means unbounded, and a per-run thread count is accepted.
@@ -1598,7 +1730,7 @@ test('extractArchive enforces the size limits and threads option', async () => {
 test('createArchive recoverySectors is the legacy RAR4 sector count', async () => {
   const dir = tempDir()
   try {
-    const { readMember } = await import('../index.js')
+    const { readMember } = await import('../rar-rs.js')
     const payload = Buffer.alloc(60_000, 0x41)
     const plain = join(dir, 'plain.rar')
     const withRr = join(dir, 'with-rr.rar')
@@ -1660,7 +1792,7 @@ test(
   async () => {
     const dir = tempDir()
     try {
-      const { extractArchive } = await import('../index.js')
+      const { extractArchive } = await import('../rar-rs.js')
       const archive = join(dir, 'names.rar')
       await createArchive({
         outPath: archive,
