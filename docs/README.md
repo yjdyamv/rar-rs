@@ -24,11 +24,11 @@
 | 领域词汇 / 术语                               | [`../CONTEXT.md`](../CONTEXT.md)                                                                                       |
 | 模块地图 / 分层 / 设计不变量 / CLI 与测试布局 | [`ARCHITECTURE.md`](ARCHITECTURE.md)                                                                                   |
 | CLI 命令、开关与退出码                        | [`CLI.md`](CLI.md)                                                                                                     |
-| **长期规则、契约与地雷**                      | [`PITFALLS.md`](PITFALLS.md)                                                                                           |
+| **长期规则、契约与地雷（含公开 API 契约）**   | [`PITFALLS.md`](PITFALLS.md)                                                                                           |
 | 下一步 / 现状 / 开放议题 / 已知小差异         | [`../PLAN.md`](../PLAN.md)                                                                                             |
 | 磁盘格式（字节级）                            | [`FORMAT_RAR5_RAR7.html`](FORMAT_RAR5_RAR7.html)                                                                       |
 | 架构决策                                      | [`adr/`](adr/)                                                                                                         |
-| 压缩性能议题、契约与已否决方向                | [`../PLAN.md`](../PLAN.md)「P2 性能」段 + [`issues/compression-perf/`](issues/compression-perf/)                       |
+| 压缩性能议题、契约与已否决方向                | [`../PLAN.md`](../PLAN.md)「性能」段 + [`issues/compression-perf/`](issues/compression-perf/)                          |
 | 测试怎么跑 / 耗时                             | [`testing.md`](testing.md)                                                                                             |
 | fuzz 目标                                     | [`../fuzz/README.md`](../fuzz/README.md)                                                                               |
 | 法务与许可                                    | [`../NOTICE`](../NOTICE) · [`../THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) · [`../LICENSES/`](../LICENSES/) |
