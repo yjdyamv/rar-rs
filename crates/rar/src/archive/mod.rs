@@ -60,7 +60,7 @@ pub(crate) use crate::engine::{
 
 pub use crate::engine::discover_volumes;
 pub use crate::engine::{ArchiveEntry, BatchEntry, StreamInfo};
-pub use crate::format::shared::extract::ExtractionReport;
+pub use crate::format::shared::extract::{ExtractionFailure, ExtractionReport};
 pub(crate) use crate::fs::volume::{
     volume_base_of, volume_path, volume_path_padded, volume_path_rar4,
 };

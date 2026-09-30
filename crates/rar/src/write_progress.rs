@@ -142,6 +142,29 @@ impl ProgressTracker {
             }));
         }
     }
+
+    /// Report that the operation as a whole has produced `done` bytes.
+    ///
+    /// `done` is an absolute position, not a delta, so the caller can report a
+    /// running byte count without keeping its own baseline. The reading is
+    /// clamped to be monotonic, and a total that was never set adopts `done`
+    /// so a single-member run still reports a sensible percentage.
+    pub(crate) fn report_total(&mut self, done: u64) {
+        if self.total == 0 {
+            self.total = done;
+        }
+        let committed = done.min(self.total);
+        if committed <= self.committed {
+            return;
+        }
+        self.committed = committed;
+        if let Some(cb) = self.callback.as_mut() {
+            let total = self.total;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cb(committed, total);
+            }));
+        }
+    }
 }
 
 #[cfg(test)]

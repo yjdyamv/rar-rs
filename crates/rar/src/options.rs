@@ -517,7 +517,15 @@ impl Default for CreateOptions {
 /// decision where it actually matters — the CLI's `ExtractRequest::options`
 /// and the Node binding's option mapping list every field on purpose, while
 /// tests and examples stay untouched.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # Equality
+///
+/// [`PartialEq`] compares every policy field but deliberately ignores
+/// [`on_progress`](Self::on_progress): closures are not comparable, and two
+/// runs configured identically except for their progress sink are the same
+/// policy. Use [`same_policy_as`](Self::same_policy_as) when the intent needs
+/// to be explicit in a test.
+#[derive(Clone)]
 pub struct ExtractOptions {
     /// Reject member names that could escape the destination directory
     /// (absolute paths, `..`, Windows drive components, NUL bytes) and
@@ -619,6 +627,34 @@ pub struct ExtractOptions {
     /// it on for `-ver` without a number, where WinRAR extracts every version
     /// keeping the version in the file name.
     pub file_version_suffix: bool,
+    /// What a whole-archive extraction does when one member fails to decode,
+    /// verify, or install.
+    ///
+    /// [`ExtractErrorPolicy::Abort`] (the default) propagates the first
+    /// failure out of the run, matching WinRAR. [`Collect`](ExtractErrorPolicy::Collect)
+    /// keeps going and records every failure in
+    /// [`ExtractionReport::failures`](crate::ExtractionReport::failures), so a
+    /// front end can report which members it could not extract instead of
+    /// losing the whole run to the first bad one. A cancellation is never
+    /// collected: it always aborts.
+    pub error_policy: ExtractErrorPolicy,
+    /// Progress callback for a whole-archive extraction, invoked as
+    /// `(bytes_written, bytes_total)` where `bytes_total` is the summed
+    /// uncompressed size of the catalog.
+    ///
+    /// **Granularity:** `bytes_written` advances once per member, after that
+    /// member has been fully written and installed. Members are staged through
+    /// a temporary sibling and installed, so there is no meaningful
+    /// intermediate byte count to publish — but a run dominated by one very
+    /// large member therefore reports little until it lands.
+    ///
+    /// Like [`Self::threads`] the sink is scoped to one run, so concurrent
+    /// extractions do not observe each other's progress. It is a per-run
+    /// policy rather than a reader setting because two extractions through one
+    /// reader must be able to report to different callers. The callback runs
+    /// on the extracting thread and a panic inside it is swallowed, so it
+    /// cannot abort the extraction.
+    pub on_progress: Option<ExtractionProgress>,
 }
 
 impl ExtractOptions {
@@ -635,6 +671,108 @@ impl ExtractOptions {
     /// The effective service-payload ceiling; `None` means unbounded.
     pub(crate) fn metadata_limit(&self) -> u64 {
         self.max_metadata_bytes.unwrap_or(u64::MAX)
+    }
+
+    /// Whether `other` carries the same extraction policy as `self`.
+    ///
+    /// Equivalent to `==` except that it says out loud that the progress
+    /// callback is not part of the comparison (see the type's notes on
+    /// equality).
+    pub fn same_policy_as(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+impl PartialEq for ExtractOptions {
+    /// Compares every policy field; [`Self::on_progress`] is ignored because
+    /// closures are not comparable.
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            safe_paths,
+            allow_incompatible_names,
+            max_unpacked_bytes,
+            max_total_unpacked_bytes,
+            threads,
+            mark_web,
+            flat_paths,
+            skip_existing,
+            auto_rename,
+            prompt_overwrite,
+            freshen,
+            update,
+            keep_broken,
+            set_creation_time,
+            set_access_time,
+            max_dict_size,
+            max_metadata_bytes,
+            skip_links,
+            allow_unsafe_links,
+            file_version_suffix,
+            error_policy,
+            // Not comparable by design.
+            on_progress: _,
+        } = self;
+        *safe_paths == other.safe_paths
+            && *allow_incompatible_names == other.allow_incompatible_names
+            && *max_unpacked_bytes == other.max_unpacked_bytes
+            && *max_total_unpacked_bytes == other.max_total_unpacked_bytes
+            && *threads == other.threads
+            && *mark_web == other.mark_web
+            && *flat_paths == other.flat_paths
+            && *skip_existing == other.skip_existing
+            && *auto_rename == other.auto_rename
+            && *prompt_overwrite == other.prompt_overwrite
+            && *freshen == other.freshen
+            && *update == other.update
+            && *keep_broken == other.keep_broken
+            && *set_creation_time == other.set_creation_time
+            && *set_access_time == other.set_access_time
+            && *max_dict_size == other.max_dict_size
+            && *max_metadata_bytes == other.max_metadata_bytes
+            && *skip_links == other.skip_links
+            && *allow_unsafe_links == other.allow_unsafe_links
+            && *file_version_suffix == other.file_version_suffix
+            && *error_policy == other.error_policy
+    }
+}
+
+impl Eq for ExtractOptions {}
+
+impl std::fmt::Debug for ExtractOptions {
+    /// Renders every policy field; the progress sink is shown as installed or
+    /// not, since a closure has no meaningful representation.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractOptions")
+            .field("safe_paths", &self.safe_paths)
+            .field("allow_incompatible_names", &self.allow_incompatible_names)
+            .field("max_unpacked_bytes", &self.max_unpacked_bytes)
+            .field("max_total_unpacked_bytes", &self.max_total_unpacked_bytes)
+            .field("threads", &self.threads)
+            .field("mark_web", &self.mark_web)
+            .field("flat_paths", &self.flat_paths)
+            .field("skip_existing", &self.skip_existing)
+            .field("auto_rename", &self.auto_rename)
+            .field("prompt_overwrite", &self.prompt_overwrite)
+            .field("freshen", &self.freshen)
+            .field("update", &self.update)
+            .field("keep_broken", &self.keep_broken)
+            .field("set_creation_time", &self.set_creation_time)
+            .field("set_access_time", &self.set_access_time)
+            .field("max_dict_size", &self.max_dict_size)
+            .field("max_metadata_bytes", &self.max_metadata_bytes)
+            .field("skip_links", &self.skip_links)
+            .field("allow_unsafe_links", &self.allow_unsafe_links)
+            .field("file_version_suffix", &self.file_version_suffix)
+            .field("error_policy", &self.error_policy)
+            .field(
+                "on_progress",
+                &if self.on_progress.is_some() {
+                    "Some(callback)"
+                } else {
+                    "None"
+                },
+            )
+            .finish()
     }
 }
 
@@ -661,9 +799,53 @@ impl Default for ExtractOptions {
             skip_links: false,
             allow_unsafe_links: false,
             file_version_suffix: false,
+            error_policy: ExtractErrorPolicy::Abort,
+            on_progress: None,
         }
     }
 }
+
+/// What a whole-archive extraction does when one member fails.
+///
+/// The default keeps WinRAR's behaviour: the first failing member ends the
+/// run. A front end that wants to report per-member progress and outcome
+/// (an editor, a backup tool) usually wants
+/// [`Collect`](Self::Collect) instead, so one unreadable member does not hide
+/// the rest of the archive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ExtractErrorPolicy {
+    /// Stop at the first failing member and return its error. The default.
+    #[default]
+    Abort,
+    /// Record a failing member in the report and continue with the next one.
+    ///
+    /// The run still succeeds (returning a report whose
+    /// [`failures`](crate::ExtractionReport::failures) is non-empty), so a
+    /// caller that wants a non-zero outcome must check
+    /// [`failed_count`](crate::ExtractionReport::failed_count) itself — this
+    /// layer does not guess whether a partial result is acceptable.
+    /// Cancellation always aborts regardless of this setting.
+    Collect,
+}
+
+/// Progress sink for one whole-archive extraction.
+///
+/// Cloning [`ExtractOptions`] shares the sink, so the run that consumes it and
+/// the options value it came from report to the same callback. It is a trait
+/// object behind an `Arc<Mutex<..>>` rather than a bare `Box<dyn FnMut>` on
+/// purpose: `ExtractOptions` must stay `Clone` (the reader stores a copy per
+/// call) and `Send` (one extraction may run its writes on pool threads).
+///
+/// Reach it through [`ExtractOptions::on_progress`]; the callback is invoked
+/// as `(bytes_written, bytes_total)`.
+pub type ExtractionProgress = std::sync::Arc<std::sync::Mutex<Option<ExtractionCallback>>>;
+
+/// The bare callback an [`ExtractionProgress`] sink carries.
+///
+/// The extraction run takes the closure out of the sink and moves it into its
+/// own tracker, so the sink never allocates a second wrapper around it.
+pub type ExtractionCallback = Box<dyn FnMut(u64, u64) + Send>;
 
 /// The answer the interactive overwrite prompt gave for one destination
 /// (WinRAR's `Y`/`N`/`A`/`R`/`Q` on an existing file).
