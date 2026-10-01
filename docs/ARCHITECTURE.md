@@ -1,7 +1,8 @@
 # 架构与模块布局
 
-> 最后核对：2026-09-28 @ `a5e6685`（本轮：把架构级规则从 `PLAN.md` 收进本文件与
-> [`PITFALLS.md`](PITFALLS.md)）；实现细节以源码为准。
+> 最后核对：2026-10-02 @ `1a8aa04`（本轮：抽取的进度 sink 与失败策略收敛到
+> `format/shared/extract/members.rs` 的两个函数，见 §2「引擎接缝」后的说明）；
+> 实现细节以源码为准。
 
 库 crate `crates/rar`（crate 名 `rar-rs`）的模块地图与设计不变量。
 
@@ -139,8 +140,20 @@ version`，以及 `crates/rar-napi/package.json` 的
   格式中性成员写门面（`write_ops.rs`：`add*` 分发 + solid 链重置）。
 
 `format/shared` 不是“与格式无关”，而是**派发与适配层**：跨族的 family
-match（`extract/mod.rs`、`write_ops.rs`）集中在这里，RAR5-only 的概念
-（redirect、STM/ADS、并行抽取、blake2 校验）经 `entry_ext` 与 `extract/*` 适配。
+match（`extract/mod.rs`、`write_ops.rs`）集中在这里，RAR5-only
+的概念（redirect、STM/ADS、并行抽取、blake2 校验）经 `entry_ext` 与 `extract/*`
+适配。
+
+**多成员抽取的两个 owner。** `extract/members.rs` 里的 `start_progress` 与
+`record_member_outcome` 是抽取循环仅剩的两个共享决策点：装进度 tracker（**借用**
+调用方的 sink，逐成员基线留在本轮 tracker）与解释单个成员的成败（推进进度 +
+`error_policy`）。整档路径与按 id
+路径（`ArchiveReader::extract_ids_with_options`， 经 `archive/ops.rs` 的
+`start_extraction_progress` / `record_extraction_outcome`
+接缝调用）都必须走它们——两条循环各自实现一遍， `Collect` 就会因为「id
+列表是否恰好覆盖整档」而给出两种行为，那正是 CLI 每一 次带选择器的 `x`/`e`
+会踩到的分支。`ExtractionFailure::index` 在两条路径上 都是**目录序号**，不是 id
+列表下标。
 
 - `codec/modern/lzss_huff/` — **公开**：RAR5 LZSS+Huffman 编解码器。
   `codec/mod.rs` 重导出整个模块（`encode*` / `decode*` / `analyze_stream` /
