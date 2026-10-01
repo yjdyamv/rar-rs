@@ -362,6 +362,82 @@ pub(crate) fn validate_entry_limits(cx: &dyn Engine, idx: usize) -> RarResult<()
     Ok(())
 }
 
+/// Start the per-run progress tracker for `on_progress`, reporting against
+/// `total` (the summed uncompressed size of the members this run will write).
+///
+/// The caller's closure is **borrowed through a clone of the shared sink, not
+/// taken out of it**. `ExtractOptions` is `Clone` and documents that a clone
+/// reports to the same callback, so consuming the closure here would silence
+/// every later run that reuses the value — silently, since the sink is an
+/// `Option` and an emptied one just looks like "no callback". The per-member
+/// baseline lives in the fresh tracker, so two runs sharing one sink each
+/// count from their own zero and both reach their own total.
+///
+/// Returns `None` when the caller installed no sink, and reports nothing when
+/// the sink is poisoned (an earlier callback panicked on a build where the
+/// guard was not held), matching the writer's "a bad callback cannot break the
+/// operation" policy.
+pub(crate) fn start_progress(
+    on_progress: Option<crate::options::ExtractionProgress>,
+    total: u64,
+) -> Option<std::sync::Arc<std::sync::Mutex<crate::write_progress::ProgressTracker>>> {
+    let sink = on_progress?;
+    let callback: crate::options::ExtractionCallback = Box::new(move |committed, total| {
+        if let Ok(mut guard) = sink.lock()
+            && let Some(callback) = guard.as_mut()
+        {
+            callback(committed, total);
+        }
+    });
+    let mut tracker = crate::write_progress::ProgressTracker::new(Some(callback));
+    tracker.set_total(total);
+    Some(std::sync::Arc::new(std::sync::Mutex::new(tracker)))
+}
+
+/// The one place a multi-member extraction decides what a member's outcome
+/// means: advance progress for a member that landed, then apply
+/// `error_policy` — [`ExtractErrorPolicy::Abort`] propagates the first
+/// failure, [`ExtractErrorPolicy::Collect`] records it and lets the run
+/// continue.
+///
+/// Both extraction loops call this (the whole-archive one and the
+/// id-selected one behind [`ArchiveReader::extract_ids_with_options`]), so
+/// `Collect` cannot mean "abort" on one of them. A cancellation is the
+/// caller's own request, never a per-member failure, so it always aborts.
+pub(crate) fn record_member_outcome(
+    member: usize,
+    name: &str,
+    size: u64,
+    outcome: RarResult<PathBuf>,
+    policy: crate::options::ExtractErrorPolicy,
+    report: &mut ExtractionReport,
+    progress: Option<&std::sync::Arc<std::sync::Mutex<crate::write_progress::ProgressTracker>>>,
+) -> RarResult<()> {
+    match outcome {
+        Ok(_) => {
+            if let Some(progress) = progress {
+                progress
+                    .lock()
+                    .expect("progress lock")
+                    .report(member, size, size);
+            }
+            Ok(())
+        }
+        Err(error) if error.code() == crate::ErrorCode::Cancelled => Err(error),
+        Err(error) => match policy {
+            crate::options::ExtractErrorPolicy::Abort => Err(error),
+            crate::options::ExtractErrorPolicy::Collect => {
+                report.record_failure(ExtractionFailure {
+                    name: name.to_string(),
+                    index: member,
+                    error,
+                });
+                Ok(())
+            }
+        },
+    }
+}
+
 /// Extract all archive contents with explicit options, returning what was
 /// written and what the skip-existing policy left untouched.
 pub(crate) fn extract_all_with_options(
@@ -377,34 +453,17 @@ pub(crate) fn extract_all_with_options(
     crate::format::shared::extract::ensure_full_catalog(cx)?;
 
     // The progress total is the whole catalog's uncompressed size, known only
-    // after the full catalog exists. Wrapping the caller's callback here keeps
-    // the reporting monotonic across the serial path's per-member completion
-    // and the parallel path's replay.
-    let progress = {
-        let total: u64 = cx
-            .entries()
-            .iter()
-            .map(|entry| entry.header.unpacked_size)
-            .fold(0u64, u64::saturating_add);
-        opts.on_progress.take().map(|sink| {
-            // Move the caller's closure into the run's tracker. A poisoned
-            // sink yields `None` and the run proceeds without progress,
-            // matching the writer's "a bad callback cannot break the
-            // operation" policy.
-            let callback: Option<crate::options::ExtractionCallback> = sink
-                .lock()
-                .ok()
-                .map(|mut guard| guard.take())
-                .unwrap_or(None);
-            let mut tracker = crate::write_progress::ProgressTracker::new(callback);
-            tracker.set_total(total);
-            std::sync::Arc::new(std::sync::Mutex::new(tracker))
-        })
-    };
+    // after the full catalog exists.
+    let total: u64 = cx
+        .entries()
+        .iter()
+        .map(|entry| entry.header.unpacked_size)
+        .fold(0u64, u64::saturating_add);
+    let progress = start_progress(opts.on_progress.take(), total);
 
     #[cfg(feature = "parallel")]
     {
-        if let Some(report) = extract_all_parallel(cx, dest, opts.clone(), progress.as_ref())? {
+        if let Some(report) = extract_all_parallel(cx, dest, opts.clone())? {
             return Ok(report);
         }
     }
@@ -433,30 +492,16 @@ pub(crate) fn extract_all_with_options(
                 ),
             ));
         }
-        match extract_entry(cx, index, entry, dest, &mut report) {
-            Ok(_path) => {
-                if let Some(progress) = &progress {
-                    progress.lock().expect("progress lock").report(
-                        index,
-                        entry.header.unpacked_size,
-                        entry.header.unpacked_size,
-                    );
-                }
-            }
-            // A cancellation is the caller's own request: it is never a
-            // per-member failure and always ends the run.
-            Err(error) if error.code() == crate::ErrorCode::Cancelled => return Err(error),
-            Err(error) => match opts.error_policy {
-                crate::options::ExtractErrorPolicy::Abort => return Err(error),
-                crate::options::ExtractErrorPolicy::Collect => {
-                    report.record_failure(ExtractionFailure {
-                        name: entry.name().to_string(),
-                        index,
-                        error,
-                    });
-                }
-            },
-        }
+        let outcome = extract_entry(cx, index, entry, dest, &mut report);
+        record_member_outcome(
+            index,
+            entry.name(),
+            entry.header.unpacked_size,
+            outcome,
+            opts.error_policy,
+            &mut report,
+            progress.as_ref(),
+        )?;
     }
     // Under `Collect` the report is the outcome even when nothing landed:
     // `failed_count()` and `is_empty()` let the caller decide whether an
@@ -482,7 +527,6 @@ fn extract_all_parallel(
     cx: &mut dyn Engine,
     dest: &Path,
     opts: crate::options::ExtractOptions,
-    progress: Option<&std::sync::Arc<std::sync::Mutex<crate::write_progress::ProgressTracker>>>,
 ) -> RarResult<Option<ExtractionReport>> {
     use rayon::prelude::*;
 
@@ -501,8 +545,10 @@ fn extract_all_parallel(
     if opts.error_policy != crate::options::ExtractErrorPolicy::Abort {
         return Ok(None);
     }
+    // Progress is per-member, so it needs the serial ordering this path
+    // gives up; a run that asked for progress reports from the serial loop.
     if cx.progress_slot().is_some()
-        || progress.is_some()
+        || opts.on_progress.is_some()
         || cx.entries().len() < PARALLEL_MIN_MEMBERS
     {
         return Ok(None);
@@ -663,13 +709,6 @@ fn extract_all_parallel(
             Ok(())
         })?;
         finish_member(cx, idx, &entry, dest_path, &mut report)?;
-        if let Some(progress) = progress {
-            progress.lock().expect("progress lock").report(
-                idx,
-                entry.header.unpacked_size,
-                entry.header.unpacked_size,
-            );
-        }
     }
     Ok(Some(report))
 }

@@ -7,11 +7,13 @@
 //! (`env.create_error` in napi-rs: `napi_create_error(env, error_code,
 //! reason, ...)` with `error_code = status`). So the stable library
 //! [`ErrorCode`](rar_rs::ErrorCode) rides inside the message behind
-//! [`CODE_MARKER`], and `index.js` parses it back out into a real `RarError`
+//! [`CODE_MARKER`], and `rar-rs.js` parses it back out into a real `RarError`
 //! with `code`, `rarCode` and a clean `message`.
 //!
-//! Keep [`CODE_MARKER`] and the code strings in sync with `index.js` and the
-//! `RarErrorCode` union in the checked-in `index.d.ts`.
+//! Keep [`CODE_MARKER`] and the code strings in sync with `rar-rs.js` and the
+//! `RarErrorCode` union in the checked-in `rar-rs.d.ts`. Neither may be
+//! renamed to a name `napi build` generates: see the naming rule in
+//! `docs/PITFALLS.md`.
 
 use napi::bindgen_prelude::*;
 

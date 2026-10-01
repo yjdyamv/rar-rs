@@ -234,9 +234,24 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   记录进 `ExtractionReport::failures` 后继续，
   **整轮仍算成功**（是否把"部分成功"当失败由调用方判断，本层不猜）。**取消永不收集**，始终中止。绑定侧即
   `ExtractArchiveOptions.collectErrors` + `ExtractionResult.failures`。
+  **两条抽取路径必须共用同一个实现**（`members.rs::record_member_outcome`），
+  否则同一个 `ExtractOptions` 会因为「id 列表是否恰好覆盖整档」而给出两种行为
+  ——CLI 的每一次带选择器的 `x`/`e` 都走按 id 那条，2026-09-30 修的就是它： 按 id
+  路径曾经直接 `?` 抛出，`Collect` 静默退化成 `Abort`。
+- **进度 sink 只借用，绝不取走**：`ExtractionProgress` 是
+  `Arc<Mutex<Option<Box<dyn FnMut>>>>`，抽取**不得** `guard.take()` 把调用方的
+  闭包移进本轮 tracker——`ExtractOptions` 是 `Clone`
+  且文档承诺「克隆体报告给同一个 回调」，取走之后第二轮静默无报告，而被清空的
+  `Option` 看起来只是"没装回调"。 正确做法（`members.rs::start_progress`）：克隆
+  Arc，把闭包**包**进本轮 tracker，逐成员基线留在 tracker 里，于是复用同一
+  options 值的两轮各自从 0 走到自己的 `total`。同理，`bytes_total`
+  是**本轮将写的成员**之和：按 id 抽取 时是被选中的那些，否则过滤抽取永远走不到
+  100%。
 - **并行提取必须给逐成员语义让路**：开了进度回调、或策略不是 `Abort` 时，
   `extract_all_parallel` 一律返回 `None`
   退回串行——它先把所有成员解码完，"在第一个失败处停下"根本无法实现，与其猜不如让路。改这些条件前先想清楚顺序语义。
+  （因此该函数**不接** progress tracker：资格条件已经排除了它的存在，
+  传进去只会留一段永不执行的报告代码。）
 - **提取进度的粒度是逐成员，且不许倒退**：成员经临时兄弟文件**原子安装**，中途没有可发布的字节数；因此
   `on_progress` 的 `bytes_written`
   在一个成员落盘后才前进（单个巨成员会长时间只报很少）。终态事件必须重发**库给出的真实总量**，写

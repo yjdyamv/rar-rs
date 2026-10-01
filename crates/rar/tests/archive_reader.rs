@@ -3,7 +3,8 @@ use std::io::{Seek, SeekFrom, Write};
 
 use rar_rs::{
     ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EntryWriteOptions, ErrorCode,
-    ExtractOptions, OpenOptions, RarError, ScanStrategy, SolidMode, WriterOptions,
+    ExtractErrorPolicy, ExtractOptions, OpenOptions, RarError, ScanStrategy, SolidMode,
+    WriterOptions,
 };
 
 struct FailAfter {
@@ -382,4 +383,173 @@ fn extraction_reports_written_and_skipped_members() {
         std::fs::read(output.join("same.bin")).expect("kept output"),
         b"first payload"
     );
+}
+
+/// Three named members, for the progress tests that need a catalog whose
+/// per-member sizes differ from its total.
+fn create_numbered_archive(path: &std::path::Path) {
+    let opts = EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap());
+    let mut archive = ArchiveWriter::create(path).expect("create archive");
+    for (index, size) in [400usize, 700, 900].into_iter().enumerate() {
+        archive
+            .add_bytes(&format!("f{index}.bin"), &vec![b'x'; size], opts)
+            .expect("add member");
+    }
+    archive.finish().expect("close archive");
+}
+
+/// Every `(committed, total)` a counting sink was handed.
+type ProgressLog = std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>>;
+
+/// A sink that records every `(committed, total)` it is handed.
+fn counting_sink() -> (rar_rs::ExtractionProgress, ProgressLog) {
+    let seen: ProgressLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let sink: rar_rs::ExtractionProgress = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        Box::new(move |committed, total| {
+            recorder.lock().expect("recorder").push((committed, total));
+        }),
+    )));
+    (sink, seen)
+}
+
+/// The sink is borrowed, not consumed: `ExtractOptions` is `Clone` and its
+/// documentation promises that a clone reports to the same callback, so a
+/// second run with the same (or a cloned) options value must still report.
+/// Taking the closure out of the shared sink made every later run silent.
+#[test]
+fn extraction_progress_survives_reuse_of_the_same_options_value() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("progress-reuse.rar");
+    create_numbered_archive(&path);
+
+    let (sink, seen) = counting_sink();
+    let options = ExtractOptions {
+        on_progress: Some(sink),
+        ..Default::default()
+    };
+
+    let mut reader = ArchiveReader::open(&path).expect("open reader");
+    reader
+        .extract_all_with_options(dir.path().join("first"), options.clone())
+        .expect("first extraction");
+    let after_first = seen.lock().expect("recorder").len();
+    assert!(after_first > 0, "the first run must report progress");
+
+    let mut reader = ArchiveReader::open(&path).expect("reopen reader");
+    reader
+        .extract_all_with_options(dir.path().join("second"), options.clone())
+        .expect("second extraction");
+    let after_second = seen.lock().expect("recorder").len();
+    assert!(
+        after_second > after_first,
+        "reusing the options value must keep reporting: the run consumed the sink"
+    );
+
+    // Each run counts from its own zero rather than continuing the first
+    // run's committed total, so a consumer sees a full 0..100% sweep twice.
+    let seen = seen.lock().expect("recorder").clone();
+    let (second_run, first_run) = seen.split_at(after_first);
+    assert_eq!(first_run.last().copied(), Some((2000, 2000)));
+    assert_eq!(second_run.last().copied(), Some((2000, 2000)));
+}
+
+/// A filtered run reports against the **selected** members, not the whole
+/// catalog, and reports at all — the id-selected path used to install no
+/// tracker, so a filtered extraction (every CLI `x`/`e` run with a selector)
+/// was silently mute.
+#[test]
+fn id_selected_extraction_reports_progress_over_the_selected_members() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("progress-subset.rar");
+    create_numbered_archive(&path);
+
+    let mut reader = ArchiveReader::open(&path).expect("open reader");
+    let id = reader.unique_entry("f1.bin").expect("middle member");
+    let selected_size = reader.entry(id).expect("metadata").size();
+
+    let (sink, seen) = counting_sink();
+    let options = ExtractOptions {
+        on_progress: Some(sink),
+        ..Default::default()
+    };
+    reader
+        .extract_ids_with_options(&[id], dir.path().join("out"), options)
+        .expect("extract the selected member");
+
+    let seen = seen.lock().expect("recorder").clone();
+    assert_eq!(
+        seen,
+        vec![(selected_size, selected_size)],
+        "the reported total is the selected member, not the whole catalog"
+    );
+}
+
+/// `Collect` means the same thing on both extraction paths: a failing member
+/// is recorded and the run continues. The id-selected path used to propagate
+/// the first error regardless of the policy, so `Collect` silently behaved
+/// like `Abort` whenever a selector was in play.
+#[test]
+fn collect_policy_collects_failures_on_the_id_selected_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("collect-subset.rar");
+    create_duplicate_archive(&path);
+
+    let reader = ArchiveReader::open(&path).expect("open reader");
+    let ids: Vec<_> = reader
+        .entries_named("same.bin")
+        .map(|entry| entry.id())
+        .collect();
+    let second_offset = reader.entry(ids[1]).expect("second entry").data_offset();
+    drop(reader);
+
+    let mut file = FsOpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open archive for corruption");
+    file.seek(SeekFrom::Start(second_offset))
+        .expect("seek second payload");
+    file.write_all(&[0xff]).expect("corrupt second payload");
+    file.flush().expect("flush corruption");
+
+    let output = dir.path().join("out");
+
+    // A quick-open archive rotates its catalog token the moment the catalog
+    // is rebuilt (the aborted run below does exactly that), so every phase
+    // collects its ids from its own reader and never reuses an earlier set.
+    let mut reader = ArchiveReader::open(&path).expect("reopen reader");
+    let ids: Vec<_> = reader
+        .entries_named("same.bin")
+        .map(|entry| entry.id())
+        .collect();
+    let error = reader
+        .extract_ids_with_options(&ids, &output, ExtractOptions::default())
+        .expect_err("Abort stops at the first failing member");
+    assert_eq!(error.code(), ErrorCode::CrcMismatch);
+
+    let mut reader = ArchiveReader::open(&path).expect("reopen reader");
+    let ids: Vec<_> = reader
+        .entries_named("same.bin")
+        .map(|entry| entry.id())
+        .collect();
+    let report = reader
+        .extract_ids_with_options(
+            &ids,
+            &output,
+            ExtractOptions {
+                error_policy: ExtractErrorPolicy::Collect,
+                ..Default::default()
+            },
+        )
+        .expect("Collect finishes the run");
+    assert_eq!(report.failed_count(), 1, "the bad member is recorded");
+    assert_eq!(report.failures()[0].name(), "same.bin");
+    assert_eq!(report.failures()[0].error().code(), ErrorCode::CrcMismatch);
+    assert_eq!(
+        report.failures()[0].index(),
+        1,
+        "the failure carries the member's archive-order catalog index"
+    );
+    assert_eq!(report.written_count(), 1, "the intact member still landed");
 }

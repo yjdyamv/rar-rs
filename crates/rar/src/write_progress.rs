@@ -40,13 +40,13 @@ pub(crate) enum WriteProgressEvent {
 }
 
 /// Receives archive-writing progress events.
+///
+/// Reporting is one-way: the write pipeline never asks the sink whether to
+/// keep going. Cancellation travels on its own channel
+/// (`set_cancel_flag` → `Engine::check_cancel`), so a progress callback
+/// cannot veto an operation that has already started.
 pub(crate) trait WriteProgress: Send + Sync {
     fn report(&self, event: WriteProgressEvent);
-
-    /// Returns true when the caller wants the active write operation to stop.
-    fn is_cancelled(&self) -> bool {
-        false
-    }
 }
 
 impl<F> WriteProgress for F
@@ -70,11 +70,6 @@ impl std::fmt::Debug for ProgressReporter<'_> {
 impl ProgressReporter<'_> {
     pub(crate) fn report(self, event: WriteProgressEvent) {
         self.0.report(event);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn is_cancelled(self) -> bool {
-        self.0.is_cancelled()
     }
 }
 
@@ -137,29 +132,6 @@ impl ProgressTracker {
             // and turn every later `lock().expect(...)` in the write pipeline
             // into a second panic. Catch it so a misbehaving callback cannot
             // take down an otherwise healthy write operation.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                cb(committed, total);
-            }));
-        }
-    }
-
-    /// Report that the operation as a whole has produced `done` bytes.
-    ///
-    /// `done` is an absolute position, not a delta, so the caller can report a
-    /// running byte count without keeping its own baseline. The reading is
-    /// clamped to be monotonic, and a total that was never set adopts `done`
-    /// so a single-member run still reports a sensible percentage.
-    pub(crate) fn report_total(&mut self, done: u64) {
-        if self.total == 0 {
-            self.total = done;
-        }
-        let committed = done.min(self.total);
-        if committed <= self.committed {
-            return;
-        }
-        self.committed = committed;
-        if let Some(cb) = self.callback.as_mut() {
-            let total = self.total;
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 cb(committed, total);
             }));

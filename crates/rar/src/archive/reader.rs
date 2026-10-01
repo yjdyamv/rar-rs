@@ -673,6 +673,12 @@ impl ArchiveReader {
     /// up front (before anything is written), unlike a whole-archive
     /// extraction, which checks the running total member by member — the
     /// limit is the same, the failure point is not.
+    ///
+    /// `ExtractOptions::on_progress` and `error_policy` apply here exactly as
+    /// they do to [`Self::extract_all_with_options`]: the reported total is
+    /// the summed size of the **listed** members (so a filtered run still
+    /// reaches 100%), and `Collect` records a failing member in
+    /// [`ExtractionReport::failures`] instead of ending the run.
     pub fn extract_ids_with_options(
         &mut self,
         ids: &[EntryId],
@@ -715,16 +721,33 @@ impl ArchiveReader {
             return self.archive.extract_all_with_options(destination, options);
         }
 
+        let progress = self
+            .archive
+            .start_extraction_progress(options.on_progress.clone(), total_unpacked);
         let mut report = ExtractionReport::default();
         for &id in ids {
             // Resolve freshly per member: the first extraction can rebuild a
             // quick-open catalog, which may reorder the indexes.
             let index = self.resolve_id(id)?;
-            self.archive.extract_index_with_options(
+            let entry = self.archive.entries[index].clone();
+            let outcome = self.archive.extract_index_with_options(
                 index,
                 destination,
                 options.clone(),
                 &mut report,
+            );
+            // Keyed by the catalog index, not the position in `ids`:
+            // `ExtractionFailure::index` is documented as the member's
+            // archive-order position, and it is unique within the run too, so
+            // the progress baseline needs no separate identity.
+            self.archive.record_extraction_outcome(
+                index,
+                entry.name(),
+                entry.header.unpacked_size,
+                outcome,
+                &options,
+                &mut report,
+                progress.as_ref(),
             )?;
         }
         Ok(report)
