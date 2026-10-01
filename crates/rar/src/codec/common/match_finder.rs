@@ -990,8 +990,14 @@ impl TreeMatchFinder {
         #[cfg(target_arch = "x86_64")]
         {
             let hash = Self::hash4(input, pos);
-            // SAFETY: `head` is a Vec, `hash` is bounded by HASH_BITS and
-            // the caller guards `pos + 3 < input.len()`.
+            // SAFETY: the pointer is `head`'s base offset by `hash`.
+            // `hash4` shifts the product right by `32 - HASH_BITS`, so
+            // `hash < 1 << HASH_BITS == head.len()` and the address stays
+            // inside the allocation. `prefetcht0` only warms the cache — it
+            // never faults and never dereferences — so a stale `head` entry
+            // is harmless. The caller's `pos + 3 < input.len()` guard is
+            // what makes `hash4`'s own 4-byte read sound; that is a separate
+            // bound from the one this pointer needs.
             unsafe {
                 std::arch::x86_64::_mm_prefetch(
                     self.head.as_ptr().add(hash).cast::<std::os::raw::c_char>(),

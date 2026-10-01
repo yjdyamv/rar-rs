@@ -116,6 +116,23 @@ jobs:
         run: |
           cargo test -p rar-rs --locked
           cargo test -p rar-cli --bins --locked
+      - name: Cargo test (rar-rs, parallel + simd)
+        # `crates/rar` declares `default = []`, so the run above never
+        # *executes* the `parallel` / `simd` code — the clippy step only proves
+        # it compiles in each combination. That left `extract_all_parallel`,
+        # `encode_chunked_mt` and the simd paths checked but never run, which is
+        # how a dead progress tracker and a `Collect` policy that silently
+        # behaved like `Abort` both reached main. Deterministic, hermetic, no
+        # official tool and no network.
+        run: cargo test -p rar-rs --no-default-features --features parallel,simd --locked
+      - name: Cargo test (rar-cli behavior suite)
+        # `--bins` above runs only the unit tests inside the two binaries. The
+        # `cli_behavior` integration suite is where the WinRAR switch contract
+        # lives, and it is hermetic: temp dirs plus the `CARGO_BIN_EXE_*`
+        # binaries this step builds. `winrar_interop` stays a local gate — it
+        # needs an installed WinRAR and self-skips without `SA_WINRAR_DIR`, so
+        # running it here would only produce a wall of skip markers.
+        run: cargo test -p rar-cli --test cli_behavior --locked
       - name: Workspace versions agree
         # The release job only compares the tag against `crates/rar-napi`, so the
         # library and CLI drifted (0.1.2 vs the binding's 0.7.0). Everything here

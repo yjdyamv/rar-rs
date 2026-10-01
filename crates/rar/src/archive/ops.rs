@@ -10,11 +10,16 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::engine::BatchEntry;
 use crate::error::RarResult;
+use crate::write_progress::ProgressTracker;
 
 use super::{ExtractionReport, RarArchive};
+
+/// The per-run write-progress tracker an extraction loop reports through.
+type ExtractionProgressTracker = Arc<Mutex<ProgressTracker>>;
 
 impl RarArchive {
     /// Read an entry selected by its archive-order catalog index.
@@ -71,6 +76,43 @@ impl RarArchive {
     ) -> RarResult<PathBuf> {
         crate::format::shared::extract::members::extract_index_with_options(
             self, idx, dest_dir, opts, report,
+        )
+    }
+
+    /// Start the progress tracker for a run that writes `total` uncompressed
+    /// bytes. The sink is borrowed, not consumed, so a reused `ExtractOptions`
+    /// keeps reporting (see
+    /// [`start_progress`](crate::format::shared::extract::members::start_progress)).
+    pub(crate) fn start_extraction_progress(
+        &self,
+        on_progress: Option<crate::options::ExtractionProgress>,
+        total: u64,
+    ) -> Option<ExtractionProgressTracker> {
+        crate::format::shared::extract::members::start_progress(on_progress, total)
+    }
+
+    /// Apply one member's outcome: advance progress, then honour
+    /// `ExtractOptions::error_policy`. Shared with the whole-archive loop so
+    /// `Collect` means the same thing on both extraction paths.
+    #[allow(clippy::too_many_arguments)] // one member's full descriptor plus the run's shared state
+    pub(crate) fn record_extraction_outcome(
+        &self,
+        member: usize,
+        name: &str,
+        size: u64,
+        outcome: RarResult<PathBuf>,
+        opts: &crate::options::ExtractOptions,
+        report: &mut ExtractionReport,
+        progress: Option<&ExtractionProgressTracker>,
+    ) -> RarResult<()> {
+        crate::format::shared::extract::members::record_member_outcome(
+            member,
+            name,
+            size,
+            outcome,
+            opts.error_policy,
+            report,
+            progress,
         )
     }
 

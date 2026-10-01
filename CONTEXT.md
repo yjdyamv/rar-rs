@@ -218,12 +218,42 @@
   `refused`（目标逃出目的目录、被安全策略拒绝的链接 ——
   只拒该链接、不中止整轮，CLI 按 WinRAR 记 exit 1）+ `corrected`（Windows
   上被改过保留设备名的成员，CLI 逐条向 stderr 打 WinRAR 的
-  `Attempting to correct the invalid ... name`）；目录条目不记（创建无文件数据），`-ol-`
+  `Attempting to correct the invalid ... name`）+ `failures`（**2026-09-30
+  新增**： `ExtractErrorPolicy::Collect` 下解码/校验/落盘失败的成员，带成员名、
+  目录序号与原始 `RarError`；`into_failures()` 取所有权，因为报告不能
+  `Clone`/`PartialEq`）；目录条目不记（创建无文件数据），`-ol-`
   跳过的链接也不记。`extract_all_with_options`/`extract_ids_with_options`
   返回它，写入循环自己记录，因此不可能与落盘不一致；CLI 的 `Skipping` 行与
   `Extracted N file(s)` 计数直接来自它（预测式
   `count_extracted`/`destination_key`/`taken` 已删）。按 id 抽取同样受
   `max_total_unpacked_bytes` 约束（与整档一致）。
+- **ExtractErrorPolicy（`options.rs`）** — 一次多成员抽取里单个成员失败
+  怎么办（2026-09-30）：`Abort`（默认，WinRAR 行为，抛出第一个错误）/
+  `Collect`（记进 `ExtractionReport::failures` 并继续；整轮仍算成功，是否
+  接受部分结果由调用方看 `failed_count()`/`is_empty()` 自己决定）。**取消
+  永远中止**，永不被当成成员失败。**两条抽取路径同一语义**：整档
+  （`members.rs::record_member_outcome`）与按 id
+  （`ArchiveReader::extract_ids_with_options`）都经过这一个函数，所以 `Collect`
+  不会因为「CLI 带了选择器」而退化成 `Abort`（2026-09-30 修复）。
+- **ExtractionProgress（`options.rs` 的 `on_progress`）** — 一次整轮抽取的
+  写盘进度，形状 `(bytes_written, bytes_total)`（2026-09-30）：类型是
+  `Arc<Mutex<Option<Box<dyn FnMut>>>>`，**逐成员**推进（成员经临时兄弟文件
+  原子安装，落盘前没有可发布的中间字节数，所以一个大成员会长时间不报）。
+  两条不变量：①**sink 只借用不取走**——抽取把调用方的闭包**经 Arc 克隆**
+  包进本轮的 tracker（`members.rs::start_progress`），逐成员基线留在本轮 tracker
+  里，所以复用/克隆同一个 `ExtractOptions` 的第二轮仍会报告，且 两轮各自从 0
+  走到自己的 `total`（曾经 `guard.take()` 取走闭包，第二轮
+  静默无报告）；②`bytes_total` 是**本轮将写的成员**之和——按 id 抽取时
+  是被选中的那些，不是整档。回调 panic 被 `ProgressTracker` 的 `catch_unwind`
+  吞掉（因此也不会毒化 sink 的锁）。**装了这个回调的轮次一律
+  走串行路径**（`extract_all_parallel` 的资格条件），因为进度需要串行顺序。
+- **ErrorCode（`error.rs` → `crates/rar-napi`）** — 库错误类别一路到消费者的
+  单一词汇：`RarError::code()` 给 16 个稳定 snake_case 值，CLI 映到退出码。
+  N-API 无法给 `Error` 挂自定义属性（`napi_create_error` 只锁死 `code`），所以
+  绑定把 code 塞进消息的 `[rar-rs:<code>]`
+  标记（`napi/src/error.rs::CODE_MARKER`）， 手写入口 `rar-rs.js` 再水化成带
+  `rarCode` 的 `RarError`——**生成的 `binding.*` 不参与这件事**（见 PITFALLS
+  的分名规则）。
 - **ExtractRequest（`crates/rar-cli` ops.rs）** — 两二进制四个 `x`/`e`
   臂的**唯一** 抽取请求值；落盘选项组装只此一处，`-so` 走 `extract_to_stdout`
   自己的选项。 **磁盘抽取是流式的，尺寸上限默认不限**（与官方一致），但可用
