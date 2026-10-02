@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-09-30 @ `99d7b79`；实现细节以源码为准。
+> 最后核对：2026-10-02 @ `1dfd172`；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -32,10 +32,10 @@
   `rar-rs.d.ts`**，生成物只叫 `binding.*`，`tsc --noEmit` 在 CI
   把关。错误类别一路传到消费者（`ErrorCode` → CLI 退出码 /
   `RarError.rarCode`），提取可选逐成员容错（`ExtractErrorPolicy`）并带进度。
-- **工程**：workspace 三 crate；CI 做 fmt / 路径分隔符守卫 / cargo check（含
-  wasm）/ 确定性测试 smoke / 版本一致性 / clippy `-D warnings` / cargo deny /
-  rustdoc，另加绑定的 `tsc --noEmit` 类型闸门；七目标 fuzz；取消钩子；QO
-  快路径；流式修复；零填充分卷。
+- **工程**：workspace 三 crate；CI 做 fmt / 路径分隔符守卫 / clippy
+  `-D warnings` 与 rar-rs 各 feature 组合 / wasm 目标 `cargo check` / 确定性测试
+  smoke / 版本一致性 / cargo deny / rustdoc，绑定侧的类型闸门 `tsc --noEmit` 在
+  build 矩阵里跑一次；七目标 fuzz；取消钩子；QO 快路径；流式修复； 零填充分卷。
 
 ## 下一步
 

@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-10-02 @ `1a8aa04`; every timing number here is a
+> Last verified: 2026-10-02 @ `1dfd172`; every timing number here is a
 > host-specific snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing
@@ -19,27 +19,33 @@ fast (it parallelizes across test binaries instead of running them one after
 another) and prints a per-test timing report — the easiest way to find what got
 slow. It is a local convenience only.
 
-**This is the main test gate.** CI runs a deterministic **smoke** subset:
-`cargo test -p rar-rs --locked`, `cargo test -p rar-cli --bins --locked`,
-`cargo test -p rar-rs --no-default-features --features parallel,simd --locked`
-and `cargo test -p rar-cli --test cli_behavior --locked` — the library and CLI
-suites, with no official-tool interop and no JS/WASI binding suite. That was
-added 2026-09-28 after a stale assertion shipped with 0.12.0 because nothing ran
-the tests; the JS/WASI binding suites stay local (2026-09, owner's request: the
-WASI binding suite blocked a release on a non-reproducible
-`memory access out of bounds`, and a red run must mean a compile/lint/test-fact
-failure, not a test flake). The `parallel,simd` run and the `cli_behavior` run
-were added 2026-10-02: `crates/rar` declares `default = []`, so without the
-first the feature-gated code (`extract_all_parallel`, `encode_chunked_mt`, the
-simd paths) was only ever _compiled_ by the clippy matrix, never executed — and
-`--bins` covers just the 104 unit tests inside the binaries, so the 269 CLI
-integration tests never ran at all. `winrar_interop` stays local: it needs an
-installed WinRAR and self-skips without `SA_WINRAR_DIR`. CI also keeps fmt, the
-host-path guard, `cargo check`, clippy, `cargo deny` and rustdoc; everything
-under "Running" above (including the interop suites and the ignored codec
-matrix) is still yours to run before tagging a release. The Linux half in one
-command: `bash scripts/wsl/ci-linux.sh` (WSL2 — it _is_ the Linux test gate
-now).
+**This is the main test gate.** CI runs a deterministic **smoke** subset in one
+step: `cargo test -p rar-rs --all-features --locked` plus
+`cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name`
+— the library and CLI suites, with no official-tool interop and no JS/WASI
+binding suite. That was added 2026-09-28 after a stale assertion shipped with
+0.12.0 because nothing ran the tests; the JS/WASI binding suites stay local
+(2026-09, owner's request: the WASI binding suite blocked a release on a
+non-reproducible `memory access out of bounds`, and a red run must mean a
+compile/lint/test-fact failure, not a test flake). `--all-features` is one run
+rather than the earlier default/feature pair because `crates/rar` declares
+`default = []` and no test is `cfg(not(feature = ...))`: with `default` the
+feature-gated code (`extract_all_parallel`, `encode_chunked_mt`, the simd paths)
+was only ever _compiled_ by the clippy matrix, never executed — which is how a
+dead progress tracker and a `Collect` policy that silently behaved like `Abort`
+reached main. `--bins` covers just the 104 unit tests inside the binaries, so
+the hermetic CLI integration targets are named explicitly — `cli_behavior` (the
+WinRAR switch contract) and `volume_bare_name` (a Unix-only regression), so
+adding a hermetic suite cannot silently stay out of CI. `official_interop` and
+`winrar_interop` stay local: they need an installed WinRAR/UnRAR and self-skip,
+so running them here would only produce a wall of skip markers. CI also keeps
+fmt, the host-path guard, clippy (which subsumes `cargo check`), the wasm-target
+`cargo check`, `cargo deny` and rustdoc; the binding's `tsc --noEmit` gate runs
+in the `build` matrix, on the one target whose generated `binding.d.ts` it
+needs. Everything under "Running" above (including the interop suites and the
+ignored codec matrix) is still yours to run before tagging a release. The Linux
+half in one command: `bash scripts/wsl/ci-linux.sh` (WSL2 — it _is_ the Linux
+test gate now).
 
 ## The other two platforms
 
