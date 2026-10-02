@@ -1,6 +1,6 @@
 # 不变量与地雷（改代码前先看）
 
-> 最后核对：2026-10-02 @ `1a8aa04`；实现细节以源码为准。
+> 最后核对：2026-10-02 @ `1dfd172`；实现细节以源码为准。
 
 本文件是**长期规则**的单一来源：所有「改回去就是 bug」「看着像 bug 其实是设计」
 「与官方有意不同」的结论都收在这里，**一条一行**。这里的每条都由源码或测试钉住
@@ -195,9 +195,9 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `crates/rar-napi/package.json`、根 `Cargo.toml` 的 workspace 依赖版本；发布
   tag `vX.Y.Z` 由 Release job 校验。改版本号要同步刷新 `Cargo.lock` 与
   `fuzz/Cargo.lock`。
-- **测试不在主 CI 里跑**：CI 只跑确定性 smoke（`cargo test -p rar-rs` +
-  `cargo test -p rar-cli --bins`），官方工具互操作与 JS/WASI
-  绑定套件是本地闸门。**改行为后本地必须自己跑受影响套件**——0.12.0
+- **测试不在主 CI 里跑**：CI 只跑确定性 smoke（库 `--all-features`，CLI
+  `--bins --test cli_behavior --test volume_bare_name`），官方工具互操作与
+  JS/WASI 绑定套件是本地闸门。**改行为后本地必须自己跑受影响套件**——0.12.0
   曾带着过期断言发布。
 - **文档一致性靠人工**：面向实现的文档（`README`/`CONTEXT`/`ARCHITECTURE`/`CLI`/
   `testing`/`rar4-creation-spec`）在标题下标注

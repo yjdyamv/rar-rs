@@ -17,8 +17,8 @@ env:
   CARGO_ZIGBUILD_VERSION: '0.23.4'
   # Release-grade work — the binding matrix builds and rustdoc — runs on tags
   # and manual dispatches. A push/PR keeps only what catches a broken change
-  # fast: fmt, the host-path guard, cargo check/clippy, a deterministic Rust
-  # test smoke and cargo-deny.
+  # fast: fmt, the host-path guard, clippy (which subsumes `cargo check`),
+  # a deterministic Rust test smoke and cargo-deny.
   #
   # Tests are otherwise a local gate (`cargo test --workspace --all-features`,
   # see docs/testing.md): the owner asked for that in 2026-09 after the WASI
@@ -27,6 +27,9 @@ env:
   # smoke (they caught a stale assertion that shipped with 0.12.0); the JS/WASI
   # binding suites stay local so a red run stays a compile/lint/test-fact
   # failure rather than a flake.
+  #
+  # Nothing is built twice on a heavy run: the binding's addons and its `tsc`
+  # gate live in the `build`/`build-wasm` jobs, which already build them.
   RUN_HEAVY: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
 'on':
   push:
@@ -67,20 +70,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Setup node
-        if: env.RUN_HEAVY == 'true'
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: crates/rar-napi/package-lock.json
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
           targets: wasm32-wasip1-threads
-      - name: Cargo fmt (workspace)
-        run: cargo fmt --all --check
+      - name: Cargo fmt (workspace + fuzz)
+        # `fuzz/` is not a workspace member, so `cargo fmt --all` never covers
+        # its targets.
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path fuzz/Cargo.toml --check
       - name: Host-path separator guard
         # Host paths (disk, destination directory, volumes, -w/-op/--dest)
         # must test separators through `std::path::is_separator`, which is
@@ -96,43 +96,40 @@ jobs:
             echo "::error::host paths must use std::path::is_separator, not a literal backslash check"
             exit 1
           fi
-      - name: Cargo check (workspace defaults)
-        run: cargo check --workspace --all-targets --locked
-      - name: Cargo check (rar-rs, no default features)
-        run: cargo check -p rar-rs --no-default-features --locked
       - name: Cargo check (rar-rs, wasm target, -D warnings)
-        # The binding's wasm build only runs in the heavy matrix, which does not
-        # deny warnings, so wasm-only dead code (helpers gated to unix/windows)
-        # went unnoticed. The toolchain install above already adds the target.
+        # The only `cargo check` left: clippy below already compiles the
+        # workspace and every rar-rs feature combination, so a plain host check
+        # would be a second compile of the same tree. This one is not redundant —
+        # the binding's wasm build runs in the heavy matrix without denying
+        # warnings, so wasm-only dead code (helpers gated to unix/windows) went
+        # unnoticed. The toolchain install above already adds the target.
         env:
           RUSTFLAGS: -D warnings
         run: cargo check -p rar-rs --all-features --target wasm32-wasip1-threads --locked
-      - name: Cargo test (rar-rs + rar-cli unit/integration)
+      - name: Cargo test (library + CLI suites)
         # Tests are a local gate by default (see docs/testing.md), but a stale
         # test assertion shipped with 0.12.0 because nothing ran them here. This
         # deterministic smoke — the library and CLI suites, no official-tool
         # interop, no JS/WASI binding suite (the earlier flake source) — closes
         # that gap without making a red run ambiguous.
+        #
+        # `parallel`/`simd` are the library's only features and no test is
+        # `cfg(not(feature = ...))`, so `--all-features` executes everything the
+        # split default/feature pair only compiled: before this ran once with
+        # `default = []`, `extract_all_parallel`, `encode_chunked_mt` and the
+        # simd paths were never *run*, which is how a dead progress tracker and a
+        # `Collect` policy that silently behaved like `Abort` reached main. The
+        # ungated build is still compiled, by the clippy matrix below.
+        #
+        # The CLI targets are the two binaries' unit tests, `cli_behavior` (the
+        # WinRAR switch contract, hermetic: temp dirs plus the
+        # `CARGO_BIN_EXE_*` binaries this step builds) and `volume_bare_name`
+        # (a Unix-only regression that no CI step ran). `official_interop` and
+        # `winrar_interop` stay local: they need the official tools and
+        # self-skip, so running them here would only print skip markers.
         run: |
-          cargo test -p rar-rs --locked
-          cargo test -p rar-cli --bins --locked
-      - name: Cargo test (rar-rs, parallel + simd)
-        # `crates/rar` declares `default = []`, so the run above never
-        # *executes* the `parallel` / `simd` code — the clippy step only proves
-        # it compiles in each combination. That left `extract_all_parallel`,
-        # `encode_chunked_mt` and the simd paths checked but never run, which is
-        # how a dead progress tracker and a `Collect` policy that silently
-        # behaved like `Abort` both reached main. Deterministic, hermetic, no
-        # official tool and no network.
-        run: cargo test -p rar-rs --no-default-features --features parallel,simd --locked
-      - name: Cargo test (rar-cli behavior suite)
-        # `--bins` above runs only the unit tests inside the two binaries. The
-        # `cli_behavior` integration suite is where the WinRAR switch contract
-        # lives, and it is hermetic: temp dirs plus the `CARGO_BIN_EXE_*`
-        # binaries this step builds. `winrar_interop` stays a local gate — it
-        # needs an installed WinRAR and self-skips without `SA_WINRAR_DIR`, so
-        # running it here would only produce a wall of skip markers.
-        run: cargo test -p rar-cli --test cli_behavior --locked
+          cargo test -p rar-rs --all-features --locked
+          cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
       - name: Workspace versions agree
         # The release job only compares the tag against `crates/rar-napi`, so the
         # library and CLI drifted (0.1.2 vs the binding's 0.7.0). Everything here
@@ -156,22 +153,22 @@ jobs:
           fi
         shell: bash
       - name: Cargo check (fuzz workspace)
+        # The fuzz crate must build both ways: without `fuzzing` the targets
+        # fall back to their standalone `main` (the stable mode fuzz/README.md
+        # documents), with it they are the libFuzzer binaries.
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
-      - name: Cargo fmt (fuzz workspace)
-        # `fuzz/` is not a workspace member, so `cargo fmt --all` never
-        # covers its targets.
-        run: cargo fmt --manifest-path fuzz/Cargo.toml --check
       - name: Cargo check (fuzz workspace, libFuzzer feature)
         # libfuzzer-sys compiles on stable (only `cargo fuzz` itself needs
         # nightly, for `-Z sanitizer`), so the `fuzzing` codepaths are
         # compiled on every run instead of only in the manual libFuzzer mode.
         # `--cfg fuzzing` is the switch cargo-fuzz sets; without it the
-        # targets fall back to their standalone `main` and the
         # `fuzz_target!` entry points are never type-checked.
         env:
           RUSTFLAGS: --cfg fuzzing
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --features fuzzing --locked
       - name: Clippy (workspace, all features and targets)
+        # Also the workspace's `cargo check`: clippy drives the same build, so a
+        # separate check step would only compile the tree twice.
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
       - name: Clippy (rar-rs, every feature combination)
         # The workspace build unifies features across crates (rar-rs-napi
@@ -210,29 +207,10 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
-      - name: Install binding dependencies
-        if: env.RUN_HEAVY == 'true'
-        working-directory: crates/rar-napi
-        run: npm ci
-      - name: Build addon (native)
-        if: env.RUN_HEAVY == 'true'
-        working-directory: crates/rar-napi
-        run: npx napi build --platform --release --js binding.js --dts binding.d.ts
-      - name: Typecheck the binding's public types
-        if: env.RUN_HEAVY == 'true'
-        working-directory: crates/rar-napi
-        # Needs the generated `binding.d.ts`, so it runs after the build.
-        # `rar-rs.d.ts` is hand-written; `__test__/types.test-d.ts` asserts the
-        # surface a consumer sees, so a typing regression fails here.
-        run: npm run typecheck
-      - name: Build WASM addon
-        if: env.RUN_HEAVY == 'true'
-        working-directory: crates/rar-napi
-        run: npx napi build --platform --release --target wasm32-wasip1-threads --js binding.wasi.cjs --dts binding.wasi.d.cts
-      - name: Patch WASI loader for Windows host paths
-        if: env.RUN_HEAVY == 'true'
-        working-directory: crates/rar-napi
-        run: node scripts/patch-wasi-loader.mjs
+      # The binding is built and typechecked once, in the `build` matrix (its
+      # x86_64-unknown-linux-gnu entry). `lint` used to build the native addon
+      # for the `tsc` gate and then build the WASI addon, both of which the
+      # matrix builds anyway — so a heavy run paid for two extra addon builds.
   build:
     name: build - ${{ matrix.settings.target }} - node@24
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
@@ -327,6 +305,16 @@ jobs:
       - name: Build
         working-directory: crates/rar-napi
         run: ${{ matrix.settings.build }}
+      - name: Typecheck the binding's public types
+        if: matrix.settings.target == 'x86_64-unknown-linux-gnu'
+        working-directory: crates/rar-napi
+        # The binding's type gate, run once on the entry whose `binding.d.ts`
+        # was just generated. `rar-rs.d.ts` is hand-written and
+        # `__test__/types.test-d.ts` asserts the surface a consumer sees, so a
+        # typing regression fails here. The generated loader and types are
+        # byte-identical on every target (the release job proves it), so one
+        # target is enough.
+        run: npm run typecheck
       - name: Verify native addon artifact
         working-directory: crates/rar-napi
         run: |
@@ -436,9 +424,15 @@ jobs:
           fi
           echo "releasing v$TAG"
         shell: bash
-      - name: Download all bindings
+      - name: Download the native bindings
+        # One directory per artifact, as the release's identity checks expect
+        # (`binding.js` must be byte-identical across all nine). The WASI bundle
+        # is excluded so it is fetched once below instead of twice.
         uses: actions/download-artifact@v8
         with:
+          pattern: |
+            bindings-*
+            !bindings-wasm32-wasip1-threads
           path: bindings
       - name: Download WASI bindings
         uses: actions/download-artifact@v8
