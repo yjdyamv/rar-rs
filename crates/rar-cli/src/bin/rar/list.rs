@@ -13,7 +13,7 @@ fn filter_names(args: &ListArgs, misc: &common::MiscSwitches) -> Result<Vec<Stri
 }
 
 /// Run a listing body over the volumes of the set when bare `-v`
-/// ([`MiscSwitches::auto_volumes`]) is active, otherwise over the single
+/// ([`common::MiscSwitches::auto_volumes`]) is active, otherwise over the single
 /// archive path given on the command line.
 ///
 /// WinRAR's bare `-v` "list all volumes" is per-volume: it scans each volume
