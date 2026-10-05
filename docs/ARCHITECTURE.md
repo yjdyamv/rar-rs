@@ -1,8 +1,8 @@
 # 架构与模块布局
 
-> 最后核对：2026-10-02 @ `1a8aa04`（本轮：抽取的进度 sink 与失败策略收敛到
-> `format/shared/extract/members.rs` 的两个函数，见 §2「引擎接缝」后的说明）；
-> 实现细节以源码为准。
+> 最后核对：2026-10-05 @ `5628df1c`（本轮：补齐模块地图漏项
+> `archive/reconstruct.rs`、`archive/rename.rs`、
+> `format/rar5/headers/encrypt.rs`）；实现细节以源码为准。
 
 库 crate `crates/rar`（crate 名 `rar-rs`）的模块地图与设计不变量。
 
@@ -61,11 +61,17 @@ version`，以及 `crates/rar-napi/package.json` 的
 - `archive/transaction/` — 手术式 delete / rename（字节级重写；
   `multivolume`/`edit`/`plan`/`execute`/`solid`/`header` 角色模块）。
 - `archive/create.rs` — 写生命周期（创建/append/finalize）。
+- `archive/reconstruct.rs` — 无恢复记录时 `rar r` 的成员级重建：逐个成员解码 +
+  校验，resync 越过损坏的明文头，产出 `rebuilt.<name>`；入口
+  `reconstruct_archive_path`，报告 `ReconstructReport`。放在 `archive` 层 （非
+  `recovery`）因为重建编排 reader/writer 角色，而 `recovery` 不得依赖它。
 - `archive/ops.rs` — **方法形接缝**：角色门面与 crate 内测试仍按方法调用，
   这里逐条转发到 `format` 的自由函数。
 - `archive/rar4_edit/` — RAR4 编辑（rename / delete / comment / RR / lock /
   append / solid repack，含
   `-hp`；`layout`/`headers`/`comment`/`engine`/`repack` 角色模块）。
+- `archive/rename.rs` — RAR4/RAR5 编辑共用的 rename-map 构建：目录重命名展开到
+  全部后代、名字规范化（尾斜杠约定），陈旧索引报 `StaleEntryId`。
 - `model/` — 格式中立模型（`entry.rs` / `chunk.rs`）。
 - `version.rs` — `ArchiveVersion` 单一版本表（v14–v70）；`LegacyCodec`
   （`pub(crate)`）折叠 legacy 别名并做读/写/repack/密码分派。
@@ -120,7 +126,8 @@ version`，以及 `crates/rar-napi/package.json` 的
 ### 核心子系统
 
 - `format/rar5/` — 内部（`wire` 导出受支持子集）：常量与词汇（`mod.rs`）、
-  `create.rs`（字典字段策略）、`headers/{parse,serialize,locator,quick_open}`、
+  `create.rs`（字典字段策略）、
+  `headers/{parse,serialize,locator,quick_open,encrypt}`、
   `payload.rs`（MemberDecoder）、`blake2sp.rs`、`extract/` （读路径
   `open`/`solid`/`decode`/`verify`；`members`/`dest`/`read` 在
   `format/shared/extract/`）、`write/{mod,add,emit,stream,batch,engine,
