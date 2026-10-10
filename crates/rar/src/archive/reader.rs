@@ -21,7 +21,7 @@ static NEXT_CATALOG_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn allocate_catalog_token() -> RarResult<u64> {
     NEXT_CATALOG_TOKEN
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             (current != 0).then(|| current.checked_add(1).unwrap_or(0))
         })
         .map_err(|_| RarError::invalid_state("archive reader ID space is exhausted"))
