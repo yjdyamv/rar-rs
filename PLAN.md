@@ -43,7 +43,7 @@
 
 ### 发布收口（唯一阻塞项）
 
-- [ ] **发布 `rar-rs` 0.12.0**：`cargo package` 已通过校验，三个 crate 的
+- [ ] **发布 `rar-rs` 0.13.0**：`cargo package` 已通过校验，三个 crate 的
       `readme` / `keywords` / `documentation` / `categories`
       元数据已补齐。`rar-cli` 与 `rar-rs-napi` 依赖 workspace 内的
       `rar-rs`，**必须先发布 `rar-rs`** 才能发布另外两个。

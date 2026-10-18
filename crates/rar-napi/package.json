@@ -1,6 +1,6 @@
 {
   "name": "rar-rs",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Pure-Rust RAR archive toolkit for Node.js — create, read, extract, test, modify and repair RAR5/RAR7 and legacy RAR 1.3–4.x archives, with no external rar/unrar binary",
   "license": "BSD-2-Clause",
   "main": "rar-rs.js",
