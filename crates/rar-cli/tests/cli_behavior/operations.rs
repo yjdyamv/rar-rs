@@ -166,8 +166,9 @@ fn cli_delete_after_df_removes_sources() {
     assert_eq!(rar.read_entry(gone_id).unwrap(), b"will be deleted");
 }
 
-/// A source that cannot be deleted must surface as a warning, not a silent
+/// A source that cannot be deleted must surface as a failure, not a silent
 /// success: a non-writable parent directory blocks `remove_file` on Unix.
+/// `-df` reports WinRAR 7.30's delete error (14), not the generic warning 1.
 #[cfg(unix)]
 #[test]
 fn cli_delete_after_reports_sources_it_could_not_delete() {
@@ -190,8 +191,8 @@ fn cli_delete_after_reports_sources_it_could_not_delete() {
         .unwrap();
     assert_eq!(
         output.status.code(),
-        Some(1),
-        "an undeleted source must be a warning, stderr: {}",
+        Some(14),
+        "an undeleted source must exit 14, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(file.exists(), "the locked source survives");
