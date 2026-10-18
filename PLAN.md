@@ -35,7 +35,9 @@
 - **工程**：workspace 三 crate；CI 做 fmt / 路径分隔符守卫 / clippy
   `-D warnings` 与 rar-rs 各 feature 组合 / wasm 目标 `cargo check` / 确定性测试
   smoke / 版本一致性 / cargo deny / rustdoc，绑定侧的类型闸门 `tsc --noEmit` 在
-  build 矩阵里跑一次；七目标 fuzz；取消钩子；QO 快路径；流式修复； 零填充分卷。
+  build 矩阵里跑一次；另有一条 `lint-windows`（clippy 全目标 + WinRAR 开关契约 +
+  绑定单元测试），cargo deny 每周定时重跑一次以接住新的 RustSec 公告；七目标
+  fuzz；取消钩子；QO 快路径；流式修复； 零填充分卷。
 
 ## 下一步
 

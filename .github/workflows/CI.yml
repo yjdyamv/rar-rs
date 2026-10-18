@@ -3,7 +3,11 @@ env:
   DEBUG: napi:*
   APP_NAME: rar-rs-napi
   MACOSX_DEPLOYMENT_TARGET: '10.13'
-  CARGO_INCREMENTAL: '1'
+  # CI builds restore a target/ cache (see `rust-cache` in `lint` and the
+  # `actions/cache` steps in `build`), so incremental compilation buys nothing
+  # and writes large, cache-hostile artifact trees; it is also off by default
+  # for release builds. Keep it off everywhere.
+  CARGO_INCREMENTAL: '0'
   # Static musl addons are cross-built with cargo-zigbuild, which needs a
   # `zig`. Pinned here (not by an action) and verified against the SHA-256
   # from ziglang.org's own index: the download stays on the official host,
@@ -44,9 +48,19 @@ env:
       - '**/*.gitignore'
   pull_request:
   workflow_dispatch:
+  # RustSec advisories change without a commit. A weekly run re-evaluates the
+  # committed lockfiles against the advisory database so a new advisory is
+  # noticed here instead of on the next unrelated push. Only `lint` runs: the
+  # heavy binding matrix stays tag/dispatch-only via `RUN_HEAVY`.
+  schedule:
+    - cron: '0 4 * * 1'
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+# Least privilege: every job only reads the repository. `release` opts into
+# `contents: write` for its own job.
+permissions:
+  contents: read
 
 # The rar-rs workspace ships a pure-Rust library (crates/rar), CLI
 # (crates/rar-cli) and the rar-rs-napi binding
@@ -59,6 +73,10 @@ concurrency:
 #
 # Trigger split (see `RUN_HEAVY`): every push/PR runs `lint`; tags and manual
 # dispatches additionally build the binding matrix and check rustdoc.
+# `lint-windows` shares those triggers and gates `release`, so a
+# `#[cfg(windows)]` break cannot reach a published tag through the matrix. A
+# weekly `schedule` reruns `lint` because the RustSec advisory database moves
+# without a commit.
 # `release` (tags only) assembles the GitHub Release from those artifacts.
 #
 # This file must live at the repository ROOT: GitHub Actions only executes
@@ -68,6 +86,7 @@ jobs:
   lint:
     name: Lint + checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Install rust toolchain
@@ -75,6 +94,15 @@ jobs:
         with:
           components: clippy, rustfmt
           targets: wasm32-wasip1-threads
+      - name: Cache cargo
+        # `lint` compiles the workspace several times (test profile, clippy
+        # with all features and targets, four isolated feature combinations,
+        # two fuzz builds). Without a restored target/ every push pays the
+        # full cold build. The cache key includes the rustc version, so a
+        # toolchain bump invalidates it instead of mixing artifacts.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
       - name: Cargo fmt (workspace + fuzz)
         # `fuzz/` is not a workspace member, so `cargo fmt --all` never covers
         # its targets.
@@ -130,6 +158,7 @@ jobs:
         run: |
           cargo test -p rar-rs --all-features --locked
           cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
+          cargo test -p rar-rs-napi --lib --locked
       - name: Workspace versions agree
         # The release job only compares the tag against `crates/rar-napi`, so the
         # library and CLI drifted (0.1.2 vs the binding's 0.7.0). Everything here
@@ -144,14 +173,33 @@ jobs:
           napi=$(version crates/rar-napi/Cargo.toml)
           pkg=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
             crates/rar-napi/package.json | head -1)
-          printf 'rar-rs=%s rar-cli=%s rar-rs-napi=%s package.json=%s\n' \
-            "$lib" "$cli" "$napi" "$pkg"
+          # The fifth place the version appears: the workspace dependency the
+          # CLI and binding inherit (`cargo package` refuses a mismatch).
+          dep=$(sed -n 's/^rar-rs = { version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          printf 'rar-rs=%s rar-cli=%s rar-rs-napi=%s package.json=%s workspace-dep=%s\n' \
+            "$lib" "$cli" "$napi" "$pkg" "$dep"
           if [ -z "$lib" ] || [ "$lib" != "$cli" ] || [ "$lib" != "$napi" ] \
-            || [ "$lib" != "$pkg" ]; then
-            echo "::error::library, CLI, binding and package.json versions must match"
+            || [ "$lib" != "$pkg" ] || [ "$lib" != "$dep" ]; then
+            echo "::error::library, CLI, binding, package.json and workspace-dependency versions must match"
             exit 1
           fi
         shell: bash
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Binding path-mapping tests (pure JS)
+        # `wasi-path-map.test.mjs` imports only tracked sources
+        # (`wasi-path-map.cjs`, `scripts/patch-wasi-loader.mjs`, `rar-rs.js`),
+        # so it needs no addon build and cannot flake. It is the only gate on
+        # the hand-written JS path mapping and on the loader's export table.
+        run: node --test crates/rar-napi/__test__/wasi-path-map.test.mjs
+      - name: Regression test the zig installer
+        # Hermetic fixture server (no 47 MiB download); exercises the naming
+        # variants, checksum failure, mirror race and the GITHUB_PATH export
+        # that a previous release run got wrong. Unset GITHUB_PATH so the
+        # fixture's fake zig is not appended to this job's real PATH.
+        run: env -u GITHUB_PATH REPO="$GITHUB_WORKSPACE" bash scripts/ci/test-install-zig.sh
       - name: Cargo check (fuzz workspace)
         # The fuzz crate must build both ways: without `fuzzing` the targets
         # fall back to their standalone `main` (the stable mode fuzz/README.md
@@ -211,10 +259,39 @@ jobs:
       # x86_64-unknown-linux-gnu entry). `lint` used to build the native addon
       # for the `tsc` gate and then build the WASI addon, both of which the
       # matrix builds anyway — so a heavy run paid for two extra addon builds.
+  # `lint` runs on Linux only. Everything under `#[cfg(windows)]` — the
+  # WinRAR switch contract in cli_behavior, the separator hazards, the
+  # windows-sys code paths — would otherwise be compiled for the first time
+  # by the release matrix. `cli_behavior` and `volume_bare_name` are hermetic
+  # (temp dirs plus the CARGO_BIN_EXE_* binaries), so this adds no
+  # official-tool flake.
+  lint-windows:
+    name: Lint + tests (windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-windows
+      - name: Clippy (workspace, all features and targets)
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Cargo test (CLI switch contract + binding unit tests)
+        # The binding's `error.rs`/`guard.rs` tests pin the public error
+        # contract (code + status + marker prefix); clippy only compiles them.
+        run: |
+          cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
+          cargo test -p rar-rs-napi --lib --locked
   build:
     name: build - ${{ matrix.settings.target }} - node@24
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.settings.host }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -344,6 +421,7 @@ jobs:
     name: build - wasm32-wasip1-threads
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Setup node
@@ -384,9 +462,11 @@ jobs:
   release:
     name: Release (${{ github.ref_name }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - lint
+      - lint-windows
       - build
       - build-wasm
     permissions:

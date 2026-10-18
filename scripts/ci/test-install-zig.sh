@@ -10,7 +10,10 @@
 # Usage: bash scripts/ci/test-install-zig.sh
 set -uo pipefail
 
-PORT=${PORT:-8823}
+# A pinned port collides with the fixture server a previous aborted run left
+# behind; the install then blocks on a dead endpoint instead of failing. Draw
+# from the ephemeral range unless the caller pins PORT.
+PORT=${PORT:-$((20000 + RANDOM % 20000))}
 VER=9.9.9
 NEW="zig-x86_64-linux-$VER.tar.xz"
 OLD="zig-linux-x86_64-$VER.tar.xz"
@@ -42,6 +45,10 @@ http.createServer((q, s) => {
 srv=$!
 sleep 1
 trap 'kill $srv 2>/dev/null' EXIT
+if ! kill -0 "$srv" 2>/dev/null; then
+  echo "FAIL fixture server did not start on port $PORT" >&2
+  exit 1
+fi
 
 pass=0
 fail=0

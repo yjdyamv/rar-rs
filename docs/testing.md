@@ -22,36 +22,52 @@ slow. It is a local convenience only.
 **This is the main test gate.** CI runs a deterministic **smoke** subset in one
 step: `cargo test -p rar-rs --all-features --locked` plus
 `cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name`
-— the library and CLI suites, with no official-tool interop and no JS/WASI
-binding suite. That was added 2026-09-28 after a stale assertion shipped with
-0.12.0 because nothing ran the tests; the JS/WASI binding suites stay local
-(2026-09, owner's request: the WASI binding suite blocked a release on a
-non-reproducible `memory access out of bounds`, and a red run must mean a
-compile/lint/test-fact failure, not a test flake). `--all-features` is one run
-rather than the earlier default/feature pair because `crates/rar` declares
-`default = []` and no test is `cfg(not(feature = ...))`: with `default` the
-feature-gated code (`extract_all_parallel`, `encode_chunked_mt`, the simd paths)
-was only ever _compiled_ by the clippy matrix, never executed — which is how a
-dead progress tracker and a `Collect` policy that silently behaved like `Abort`
-reached main. `--bins` covers just the 104 unit tests inside the binaries, so
-the hermetic CLI integration targets are named explicitly — `cli_behavior` (the
-WinRAR switch contract) and `volume_bare_name` (a Unix-only regression), so
+plus `cargo test -p rar-rs-napi --lib --locked` — the library and CLI suites,
+with no official-tool interop and no JS/WASI binding suite. That was added
+2026-09-28 after a stale assertion shipped with 0.12.0 because nothing ran the
+tests; the JS/WASI binding suites stay local (2026-09, owner's request: the WASI
+binding suite blocked a release on a non-reproducible
+`memory access out of bounds`, and a red run must mean a compile/lint/test-fact
+failure, not a test flake). `--all-features` is one run rather than the earlier
+default/feature pair because `crates/rar` declares `default = []` and no test is
+`cfg(not(feature = ...))`: with `default` the feature-gated code
+(`extract_all_parallel`, `encode_chunked_mt`, the simd paths) was only ever
+_compiled_ by the clippy matrix, never executed — which is how a dead progress
+tracker and a `Collect` policy that silently behaved like `Abort` reached main.
+`--bins` covers just the 104 unit tests inside the binaries, so the hermetic CLI
+integration targets are named explicitly — `cli_behavior` (the WinRAR switch
+contract) and `volume_bare_name` (a regression that only surfaced on Unix), so
 adding a hermetic suite cannot silently stay out of CI. `official_interop` and
 `winrar_interop` stay local: they need an installed WinRAR/UnRAR and self-skip,
 so running them here would only produce a wall of skip markers. CI also keeps
 fmt, the host-path guard, clippy (which subsumes `cargo check`), the wasm-target
 `cargo check`, `cargo deny` and rustdoc; the binding's `tsc --noEmit` gate runs
 in the `build` matrix, on the one target whose generated `binding.d.ts` it
-needs. Everything under "Running" above (including the interop suites and the
+needs.
+
+The same job carries the checks that need neither an addon nor an official tool:
+the binding's Rust unit tests (`cargo test -p rar-rs-napi --lib`, which pin the
+public error contract),
+`node --test
+crates/rar-napi/__test__/wasi-path-map.test.mjs` (the hand-written
+JS path mapping and the loader's export table — it imports only tracked sources,
+so it cannot flake on a missing build), and
+`bash scripts/ci/test-install-zig.sh` against its fixture server (tarball naming
+variants, checksum failure, mirror race, the `GITHUB_PATH` export). A second
+job, `lint-windows`, runs on `windows-latest` on the same triggers: clippy over
+all features and targets plus `cli_behavior`, `volume_bare_name` and the
+binding's lib tests, and `release` waits on it — everything under
+`#[cfg(windows)]` used to be compiled for the first time by the release matrix
+itself. Everything under "Running" above (including the interop suites and the
 ignored codec matrix) is still yours to run before tagging a release. The Linux
 half in one command: `bash scripts/wsl/ci-linux.sh` (WSL2 — it _is_ the Linux
 test gate now).
 
 ## The other two platforms
 
-`lint` runs on Linux, and a green Windows run says nothing about it. Both extra
-surfaces are check-only (`clippy`/`check` do not link, so no cross toolchain is
-needed):
+`lint` runs on Linux and `lint-windows` only covers Windows, so a green run on
+one says nothing about the other two surfaces. They stay local and check-only
+(`clippy`/`check` do not link, so no cross toolchain is needed):
 
 ```sh
 rustup target add x86_64-unknown-linux-gnu    # once
@@ -91,7 +107,10 @@ tree: RustSec advisories, the license allow-list, the registry sources.
 Configuration and the rationale for each allowed license family live in the root
 [`deny.toml`](../deny.toml); a dependency under an unlisted license fails on
 purpose. In-tree `rars` ports are _not_ covered by that file — see
-[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md).
+[`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md). The advisory database
+moves without a commit, so the workflow also runs `lint` on a weekly `schedule`;
+a push-only trigger would notice a new RustSec advisory only after the next
+unrelated change.
 
 ```sh
 cargo install cargo-deny --locked    # once

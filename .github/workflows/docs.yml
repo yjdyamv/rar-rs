@@ -17,11 +17,17 @@ on:
       - dprint.json
       - .github/workflows/docs.yml
   workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
   format:
     name: Markdown formatting (dprint)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - name: Setup node
