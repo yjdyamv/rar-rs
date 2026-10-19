@@ -516,13 +516,14 @@ jobs:
         shell: bash
       - name: Download the native bindings
         # One directory per artifact, as the release's identity checks expect
-        # (`binding.js` must be byte-identical across all nine). The WASI bundle
-        # is excluded so it is fetched once below instead of twice.
+        # (`binding.js` must be byte-identical across all nine). `pattern` is a
+        # single glob: download-artifact has no multi-line/negation form, so the
+        # WASI artifact (`bindings-wasm32-wasip1-threads`) comes along and is
+        # fetched again below — it carries no `.node` and no `binding.js`, so
+        # every check here ignores it.
         uses: actions/download-artifact@v8
         with:
-          pattern: |
-            bindings-*
-            !bindings-wasm32-wasip1-threads
+          pattern: bindings-*
           path: bindings
       - name: Download WASI bindings
         uses: actions/download-artifact@v8
@@ -550,6 +551,7 @@ jobs:
           if (( ${#NODE_FILES[@]} != ${#EXPECTED_ADDONS[@]} )); then
             echo "::error::expected ${#EXPECTED_ADDONS[@]} native addons, found ${#NODE_FILES[@]}"
             printf 'found: %s\n' "${NODE_FILES[@]:-<none>}"
+            echo "::error::artifacts downloaded: $(find bindings -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | tr '\n' ' ')"
             exit 1
           fi
           for addon in "${EXPECTED_ADDONS[@]}"; do
