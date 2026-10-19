@@ -439,10 +439,20 @@ jobs:
         run: npm ci
       - name: Build WASM
         working-directory: crates/rar-napi
-        run: npx napi build --platform --release --target wasm32-wasip1-threads --js binding.wasi.cjs --dts binding.wasi.d.cts
+        # `npm run build:wasi` is the single source of truth for the flags (and
+        # runs `scripts/patch-wasi-loader.mjs`, which must stay the last step).
+        # It uses `--no-js --dts rar-rs-napi.wasi.d.cts`: the WASI build must
+        # not touch `binding.js`/`binding.d.ts`, the native build's platform
+        # resolver and types (`binding.js` already carries the WASI fallback
+        # chain). @napi-rs/cli always names the flavor loader
+        # `<binaryName>.wasi.cjs`, so `--js` could only add a second, unused
+        # resolver under the wasm output name.
+        run: npm run build:wasi
         shell: bash
       - name: Patch WASI loader for Windows host paths
         working-directory: crates/rar-napi
+        # Idempotent, and `build:wasi` already ran it: this step exists so the
+        # log shows the patch landed, not to do it a second time for real.
         run: node scripts/patch-wasi-loader.mjs
         shell: bash
       - name: Upload artifact
@@ -452,9 +462,9 @@ jobs:
           path: |
             crates/rar-napi/rar-rs-napi.wasm32-wasi.wasm
             crates/rar-napi/rar-rs-napi.wasm32-wasi.debug.wasm
-            crates/rar-napi/binding.wasi.cjs
-            crates/rar-napi/binding.wasi.d.cts
-            crates/rar-napi/binding.wasi-browser.js
+            crates/rar-napi/rar-rs-napi.wasi.cjs
+            crates/rar-napi/rar-rs-napi.wasi.d.cts
+            crates/rar-napi/rar-rs-napi.wasi-browser.js
             crates/rar-napi/wasi-path-map.cjs
             crates/rar-napi/wasi-worker.mjs
             crates/rar-napi/wasi-worker-browser.mjs
@@ -555,9 +565,9 @@ jobs:
           # file must fail this step rather than produce a partial release.
           cp wasm/rar-rs-napi.wasm32-wasi.wasm \
              wasm/rar-rs-napi.wasm32-wasi.debug.wasm \
-             wasm/binding.wasi.cjs \
-             wasm/binding.wasi.d.cts \
-             wasm/binding.wasi-browser.js \
+             wasm/rar-rs-napi.wasi.cjs \
+             wasm/rar-rs-napi.wasi.d.cts \
+             wasm/rar-rs-napi.wasi-browser.js \
              wasm/wasi-path-map.cjs \
              wasm/wasi-worker.mjs \
              wasm/wasi-worker-browser.mjs release/

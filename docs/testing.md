@@ -97,7 +97,10 @@ RUSTFLAGS="-D warnings" cargo check -p rar-rs --all-features \
   `--target x86_64-pc-windows-msvc`; Linux and macOS need nothing, which is why
   CI's `--workspace` jobs pass. The `wasm32-wasip1-threads` binding additionally
   needs the `EMNAPI_LINK_DIR` that `napi build` injects, so build it with
-  `npx napi build --platform --release --target wasm32-wasip1-threads`.
+  `npm run build:wasi` — `napi build --target wasm32-wasip1-threads --no-js
+  --dts rar-rs-napi.wasi.d.cts` followed by `scripts/patch-wasi-loader.mjs`,
+  which must stay the last step: any later native `napi build` regenerates the
+  loader unpatched.
 
 ## Dependency gate
 

@@ -19,9 +19,9 @@
     "rar-rs.d.ts",
     "binding.js",
     "binding.d.ts",
-    "binding.wasi.cjs",
-    "binding.wasi-browser.js",
-    "binding.wasi.d.cts",
+    "rar-rs-napi.wasi.cjs",
+    "rar-rs-napi.wasi-browser.js",
+    "rar-rs-napi.wasi.d.cts",
     "wasi-worker.mjs",
     "wasi-worker-browser.mjs",
     "wasi-path-map.cjs",
@@ -66,7 +66,7 @@
   "scripts": {
     "build": "napi build --platform --release --js binding.js --dts binding.d.ts",
     "build:debug": "napi build --platform --js binding.js --dts binding.d.ts",
-    "build:wasi": "napi build --platform --release --target wasm32-wasip1-threads --js binding.wasi.cjs --dts binding.wasi.d.cts && node scripts/patch-wasi-loader.mjs",
+    "build:wasi": "napi build --platform --release --target wasm32-wasip1-threads --no-js --dts rar-rs-napi.wasi.d.cts && node scripts/patch-wasi-loader.mjs",
     "test": "node --test __test__/*.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

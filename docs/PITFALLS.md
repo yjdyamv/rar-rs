@@ -276,6 +276,18 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   ENOENT；`mapMemberCommentArgs`
   只翻归档路径，**成员名是归档内名，翻了就坏**。JS 侧由
   `__test__/wasi-path-map.test.mjs` 钉住。
+- **WASI loader 的文件名不归我们选，补丁必须最后一步跑**：
+  `napi build --target wasm32-wasip1-threads` 恒把 flavor loader 写成
+  `<binaryName>.wasi.cjs`（`wasiLoaderSuffix()`，这里是
+  `rar-rs-napi.wasi.cjs`）；`--js` 只改*平台解析器*的名字，对 wasi 目标会把
+  一个用不到的 `binding.wasi.cjs` 落到 wasm 产物名上。所以 `build:wasi` 用
+  `--no-js --dts rar-rs-napi.wasi.d.cts`，release 契约仍是 0.12.0 的
+  `rar-rs-napi.wasi.cjs` / `.wasi.d.cts` / `.wasi-browser.js`。两个连带后果：
+  **任何一次 `napi build` 都会把 wasi loader 重新生成为未打补丁版**，改完要
+  `node scripts/patch-wasi-loader.mjs` 再跑；native 构建写入的
+  `managedRootEntries` 会让随后的 `build:wasi` 删掉 `binding.js`，本地想同时
+  持有两者就先 native 后补丁，别反过来。0.13.0 的 tag 首跑就是被这个骗了：
+  补丁按旧名字找 `binding.wasi.cjs`，CI 的 build-wasm 在 patch 步骤硬失败。
 - **仓库 URL 以远端为准**：根 `Cargo.toml` 的 `repository` 与
   `crates/rar-napi/package.json` 的 `repository`/`homepage`/`bugs`
   必须同源。曾长期写着一个不存在的 codeberg 路径，而真实远端是 GitHub（三个
