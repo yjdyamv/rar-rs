@@ -319,6 +319,10 @@ pub(crate) fn add_batch(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarR
             && !cx.write_ctx().rar4.solid_append
             && !entries.is_empty()
         {
+            // The parallel path writes member headers directly, so the queued
+            // archive comment has to go out first (a legacy archive splices it
+            // into the main header).
+            crate::format::rar4::write::member::emit_pending_rar4_comment(cx)?;
             return crate::format::rar4::write::batch::add_batch_parallel_rar4(cx, entries);
         }
     }

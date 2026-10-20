@@ -92,6 +92,11 @@ pub(crate) const MHD_PASSWORD: u16 = 0x0080;
 #[allow(dead_code)]
 pub(crate) const MHD_VOLUME: u16 = 0x0001;
 
+/// Main header flag: the main header carries an embedded comment block.
+/// Only RAR 1.5/2.x (`unp_ver < 29`) writers do this; RAR 3.0+ moved the
+/// comment into a separate NEWSUB `CMT` block.
+pub(crate) const MHD_COMMENT: u16 = 0x0002;
+
 /// Main header flag: this is the first volume of a multi-volume set.
 #[allow(dead_code)]
 pub(crate) const MHD_FIRSTVOLUME: u16 = 0x0100;

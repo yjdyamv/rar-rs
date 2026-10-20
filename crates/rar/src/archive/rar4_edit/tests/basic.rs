@@ -429,6 +429,94 @@ fn reads_winrar_623_rar4_comment() {
     assert_eq!(archive.get_comment().unwrap(), Some(expected));
 }
 
+/// RAR 1.5/2.x has no `CMT` NEWSUB block: the comment is a nested `0x75`
+/// block *inside* the main header, so the main header's `head_size` covers
+/// it. Both envelopes must decode to the same text.
+#[test]
+fn reads_a_legacy_main_header_comment() {
+    for switches in [&["-m0"][..], &["-m3"][..]] {
+        let Some(made) = crate::test_winrar::archive_with(
+            "2-90",
+            &[switches[0], "-zcomment.txt"],
+            &["text.txt"],
+            &["comment.txt"],
+        ) else {
+            return;
+        };
+        let mut archive = RarArchive::open(made.path()).unwrap();
+        assert_eq!(
+            archive.get_comment().unwrap(),
+            Some(crate::test_winrar::payload("comment.txt")),
+            "{switches:?}"
+        );
+        // The comment really is nested in the main header: MHD_COMMENT is set
+        // and the header's own size field spans the block.
+        let bytes = made.read();
+        let main = &bytes[7..];
+        let flags = u16::from_le_bytes([main[3], main[4]]);
+        assert_ne!(flags & MHD_COMMENT, 0, "{switches:?}");
+        let head_size = usize::from(u16::from_le_bytes([main[5], main[6]]));
+        assert!(head_size > 13, "{switches:?}: {head_size}");
+        assert_eq!(main[13 + 2], 0x75, "{switches:?}: legacy comment header");
+    }
+}
+
+/// The writer must produce the same nested-block envelope for RAR 1.5/2.x,
+/// and official 2.90 has to read it back.
+#[test]
+fn writes_a_legacy_main_header_comment() {
+    let text = b"queued legacy comment";
+    for version in [
+        crate::version::ArchiveVersion::V15,
+        crate::version::ArchiveVersion::V20,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.rar");
+        {
+            let mut archive = RarArchive::create_with_options(
+                &path,
+                crate::options::CreateOptions {
+                    compression: version,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            archive.set_rar4_writer_comment(Some(text.to_vec()));
+            archive.add_bytes("a.txt", b"payload\n", 0).unwrap();
+            archive.close().unwrap();
+        }
+
+        let bytes = std::fs::read(&path).unwrap();
+        let main = &bytes[7..];
+        let flags = u16::from_le_bytes([main[3], main[4]]);
+        assert_ne!(flags & MHD_COMMENT, 0, "{version:?}");
+        let head_size = u16::from_le_bytes([main[5], main[6]]);
+        assert_eq!(
+            usize::from(head_size),
+            13 + 13 + text.len(),
+            "{version:?}: main header covers the nested comment"
+        );
+        // No RAR 3.0+ `CMT` NEWSUB block: pre-3.0 readers ignore those.
+        assert!(
+            !bytes.windows(3).any(|w| w == b"CMT"),
+            "{version:?} must not write a NEWSUB comment"
+        );
+
+        let mut archive = RarArchive::open(&path).unwrap();
+        assert_eq!(
+            archive.get_comment().unwrap().as_deref(),
+            Some(text.as_slice()),
+            "{version:?}"
+        );
+        assert_eq!(archive.entries.len(), 1);
+        drop(archive);
+
+        if let Some(verdict) = crate::test_winrar::unrar_test("2-90", &path) {
+            verdict.unwrap_or_else(|e| panic!("{version:?}: UnRAR 2.90 rejected: {e}"));
+        }
+    }
+}
+
 #[test]
 fn comment_set_replace_and_remove_roundtrip() {
     let dir = tempfile::tempdir().unwrap();

@@ -17,6 +17,112 @@ fn ewo(level: u8) -> EntryWriteOptions {
     EntryWriteOptions::new().compression_level(CompressionLevel::try_from(level).unwrap())
 }
 
+/// RAR 1.5/2.x keep the archive comment *inside* the main header (a nested
+/// `0x75` block) because pre-3.0 readers know no other place for it, so the
+/// writer splices it in while the header is still pending. Official 2.90
+/// must read the text back through its own `cw` command.
+#[test]
+fn legacy_versions_embed_the_archive_comment() {
+    let text = b"legacy comment first line
+second line
+";
+    for version in [ArchiveVersion::V15, ArchiveVersion::V20] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("legacy-{version}.rar"));
+        let mut writer =
+            ArchiveWriter::create_with(&path, WriterOptions::new().compression(version)).unwrap();
+        writer.set_archive_comment(Some(text.to_vec())).unwrap();
+        writer
+            .add_bytes(
+                "a.txt",
+                b"payload
+",
+                ewo(0),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let head = &bytes[7..];
+        let size = usize::from(u16::from_le_bytes([head[5], head[6]]));
+        assert!(
+            size > 13,
+            "{version}: the comment is inside the main header"
+        );
+        assert_ne!(
+            u16::from_le_bytes([head[3], head[4]]) & 0x0002,
+            0,
+            "{version}: MHD_COMMENT is set"
+        );
+
+        let mut reader = ArchiveReader::open(&path).unwrap();
+        assert_eq!(reader.comment().unwrap().as_deref(), Some(text.as_slice()));
+        let entry = reader.unique_entry("a.txt").unwrap();
+        assert_eq!(
+            reader.read_entry(entry).unwrap(),
+            b"payload
+"
+        );
+
+        if let Some(verdict) = crate::support::generate::unrar_test("2-90", &path) {
+            verdict.expect("official 2.90 accepts the archive");
+        }
+        if let Some(verdict) = crate::support::generate::official_comment("2-90", &path) {
+            assert_eq!(
+                verdict.expect("official 2.90 reads the comment").as_deref(),
+                Some(text.as_slice()),
+                "{version}: the embedded comment round-trips through 2.90"
+            );
+        }
+    }
+}
+
+/// A pre-3.0 archive cannot have its comment edited: the text lives in the
+/// main header, which older readers will not re-read from anywhere else, so
+/// the editor refuses instead of writing a `CMT` block nobody old can see.
+#[test]
+fn legacy_comment_edits_are_refused_with_a_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-edit.rar");
+    let mut writer =
+        ArchiveWriter::create_with(&path, WriterOptions::new().compression(ArchiveVersion::V20))
+            .unwrap();
+    writer
+        .set_archive_comment(Some(
+            b"original
+"
+            .to_vec(),
+        ))
+        .unwrap();
+    writer
+        .add_bytes(
+            "a.txt",
+            b"payload
+",
+            ewo(0),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+
+    let mut editor = rar_rs::ArchiveEditor::open(&path).unwrap();
+    let error = editor
+        .apply(
+            rar_rs::EditPlan::new().set_comment(
+                b"replacement
+"
+                .to_vec(),
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("main header"), "unexpected error: {error}");
+    assert_eq!(
+        std::fs::read(&path).unwrap().len() as u64,
+        std::fs::metadata(&path).unwrap().len(),
+        "the archive is left untouched"
+    );
+}
+
 /// `rec_sectors` of a RAR4 archive's NEWSUB (`0x7a`) `RR` record.
 fn recovery_sectors(path: &std::path::Path) -> u32 {
     let bytes = std::fs::read(path).unwrap();

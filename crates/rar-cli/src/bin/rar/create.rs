@@ -534,11 +534,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // The member write sequence is shared by the fresh-create and the
     // transactional replace paths.
     let write_members = |mut writer: rar_rs::ArchiveWriter| -> CliResult<rar_rs::WriteReport> {
-        // RAR 1.3/1.4 have no editor path: the DOS main header must
-        // precede every member, so `-z` queues the comment before the
-        // first member; RAR5/RAR4 attach it after creation through the
-        // editor below.
-        if version.is_rar13()
+        // RAR 1.3/1.4 and RAR 1.5/2.x keep the comment inside the main
+        // header, which is written before the first member: `-z` has to be
+        // queued here. RAR 3.0+ (and RAR5) attach it after creation through
+        // the editor below.
+        if (version.is_rar13() || version.embeds_archive_comment())
             && let Some(comment_file) = &misc.comment_file
         {
             // A bare `-z` (empty value) reads the comment from stdin,
@@ -835,10 +835,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         );
     }
     // -z<file>: attach an archive comment through the editor role (the RAR
-    // 1.3/1.4 comment was already queued before the first member above).
+    // 1.3/1.4 and RAR 1.5/2.x comments were already queued before the first
+    // member above).
     // The resolved password includes a `-hp<password>` value, unlike the raw
     // `args.password` (an `-hp`-encrypted archive needs it here).
-    if !version.is_rar13() && misc.comment_file.is_some() {
+    if !version.is_rar13() && !version.embeds_archive_comment() && misc.comment_file.is_some() {
         crate::comment::cmd_comment_set(
             &crate::args::CommentArgs {
                 password: crate::password::PasswordArgs {

@@ -109,6 +109,14 @@ impl ArchiveVersion {
         matches!(self, Self::V14)
     }
 
+    /// Whether the archive comment lives *inside* the main header (a nested
+    /// `0x75` block, RAR 1.5/2.x) instead of in a `CMT` block written after
+    /// it (RAR 3.0+). Pre-3.0 readers ignore the newer envelope, so a comment
+    /// has to be queued before the first member and cannot be edited in place.
+    pub const fn embeds_archive_comment(self) -> bool {
+        matches!(self, Self::V15 | Self::V20 | Self::V26)
+    }
+
     /// Whether this version lives in the legacy RAR 1.5–4.x container
     /// family (`v15`–`v36`), rather than the RAR5 container (`v50`/`v70`).
     pub const fn is_legacy(self) -> bool {

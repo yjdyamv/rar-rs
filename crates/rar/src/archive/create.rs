@@ -822,7 +822,14 @@ impl RarArchive {
         }
         let buf = crate::format::rar4::write::build_main_header(flags);
         let stream = self.stream.as_mut().unwrap();
+        let offset = stream.stream_position()?;
         stream.write_all(&buf)?;
+        if self.write_ctx().output.current_volume <= 1 {
+            // Kept so a legacy (`unp_ver < 29`) archive comment — which lives
+            // *inside* this header rather than in a `CMT` NEWSUB block — can
+            // be spliced in before the first member is written.
+            self.write_ctx_mut().rar4.main_header = Some((offset, buf));
+        }
         Ok(())
     }
 

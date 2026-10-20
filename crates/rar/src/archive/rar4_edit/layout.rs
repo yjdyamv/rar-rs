@@ -25,7 +25,7 @@ use crate::fs::atomic::copy_prefix;
 /// Main header flag: the archive comment is embedded after the fixed
 /// 13-byte main header (RAR 1.5–2.9 layout). The reader's header-CRC
 /// coverage stops at 13 bytes when it is set.
-pub(super) const MHD_COMMENT: u16 = 0x0002;
+pub(super) use crate::format::rar4::MHD_COMMENT;
 
 /// Patch the main-header flags: OR `set_bits` into the flags word at
 /// bytes 3..5 and recompute the CRC16 over the reader's coverage. The

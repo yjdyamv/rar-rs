@@ -866,3 +866,66 @@ fn cli_rar13_recovery_volumes_are_refused() {
         .unwrap();
     assert!(!out.status.success(), "rc must refuse a v14 set");
 }
+
+/// RAR 1.5/2.x have no `CMT` block: `-z` at creation has to land inside the
+/// main header, and the editor must refuse a later `c -z` instead of writing
+/// a comment old readers cannot see. Guards the create path's comment queue
+/// (the parallel batch path writes member headers directly).
+#[test]
+fn cli_legacy_comment_is_embedded_at_creation() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("p.txt"), b"payload\n").unwrap();
+    std::fs::write(dir.path().join("cmt.txt"), b"legacy comment\nsecond\n").unwrap();
+
+    for (version, name) in [("15", "v15.rar"), ("2", "v2.rar")] {
+        let arc = dir.path().join(name);
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", "-idq", &format!("-ma{version}"), "-zcmt.txt"])
+            .arg(&arc)
+            .arg("p.txt")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "-ma{version} with -z failed");
+
+        // The comment lives inside the main header: MHD_COMMENT (0x0002) is
+        // set and the header is longer than its fixed 13 bytes.
+        let bytes = std::fs::read(&arc).unwrap();
+        let head = &bytes[7..];
+        assert_ne!(
+            u16::from_le_bytes([head[3], head[4]]) & 0x0002,
+            0,
+            "{name}: MHD_COMMENT"
+        );
+        assert!(
+            usize::from(u16::from_le_bytes([head[5], head[6]])) > 13,
+            "{name}: the header carries the nested comment"
+        );
+
+        let dumped = std::process::Command::new(RAR_CLI)
+            .args(["cw", "-idq"])
+            .arg(&arc)
+            .output()
+            .unwrap();
+        assert_eq!(dumped.stdout, b"legacy comment\nsecond\n", "{name}: cw");
+
+        // Editing it is refused: the text can only be set while writing.
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["c", "-idq", "-zcmt.txt"])
+            .arg(&arc)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "{name}: c -z must be refused");
+        assert_eq!(
+            std::process::Command::new(RAR_CLI)
+                .args(["cw", "-idq"])
+                .arg(&arc)
+                .output()
+                .unwrap()
+                .stdout,
+            b"legacy comment\nsecond\n",
+            "{name}: the refusal leaves the comment alone"
+        );
+    }
+}

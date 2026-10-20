@@ -764,6 +764,46 @@ fn clone_archive(g: &Generated) -> Generated {
 /// Cross-check an archive with the official extractor of `version`; `Err` carries
 /// the tool's output so a failing assertion explains itself, `None` means the
 /// tool is not cached here (the caller skips).
+/// Ask a release's `Rar.exe` to dump the archive comment (`cw <archive>
+/// <file>`), the only textual interface the command line offers for it.
+/// `None` when the tool is not cached, `Ok(None)` when it reports no comment,
+/// `Ok(Some(text))` with the bytes it wrote out.
+pub fn official_comment(version: &str, archive: &Path) -> Option<Result<Option<Vec<u8>>, String>> {
+    let tool = tool(version)?;
+    let dest = scratch_root().join(format!(
+        "comment-{}-{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let out = Command::new(tool.rar())
+        .arg("cw")
+        .arg(archive)
+        .arg(&dest)
+        .output()
+        .expect("run Rar.exe cw");
+    if dest.exists() {
+        let text = std::fs::read(&dest).expect("read the dumped comment");
+        Some(Ok(Some(text)))
+    } else if out.status.success() {
+        Some(Ok(None))
+    } else {
+        let message = String::from_utf8_lossy(&out.stdout).into_owned();
+        if message.contains("Comment is not present") {
+            Some(Ok(None))
+        } else {
+            Some(Err(format!(
+                "Rar.exe {version} cw failed on {}: {}
+{message}",
+                archive.display(),
+                out.status
+            )))
+        }
+    }
+}
+
 pub fn unrar_test(version: &str, archive: &Path) -> Option<Result<(), String>> {
     let tool = tool(version)?;
     let out = Command::new(tool.unrar())

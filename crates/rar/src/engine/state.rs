@@ -271,6 +271,11 @@ pub(crate) struct Rar4Append {
     /// members to a stream, so the comment must be queued before the first
     /// add). `None` = no comment.
     pub writer_comment: Option<Vec<u8>>,
+    /// Byte offset and raw bytes of the main header this writer emitted. A
+    /// legacy (`unp_ver < 29`) archive keeps its comment *inside* that
+    /// header, so a comment queued after creation has to be spliced in by
+    /// rewriting it — legal only while nothing follows the header.
+    pub main_header: Option<(u64, [u8; 13])>,
 }
 
 /// Compression knobs (`-mt`, `-md`, and the RAR7 test seam).

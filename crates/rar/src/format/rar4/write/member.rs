@@ -227,12 +227,67 @@ pub(crate) fn add_file_rar4(
     add_rar4_data(cx, name, data, level, mtime, mtime_ns, None, Some(attr))
 }
 
-/// Emit a queued RAR4 archive comment (`rar4_writer_comment`) as a
-/// NEWSUB `CMT` block at the current stream position, then clear the
-/// queue. Only the 35-byte CMT header is header-encrypted under `-hp`;
-/// the comment payload follows as plaintext data (the same rule as
-/// FILE members).
-pub(super) fn emit_pending_rar4_comment(cx: &mut dyn Engine) -> RarResult<()> {
+/// Splice the queued comment into the legacy main header.
+///
+/// The header is 13 bytes and the comment block follows it as part of the
+/// same header (`head_size` covers both), so the only way to add one after
+/// creation is to rewrite the header in place. That is legal exactly while
+/// the header is still the last thing on the stream, which is what the
+/// "queue the comment before the first member" contract guarantees.
+fn embed_legacy_main_comment(cx: &mut dyn Engine) -> RarResult<()> {
+    use std::io::{Seek, SeekFrom};
+
+    let Some(text) = cx.write_ctx_mut().rar4.writer_comment.take() else {
+        return Ok(());
+    };
+    if text.is_empty() {
+        return Ok(());
+    }
+    let Some((offset, mut header)) = cx.write_ctx().rar4.main_header else {
+        return Err(RarError::invalid_option(
+            "a legacy (unp_ver < 29) RAR4 archive comment must be queued before the first member",
+        ));
+    };
+    const MAIN_HEAD: usize = crate::format::rar4::comment::MAIN_HEAD_SIZE;
+    let block = crate::format::rar4::comment::build_legacy_comment_block(
+        &text,
+        cx.write_ctx().solid.rar4_unp_ver,
+    )?;
+    let head_size = u16::try_from(MAIN_HEAD + block.len()).map_err(|_| {
+        RarError::invalid_option("comment too long for a legacy (unp_ver < 29) RAR4 archive")
+    })?;
+    let flags = u16::from_le_bytes([header[3], header[4]]) | crate::format::rar4::MHD_COMMENT;
+    header[3..5].copy_from_slice(&flags.to_le_bytes());
+    header[5..7].copy_from_slice(&head_size.to_le_bytes());
+    // The header CRC of a comment-carrying main header still covers only the
+    // fixed 13 bytes (the nested block carries its own CRC).
+    let crc = crate::format::shared::checksum::header_crc16(&header[2..]);
+    header[..2].copy_from_slice(&crc.to_le_bytes());
+
+    let stream = cx.stream_mut()?;
+    let end = stream.seek(SeekFrom::End(0))?;
+    if end != offset + MAIN_HEAD as u64 {
+        return Err(RarError::invalid_option(
+            "a legacy (unp_ver < 29) RAR4 archive comment must be queued before the first member",
+        ));
+    }
+    stream.seek(SeekFrom::Start(offset))?;
+    stream.write_all(&header)?;
+    stream.write_all(&block)?;
+    cx.add_bytes_written(block.len() as u64);
+    Ok(())
+}
+
+/// Emit a queued RAR4 archive comment. RAR 1.5/2.x keeps the comment inside
+/// the main header (a nested `0x75` block), so it is spliced into the header
+/// written at creation; RAR 3.0+ writes a NEWSUB `CMT` block at the current
+/// position and clears the queue. Only the 35-byte CMT header is
+/// header-encrypted under `-hp`; the comment payload follows as plaintext
+/// data (the same rule as FILE members).
+pub(crate) fn emit_pending_rar4_comment(cx: &mut dyn Engine) -> RarResult<()> {
+    if cx.write_ctx().solid.rar4_unp_ver < 29 {
+        return embed_legacy_main_comment(cx);
+    }
     let Some(text) = cx.write_ctx_mut().rar4.writer_comment.take() else {
         return Ok(());
     };

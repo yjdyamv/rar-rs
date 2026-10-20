@@ -1,10 +1,15 @@
-//! Archive comment (`CMT` NEWSUB block) wire format.
+//! Archive comment wire format: the RAR 3.0+ `CMT` NEWSUB block *and* the
+//! legacy (`unp_ver < 29`) comment that lives inside the main header.
 //!
-//! WinRAR 6.23 places the block right after the first volume's main header;
-//! the payload is either STORE bytes or a RAR29-LZSS stream (`method`
+//! WinRAR 6.23 places the NEWSUB block right after the first volume's main
+//! header; the payload is either STORE bytes or a RAR29-LZSS stream (`method`
 //! 0x31-0x35) and carries UTF-16LE (no BOM) when it holds characters
 //! outside the single-byte range. The comment is read from the set's first
 //! volume regardless of which part was opened.
+//!
+//! RAR 1.5/2.x had no NEWSUB block: the main header itself is longer
+//! (`head_size` = 13 + comment block) and carries a nested `0x75` block whose
+//! `method` is STORE or a RAR15 stream. Same content, different envelope.
 //!
 //! The *codec* lives here because it is RAR4 block serialization; locating
 //! and decrypting the block inside an open archive is an engine operation
@@ -19,6 +24,89 @@ use crate::format::shared::checksum::header_crc16;
 /// Header byte count of the NEWSUB `CMT` archive-comment block (32 fixed
 /// bytes + the 3-byte name `CMT`); the payload follows as data.
 pub(crate) const CMT_HEAD_SIZE: usize = 35;
+
+/// Header byte count of the legacy comment block (RAR 1.5/2.x): a nested
+/// `0x75` header with no name, whose payload follows immediately. It sits
+/// *inside* the main header, so the main header's `head_size` covers it.
+pub(crate) const LEGACY_COMMENT_HEAD_SIZE: usize = 13;
+
+/// Byte count of the fixed part of a main header, before any comment block.
+pub(crate) const MAIN_HEAD_SIZE: usize = 13;
+
+/// A legacy comment block parsed out of a (plaintext) main header.
+pub(crate) struct LegacyComment<'a> {
+    pub unp_ver: u8,
+    pub method: u8,
+    pub unpacked_size: usize,
+    pub packed: &'a [u8],
+}
+
+/// Parse the comment block nested in `main_header` (`MHD_COMMENT` archives).
+/// The slice must start at the main header's own first byte (the CRC) and may
+/// extend past the header; `None` means "no comment block there".
+///
+/// Layout: `crc16, head_type 0x75, flags, head_size, unp_size, unp_ver,
+/// method, comm_crc16` — 13 bytes, then the payload.
+pub(crate) fn parse_legacy_comment(main_header: &[u8]) -> Option<LegacyComment<'_>> {
+    let block = main_header.get(MAIN_HEAD_SIZE..)?;
+    if block.len() < LEGACY_COMMENT_HEAD_SIZE || block[2] != 0x75 {
+        return None;
+    }
+    let head_size = usize::from(u16::from_le_bytes([block[5], block[6]]));
+    if head_size < LEGACY_COMMENT_HEAD_SIZE || block.len() < head_size {
+        return None;
+    }
+    Some(LegacyComment {
+        unpacked_size: usize::from(u16::from_le_bytes([block[7], block[8]])),
+        unp_ver: block[9],
+        method: block[10],
+        packed: &block[LEGACY_COMMENT_HEAD_SIZE..head_size],
+    })
+}
+
+/// Build the legacy comment block for `text` (stored, method STORE). The
+/// caller appends it to the main header and grows that header's `head_size`.
+pub(crate) fn build_legacy_comment_block(text: &[u8], unp_ver: u8) -> RarResult<Vec<u8>> {
+    let head_size = LEGACY_COMMENT_HEAD_SIZE + text.len();
+    let head_size = u16::try_from(head_size).map_err(|_| {
+        RarError::invalid_option("comment too long for a legacy (unp_ver < 29) RAR4 archive")
+    })?;
+    let unp_size = u16::try_from(text.len()).map_err(|_| {
+        RarError::invalid_option("comment too long for a legacy (unp_ver < 29) RAR4 archive")
+    })?;
+    let mut block = Vec::with_capacity(usize::from(head_size));
+    block.extend_from_slice(&[0u8, 0]); // header CRC, filled last
+    block.push(0x75); // comment header
+    block.extend_from_slice(&0u16.to_le_bytes()); // flags: no LONG_BLOCK
+    block.extend_from_slice(&head_size.to_le_bytes());
+    block.extend_from_slice(&unp_size.to_le_bytes());
+    block.push(unp_ver.min(20)); // stored bytes never need a newer reader
+    block.push(crate::format::rar4::RAR4_METHOD_STORE);
+    block.extend_from_slice(&(crate::crc32::crc32(text) as u16).to_le_bytes());
+    block.extend_from_slice(text);
+    // The CRC covers only the fixed 11-byte block header (measured against
+    // WinRAR 2.90: the payload is not part of it, unlike a FILE_HEAD).
+    let crc = header_crc16(&block[2..LEGACY_COMMENT_HEAD_SIZE]);
+    block[..2].copy_from_slice(&crc.to_le_bytes());
+    Ok(block)
+}
+
+/// Decode a legacy comment block's payload to the stored comment bytes.
+pub(crate) fn decode_legacy_comment(comment: &LegacyComment<'_>) -> RarResult<Vec<u8>> {
+    use crate::format::rar4::RAR4_METHOD_STORE;
+    if comment.method == RAR4_METHOD_STORE {
+        return Ok(comment.packed.to_vec());
+    }
+    let mut cursor = std::io::Cursor::new(comment.packed);
+    decode_comment_stream(
+        &mut cursor,
+        0,
+        comment.packed.len() as u64,
+        comment.method,
+        comment.unp_ver,
+        comment.unpacked_size,
+    )
+}
 
 /// Encode comment text for storage, mirroring WinRAR 6.23's convention:
 /// the CMT block's `attr` bit 0 marks a UTF-16LE payload (no BOM); pure
@@ -109,6 +197,7 @@ pub(crate) fn decode_comment_stream(
     data_start: u64,
     packed_size: u64,
     method: u8,
+    unp_ver: u8,
     unpacked_size: usize,
 ) -> RarResult<Vec<u8>> {
     use crate::format::rar4::{MemberDecodeOptions, decode_member_bytes};
@@ -124,7 +213,7 @@ pub(crate) fn decode_comment_stream(
         comp_method: method.wrapping_sub(crate::format::rar4::RAR4_METHOD_STORE),
         data_offset: data_start,
         format_version: 4,
-        unp_ver: 29,
+        unp_ver,
         ..Default::default()
     };
     let chunk = DataChunk {

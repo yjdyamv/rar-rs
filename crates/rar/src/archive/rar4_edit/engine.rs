@@ -25,7 +25,7 @@ use crate::archive::RarArchive;
 use crate::archive::transaction::EditSummary;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::comment::{
-    build_comment_block, comment_block_name_is_cmt, encode_comment_text,
+    build_comment_block, comment_block_name_is_cmt, encode_comment_text, parse_legacy_comment,
 };
 use crate::format::rar4::{
     COMM_HEAD, ENDARC_HEAD, EnvelopePolicy, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD,
@@ -413,6 +413,24 @@ pub(crate) fn edit_rar4(
         || (first_volume(archive) != archive.path.as_path() && archive_is_locked(archive)?)
     {
         return Err(RarError::ArchiveLocked);
+    }
+    // A pre-3.0 container keeps the archive comment inside its main header,
+    // and older readers know no other place for it: the comment can only be
+    // set while the archive is written, never edited in place.
+    //
+    // Stored members declare `unp_ver 20` in every RAR4 archive (`-m0`), so
+    // only the compressed ones separate the generations: a `-ma4 -m0` set is
+    // perfectly editable while a RAR 2.x archive is not.
+    if comment.is_some() {
+        let compressed_pre_3_0 = layout
+            .files
+            .iter()
+            .any(|(_, header)| header.len() > 25 && header[25] != 0x30 && header[24] < 29);
+        if compressed_pre_3_0 || parse_legacy_comment(&layout.main_header).is_some() {
+            return Err(RarError::unsupported(
+                "a RAR 1.5/2.x archive keeps its comment inside the main header; set it when creating the archive",
+            ));
+        }
     }
     // `-hp`: the password that decrypts the layout also re-encrypts every
     // block this rewrite rebuilds or inserts.

@@ -198,6 +198,17 @@ A missing tool prints `SKIPPED` and the suite passes; `SA_REQUIRE_WINRAR=1` /
 `om_mark_of_the_web_matches_winrar`** — 6.23 predates RAR7 and its MOTW differs.
 That is a version difference, not a regression (confirmed on `1fbfaba`).
 
+## Optional local sample: the 1995 RAR 1.5 Beta archive
+
+No release in the fetched toolchain can write a RAR 1.3/1.5 container, so the
+oldest layout is checked against one genuinely shipped archive: WinRAR 1.5
+Beta (`wrar155.rar`, 1995, solid, ANSI-art archive comment) kept outside the
+tool cache at `.cache/winrar-src/rar155/wrar155.rar`. It is *not* downloaded
+by `scripts/fetch_winrar.py`; `genuine_rar155_beta_archive_decodes` in
+`crates/rar/tests/rar4_read.rs` skips when the file is absent, and otherwise
+decodes the comment and both members and re-checks them with the official
+`UnRAR.exe` 2.90 and 7.23.
+
 ## Generated test archives
 
 No archive files are committed. Legacy-format suites call

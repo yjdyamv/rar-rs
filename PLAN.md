@@ -22,7 +22,9 @@
   MT（字节同等）+ NEWSUB 恢复记录。能力表见
   [`docs/rar4-creation-spec.md`](docs/rar4-creation-spec.md)。
 - **RAR 1.3 / 1.4 / 1.5 / 2.x 创建**：`-ma13` / `-ma14` / `-ma15` / `-ma2`，含
-  solid、 `-p` / `-hp`、旧命名分卷。
+  solid、 `-p` / `-hp`、旧命名分卷、归档注释（`-ma15`/`-ma2` 把注释嵌进主头，
+  与 1.5/2.x 读取器同构，2.90 可原样读回；这类归档的注释只能创建时写，
+  编辑一律拒绝）。
 - **RAR4 编辑全补**（ADR 0005）：头/块级操作 + 非 solid 块拷贝 + solid 整档
   repack； `-hp` 与分卷（`rn`/`ch`/`k`/注释）均已支持。
 - **命令面**：官方 `rar` 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt`

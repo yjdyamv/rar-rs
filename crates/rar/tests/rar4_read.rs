@@ -48,6 +48,55 @@ fn assert_all_members_match_payload(generated: &generate::Generated) {
     }
 }
 
+/// The one sample no cached release can reproduce: a genuine 1995
+/// `wrar155.rar` (RAR 1.5 Beta, solid, ANSI-art archive comment), kept
+/// outside the tool cache. It pins the *oldest* on-disk layout the reader
+/// claims to support against something Eugene Roshal actually shipped.
+/// Optional by design — the file is not part of the fetched toolchain, so the
+/// test skips when it was never downloaded.
+#[test]
+fn genuine_rar155_beta_archive_decodes() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cache/winrar-src/rar155/wrar155.rar");
+    if !path.exists() {
+        eprintln!("SKIP: {} is not downloaded", path.display());
+        return;
+    }
+    let mut archive = ArchiveReader::open(&path).expect("open the 1995 archive");
+    let snaps = snapshots(&archive);
+    let names: Vec<&str> = snaps.iter().map(|(name, ..)| name.as_str()).collect();
+    assert_eq!(names, ["WINRAR.EXE", "RAR.HLP"], "member order");
+
+    let comment = archive
+        .comment()
+        .expect("read the comment")
+        .expect("the release archive carries one");
+    assert_eq!(comment.len(), 1_855, "the ANSI-art comment decodes whole");
+    for needle in [
+        b"This file has come to you".as_slice(),
+        b"T R A K - O N E !".as_slice(),
+    ] {
+        assert!(
+            comment.windows(needle.len()).any(|window| window == needle),
+            "comment body keeps {needle:?}"
+        );
+    }
+
+    for (name, size, crc) in snaps {
+        let data = archive
+            .read_entry(archive.unique_entry(&name).unwrap())
+            .unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
+        assert_eq!(data.len() as u64, size, "{name}: size");
+        assert_eq!(Some(crc32(&data)), crc, "{name}: header CRC");
+    }
+
+    for version in ["2-90", "7-23"] {
+        if let Some(verdict) = generate::unrar_test(version, &path) {
+            verdict.unwrap_or_else(|e| panic!("UnRAR {version} rejected the 1995 archive: {e}"));
+        }
+    }
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in data {

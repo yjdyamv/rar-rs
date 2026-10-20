@@ -1,9 +1,10 @@
-//! Archive comment (`CMT` NEWSUB block) lookup inside an open archive.
+//! Archive comment lookup inside an open archive.
 //!
-//! The block's wire format lives in [`crate::format::rar4::comment`]; what
-//! stays here is the part that needs the engine: which volume holds the
-//! block, how a `-hp` header is decrypted, and the metadata limit the
-//! payload size is checked against.
+//! Both wire formats live in [`crate::format::rar4::comment`]; what stays
+//! here is the part that needs the engine: which volume holds the block, how
+//! a `-hp` header is decrypted, and the metadata limit the payload size is
+//! checked against. Two envelopes are supported: the RAR 3.0+ `CMT` NEWSUB
+//! block and the RAR 1.5/2.x comment nested inside the main header.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -12,10 +13,11 @@ use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::comment::{
     comment_block_name_is_cmt, decode_comment_payload, decode_comment_stream,
+    decode_legacy_comment, parse_legacy_comment,
 };
 use crate::format::rar4::{
-    ENDARC_HEAD, EnvelopePolicy, MAIN_HEAD, MHD_PASSWORD, NEWSUB_HEAD, RAR4_METHOD_STORE,
-    read_block,
+    ENDARC_HEAD, EnvelopePolicy, MAIN_HEAD, MHD_COMMENT, MHD_PASSWORD, NEWSUB_HEAD,
+    RAR4_METHOD_STORE, read_block,
 };
 
 use super::layout::{first_volume, first_volume_signature_offset, header_password, main_flags};
@@ -41,12 +43,30 @@ pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
         };
         if view.head_type == MAIN_HEAD && !saw_main {
             saw_main = true;
-            if main_flags(&view.header)? & MHD_PASSWORD != 0 {
+            let flags = main_flags(&view.header)?;
+            if flags & MHD_PASSWORD != 0 {
                 let password = header_password(archive).ok_or_else(|| {
                     RarError::encrypted("reading the comment of a header-encrypted (-hp) RAR4 archive requires its password",
                     )
                 })?;
                 hp = Some(password.as_bytes());
+            } else if flags & MHD_COMMENT != 0 {
+                // RAR 1.5/2.x stores the comment inside the main header; there
+                // is no NEWSUB block to find, and the block ends the archive's
+                // header rather than being followed by members' comments.
+                if let Some(comment) = parse_legacy_comment(&view.header) {
+                    let limit = archive.read_ctx().extract_options.metadata_limit();
+                    if comment.unpacked_size as u64 > limit {
+                        return Err(RarError::limit_exceeded(
+                            limit,
+                            format!(
+                                "legacy RAR4 archive comment declares {} bytes",
+                                comment.unpacked_size
+                            ),
+                        ));
+                    }
+                    return Ok(Some(decode_legacy_comment(&comment)?));
+                }
             }
         } else if view.head_type == NEWSUB_HEAD
             && view.header.len() >= 32
@@ -81,6 +101,7 @@ pub(crate) fn read_comment(archive: &RarArchive) -> RarResult<Option<Vec<u8>>> {
                     view.data_offset(),
                     view.add_size,
                     method,
+                    29,
                     unp as usize,
                 )?
             };
