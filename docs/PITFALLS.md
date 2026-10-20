@@ -195,10 +195,12 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `crates/rar-napi/package.json`、根 `Cargo.toml` 的 workspace 依赖版本；发布
   tag `vX.Y.Z` 由 Release job 校验。改版本号要同步刷新 `Cargo.lock` 与
   `fuzz/Cargo.lock`。
-- **测试不在主 CI 里跑**：CI 只跑确定性 smoke（库 `--all-features`，CLI
-  `--bins --test cli_behavior --test volume_bare_name`），官方工具互操作与
-  JS/WASI 绑定套件是本地闸门。**改行为后本地必须自己跑受影响套件**——0.12.0
-  曾带着过期断言发布。
+- **测试不在主 CI 里跑**：CI 的确定性 smoke 只跑库 `--all-features` 与 CLI
+  `--bins --test cli_behavior --test volume_bare_name`；**生成套件例外**——两个 job
+  都先 `python3 scripts/fetch_winrar.py` 拉官方工具再跑它们（Windows 带
+  `SA_REQUIRE_WINRAR=1`，Linux 因 2.90/3.00 无 Linux 版而允许自跳）。JS/WASI
+  绑定套件仍是本地闸门。**改行为后本地必须自己跑受影响套件**——0.12.0 曾带着
+  过期断言发布。
 - **文档一致性靠人工**：面向实现的文档（`README`/`CONTEXT`/`ARCHITECTURE`/`CLI`/
   `testing`/`rar4-creation-spec`）在标题下标注
   `最后核对：YYYY-MM-DD @ <短 commit>`，改行为要同步刷新。
@@ -210,6 +212,23 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `read_exact` 口径一致。
 - **RAR4 清空归档先查 victim 非文件**（与 RAR5 同款守卫），否则会把同名目录 park
   成隐藏备份并遗留。
+- **测试归档不落盘、不提交**：legacy 套件一律现场生成
+  （`crates/rar/tests/support/generate.rs`，配方见同目录 `corpus.rs`；crate 内用
+  `crate::test_winrar`，同一个 `#[path]` 文件）。铁律：**7.23 不能写 `-ma4`**
+  （RAR4 写入上限 6.23）、`cf` 文件注释在 5.00 起被删（上限 4.20）、`rv3` 到
+  RAR5 消失（4.20 是最后一个现代布局）、没有任何官方版本能写 v14/v15/v26/v36/v70
+  （用我们自己的 writer 或改 `unp_ver` 字节）。缺工具时打 `SKIP:` 并跳过，
+  `SA_REQUIRE_WINRAR=1` 把跳过变失败——**声称跑过生成套件就带上它**。
+- **工具缓存只有一个下载入口**：`scripts/fetch_winrar.py`（Python 3 标准库，
+  Windows/macOS/Linux 同一份），`scripts/wsl/` 不再自带下载器。rarlab 的
+  Windows 包是自解压 PE：**≤5.00 内嵌 RAR4、≥5.50 内嵌 RAR5**，只许用 7-Zip
+  或（新到旧的）缓存 `Rar.exe` 解，**永不执行**——直接跑会启动安装程序；旧
+  `Rar.exe` 只认得自己那代的载荷，所以要新版本先装。**Linux 只有 3.93+ 的
+  tarball**，2.90/3.00 的配方在 Linux 自跳；且 Linux `rar` 写 `host_os = 3`
+  （Windows 是 2），host 断言必须按平台取值。rarlab 对个别老文件会在最后一
+  字节后重置连接，下载是否完好要看载荷能否完整解出，而不是看传输是否报错。
+- **不要用带绝对路径的载荷名写归档**：`-m0` 会把源路径原样存进成员名
+  （历史 fixture 里那个 `Users\yuan\AppData\...` 成员就是这么来的）。
 - **标记编译门用 `cfg(unix)`/`cfg(windows)`，别用格式常量**：`OS_WINDOWS`
   是格式常量不是编译门；`wasm32-wasip1-threads` 既非 unix 也非 windows，漏门会让
   CI 红。

@@ -12,5 +12,5 @@ fuzz_target!(|data: &[u8]| rar_rs_fuzz::crypto(data));
 
 #[cfg(not(fuzzing))]
 fn main() {
-    rar_rs_fuzz::standalone("crypto", rar_rs_fuzz::CORPUS_ALL, rar_rs_fuzz::crypto);
+    rar_rs_fuzz::standalone("crypto", &rar_rs_fuzz::corpus_all(), rar_rs_fuzz::crypto);
 }

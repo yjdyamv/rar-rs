@@ -390,6 +390,70 @@ mod tests {
         assert_eq!(table.decode(&mut bits).unwrap(), 3);
     }
 
+    /// Pack a bit string (MSB first) into the byte layout `BitReader` reads.
+    fn bits_to_bytes(bits: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; bits.len().div_ceil(8)];
+        for (index, bit) in bits.iter().enumerate() {
+            if *bit == 1 {
+                out[index / 8] |= 0x80 >> (index % 8);
+            }
+        }
+        out
+    }
+
+    /// `tag bits ++ payload bits`, for the four variable-length widths the VM
+    /// filter-record control stream uses. The 32-bit form is what a record may
+    /// legally carry even though ordinary files never need it.
+    fn encoded_u32_widths() -> Vec<(Vec<u8>, u32)> {
+        let mut cases = Vec::new();
+        // tag 0: 4-bit payload.
+        let mut bits = vec![0, 0, 1, 0, 1, 0];
+        cases.push((bits_to_bytes(&bits), 10));
+        // tag 1 with high < 16: negative value, 0xffffff00 | high << 4 | low.
+        bits = vec![0, 1];
+        bits.extend((0..8u8).rev().map(|shift| (0x05u8 >> shift) & 1));
+        bits.extend((0..4u8).rev().map(|shift| (0x0fu8 >> shift) & 1));
+        cases.push((bits_to_bytes(&bits), 0xffff_ff5f));
+        // tag 1 with high >= 16: the byte is the value itself.
+        bits = vec![0, 1];
+        bits.extend((0..8u8).rev().map(|shift| (0x42u8 >> shift) & 1));
+        cases.push((bits_to_bytes(&bits), 0x42));
+        // tag 2: 16-bit payload.
+        bits = vec![1, 0];
+        bits.extend(
+            (0..16u8)
+                .rev()
+                .map(|shift| ((0xabcdu16 >> shift) & 1) as u8),
+        );
+        cases.push((bits_to_bytes(&bits), 0xabcd));
+        // tag 3: full 32-bit payload.
+        bits = vec![1, 1];
+        bits.extend(
+            (0..16u8)
+                .rev()
+                .map(|shift| ((0x1234u32 >> shift) & 1) as u8),
+        );
+        bits.extend(
+            (0..16u8)
+                .rev()
+                .map(|shift| ((0x5678u32 >> shift) & 1) as u8),
+        );
+        cases.push((bits_to_bytes(&bits), 0x1234_5678));
+        cases
+    }
+
+    #[test]
+    fn read_encoded_u32_decodes_every_variable_width() {
+        for (bytes, expected) in encoded_u32_widths() {
+            let mut reader = BitReader::from_bytes(&bytes);
+            assert_eq!(
+                reader.read_encoded_u32().unwrap(),
+                expected,
+                "bytes {bytes:02x?}"
+            );
+        }
+    }
+
     #[test]
     fn all_zero_lengths_build_an_empty_table() {
         let table = Huffman::from_lengths(&[0u8; 4]).expect("build");

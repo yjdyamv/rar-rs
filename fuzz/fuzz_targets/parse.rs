@@ -12,5 +12,5 @@ fuzz_target!(|data: &[u8]| rar_rs_fuzz::parse(data));
 
 #[cfg(not(fuzzing))]
 fn main() {
-    rar_rs_fuzz::standalone("parse", rar_rs_fuzz::CORPUS_PARSE, rar_rs_fuzz::parse);
+    rar_rs_fuzz::standalone("parse", &rar_rs_fuzz::corpus_parse(), rar_rs_fuzz::parse);
 }

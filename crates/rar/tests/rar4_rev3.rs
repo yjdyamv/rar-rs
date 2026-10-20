@@ -1,13 +1,20 @@
 //! Legacy RAR 1.5–4.x recovery volumes (`.rev`): build (`rv`) and rebuild
-//! (`rc`) round trips over our own multi-volume sets plus the RAR 3.00 /
-//! 4.20 fixtures from the `rars` corpus (both legacy and trailer layouts).
+//! (`rc`) round trips over our own multi-volume sets plus recovery sets that
+//! WinRAR 3.00 / 3.93 / 4.20 generate on demand, covering all three naming
+//! shapes ever written: `<base>4_3_N.rev`, `<base>N.rev` and the modern
+//! `.partN.rev` trailer layout.
+
+#[path = "support/mod.rs"]
+mod support;
+#[allow(unused_imports)]
+use support::*;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use rar_rs::{ArchiveVersion, ArchiveWriter, CompressionLevel, EntryWriteOptions, WriterOptions};
 
-const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rev3/");
+use support::corpus;
 
 fn payload() -> Vec<u8> {
     let mut state = 0x1234_5678u32;
@@ -161,42 +168,63 @@ fn damaged_volume_is_rebuilt_and_kept_as_bad() {
 }
 
 #[test]
-fn rar300_fixtures_rebuild_from_both_layouts() {
-    for (set, rev, victim, expected) in [
-        (
-            "oldstyle",
-            "rev_oldstyle.part4_2_1.rev",
-            1usize,
-            "rev_oldstyle.part2.rar",
-        ),
-        (
-            "newstyle",
-            "rev_newstyle.part1.rev",
-            1usize,
-            "rev_newstyle.part2.rar",
-        ),
+fn winrar_recovery_layouts_rebuild_a_missing_volume() {
+    // Both layouts WinRAR ever wrote: 3.00's `<base>4_3_N.rev` next to an
+    // old-numbered set, and 4.20's `set.partN.rev` trailer next to `.partN.rar`.
+    for (layout, made, rev_prefix) in [
+        ("oldstyle", corpus::rev3_oldstyle(), "arc4_3_"),
+        ("late", corpus::rev3_oldstyle_late(), "arc1."),
+        ("newstyle", corpus::rev3_newstyle(), "arc.part"),
     ] {
+        let Some(made) = made else { continue };
+        let revs: Vec<PathBuf> = made
+            .files
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "rev"))
+            .cloned()
+            .collect();
+        assert!(!revs.is_empty(), "{layout}: no .rev volumes generated");
+        assert!(
+            revs.iter().any(|p| p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .starts_with(rev_prefix)),
+            "{layout}: unexpected rev names {:?}",
+            made.names()
+        );
+
+        // Copy the whole set to a scratch dir so deleting a volume does not
+        // disturb the cached generation.
         let dir = tempfile::tempdir().unwrap();
-        for entry in fs::read_dir(FIX).unwrap().flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(&format!("rev_{set}.")) {
-                fs::copy(entry.path(), dir.path().join(&name)).unwrap();
+        let mut volumes: Vec<PathBuf> = Vec::new();
+        for path in &made.files {
+            let name = path.file_name().unwrap();
+            let copy = dir.path().join(name);
+            fs::copy(path, &copy).unwrap();
+            let lower = name.to_string_lossy().to_lowercase();
+            let ext = lower.rsplit('.').next().unwrap_or_default();
+            let legacy_part = ext
+                .strip_prefix('r')
+                .is_some_and(|tail| tail.len() == 2 && tail.chars().all(|c| c.is_ascii_digit()));
+            if ext == "rar" || legacy_part {
+                volumes.push(copy);
             }
         }
-        let rev_path = dir.path().join(rev);
-        assert!(rev_path.exists(), "{set}: {rev} fixture missing");
-        let volumes: Vec<PathBuf> = (1..=4)
-            .map(|index| dir.path().join(format!("rev_{set}.part{index}.rar")))
-            .collect();
-        let expected_bytes = fs::read(dir.path().join(expected)).unwrap();
-        fs::remove_file(&volumes[victim]).unwrap();
+        volumes.sort();
+        assert!(volumes.len() >= 4, "{layout}: {} volumes", volumes.len());
 
-        let rebuilt = rar_rs::rebuild_missing_volumes(&rev_path).unwrap();
-        assert_eq!(rebuilt, vec![volumes[victim].clone()], "{set}");
+        let victim = &volumes[1];
+        let expected = fs::read(victim).unwrap();
+        let rev = dir.path().join(revs[0].file_name().unwrap());
+        fs::remove_file(victim).unwrap();
+
+        let rebuilt = rar_rs::rebuild_missing_volumes(&rev).unwrap();
+        assert_eq!(rebuilt, vec![victim.clone()], "{layout}");
         assert_eq!(
-            fs::read(&volumes[victim]).unwrap(),
-            expected_bytes,
-            "{set}: rebuilt volume bytes"
+            fs::read(victim).unwrap(),
+            expected,
+            "{layout}: rebuilt volume bytes"
         );
     }
 }
@@ -205,8 +233,27 @@ fn rar300_fixtures_rebuild_from_both_layouts() {
 /// MHD_NEWNUMBERING, which the listing uses for the `volume N` annotation.
 #[test]
 fn legacy_new_numbering_sets_are_reported() {
-    let path = Path::new(FIX).join("rev_newstyle.part2.rar");
-    let rar = rar_rs::ArchiveReader::open(&path).unwrap();
+    let Some(made) = corpus::rev3_newstyle() else {
+        return;
+    };
+    let second = made
+        .files
+        .iter()
+        .find(|p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .ends_with("part2.rar")
+        })
+        .expect("second volume");
+    let rar = rar_rs::ArchiveReader::open(second).unwrap();
     assert!(rar.is_new_numbering());
     assert!(rar.entries().count() >= 1);
+
+    // The legacy layout reports the old numbering instead.
+    let Some(old) = corpus::rev3_oldstyle() else {
+        return;
+    };
+    let rar = rar_rs::ArchiveReader::open(old.path()).unwrap();
+    assert!(!rar.is_new_numbering());
 }

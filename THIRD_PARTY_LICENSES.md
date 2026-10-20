@@ -1,6 +1,6 @@
 # Third-Party Source Inventory
 
-Where the non-original code and fixtures in this repository came from, and under
+Where the non-original code and test data in this repository came from, and under
 what terms. Not legal advice, and not a substitute for [`LICENSE`](LICENSE),
 [`NOTICE`](NOTICE) or the upstream license texts ([`LICENSES/`](LICENSES/)).
 
@@ -48,9 +48,6 @@ checked-out `rars` repository, so treat a row as the in-tree claim.
   reference for the RAR5 bitstream. BSD-2-Clause notices: `codec/mod.rs`,
   `codec/modern/lzss_huff/{mod,encoder,decoder}`, and `codec/common/huffman.rs`
   (stated as a basis rather than a license line).
-- **`rars` test corpus**: the legacy fixtures under
-  `crates/rar/tests/fixtures/rar13` and `rar40/`. Test inputs, not source; their
-  own redistribution review is still outstanding.
 - **`smart-archive-rar`**: origin of the binding now under `crates/rar-napi`.
 - **RAR/WinRAR tools**: black-box interoperability references only; no code or
   binaries from them are included.
@@ -59,5 +56,5 @@ Registry, npm and build-time dependencies are pinned in `Cargo.lock`,
 `fuzz/Cargo.lock` and `crates/rar-napi/package-lock.json`, which are the
 authoritative lists; `cargo deny` checks their licenses against `deny.toml`.
 
-When adding copied code, fixtures or a dependency: record the source and exact
+When adding copied code, test data or a dependency: record the source and exact
 revision, keep the upstream notices, and update the lockfile.

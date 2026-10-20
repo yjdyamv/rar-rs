@@ -18,7 +18,7 @@ fn main() {
     // churn is slow), so they default lower than the read targets.
     let iterations = rar_rs_fuzz::standalone_with(
         "write",
-        rar_rs_fuzz::CORPUS_ALL,
+        &rar_rs_fuzz::corpus_all(),
         rar_rs_fuzz::write_roundtrip,
         20_000,
     );

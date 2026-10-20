@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-10-02 @ `3dfd460`；实现细节以源码为准。
+> 最后核对：2026-10-20 @ working tree；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -38,6 +38,11 @@
   build 矩阵里跑一次；另有一条 `lint-windows`（clippy 全目标 + WinRAR 开关契约 +
   绑定单元测试），cargo deny 每周定时重跑一次以接住新的 RustSec 公告；七目标
   fuzz；取消钩子；QO 快路径；流式修复； 零填充分卷。
+- **测试归档零提交**：legacy 套件（RAR 1.3–4.x、`.rev`、VM 过滤器、恢复记录）
+  全部由 `.cache/winrar/` 的官方 `Rar.exe` 现场生成（`tests/support/generate.rs` +
+  `corpus.rs`），RAR 1.3/1.4 与 v26/v36/v70 用我们自己的 writer 或改 `unp_ver`
+  字节；`tests/data/` 只留两份原始载荷。代价：没有 tool cache 的机器上这些套件
+  打 `SKIP:` 跳过（本地闸门覆盖，CI smoke 不覆盖）。
 
 ## 下一步
 
@@ -68,6 +73,14 @@
 - [ ] **保持**：新结论写进
       PITFALLS（规则）或本文件（下一步），**不要把过程写回来**。
       文档锚点（`最后核对`）在改行为时同步刷新。
+
+### 测试覆盖（对齐 CI）
+
+- [x] **CI 拉官方工具跑生成套件**：`scripts/fetch_winrar.py`（标准库，双平台）
+      是唯一下载入口，两个 GitHub job 都先跑它；`lint-windows` 用
+      `SA_REQUIRE_WINRAR=1` 跑全套（覆盖 2.90/3.00 配方），Ubuntu job 跑同一批
+      target 但允许自跳（rarlab 的 Linux 版从 3.93 起）。
+      注意上限仍是 RAR4 写入 6.23、`cf` 4.20、`rv3` 4.20。
 
 ### 通用库的对外面（已做一半，剩打包）
 

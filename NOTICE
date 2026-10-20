@@ -43,10 +43,10 @@ smart-archive-rar (BSD-2-Clause)
   napi-rs and emnapi machinery is third-party and carries its own licenses. No
   npm package is published: CI builds the artifacts for GitHub Releases.
 
-test fixtures
-  crates/rar/tests/fixtures/{rar13,rar40} contain archive files copied from
-  the rars test corpus. They are test inputs, not source code, and remain
-  subject to the terms of that corpus.
+test archives
+  No archive files are committed. The test suites build their inputs on the fly:
+  either with the cached console tools from RARLAB (`.cache/winrar/<version>`,
+  not part of this repository) or with this crate's own writer.
 
 RAR/WinRAR tools
   Used only as black-box interoperability references for testing (set

@@ -103,6 +103,17 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
+      - name: Cache WinRAR test builds
+        uses: actions/cache@v4
+        with:
+          path: .cache/winrar
+          key: winrar-tools-linux-${{ hashFiles('scripts/fetch_winrar.py') }}
+      - name: Fetch WinRAR test builds
+        # The legacy suites build their archives at run time instead of shipping
+        # blobs. rarlab published Linux tarballs from 3.93 on, so 2.90 and 3.00 —
+        # and every recipe that needs them — self-skip here; `lint-windows` runs
+        # the full set.
+        run: python3 scripts/fetch_winrar.py
       - name: Cargo fmt (workspace + fuzz)
         # `fuzz/` is not a workspace member, so `cargo fmt --all` never covers
         # its targets.
@@ -159,6 +170,18 @@ jobs:
           cargo test -p rar-rs --all-features --locked
           cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
           cargo test -p rar-rs-napi --lib --locked
+      - name: Cargo test (generated legacy corpus)
+        # The generated-archive suites check the decoders against archives the
+        # official Linux builds write, which is a different byte diet from the
+        # Windows ones (host OS field, path separators, mtime/tz). No
+        # `SA_REQUIRE_WINRAR` here: the releases this host has no build for must
+        # keep skipping instead of failing the job.
+        run: |
+          cargo test -p rar-rs --locked \
+            --test rar4_read --test rar13_read --test rar4_rev3 \
+            --test rar4_edge_cases --test rar_vm_filters \
+            --test streaming_edge_cases --test structured_recovery_mutations \
+            --test archive_editor --test winrar_generation --test rar50_roundtrip
       - name: Workspace versions agree
         # The release job only compares the tag against `crates/rar-napi`, so the
         # library and CLI drifted (0.1.2 vs the binding's 0.7.0). Everything here
@@ -262,9 +285,10 @@ jobs:
   # `lint` runs on Linux only. Everything under `#[cfg(windows)]` — the
   # WinRAR switch contract in cli_behavior, the separator hazards, the
   # windows-sys code paths — would otherwise be compiled for the first time
-  # by the release matrix. `cli_behavior` and `volume_bare_name` are hermetic
-  # (temp dirs plus the CARGO_BIN_EXE_* binaries), so this adds no
-  # official-tool flake.
+  # by the release matrix. Those suites are hermetic (temp dirs plus the
+  # CARGO_BIN_EXE_* binaries); this job additionally downloads the official
+  # builds and runs the generated legacy corpus, which is the only place the
+  # RAR 1.5-4.x decode paths are exercised against real archives.
   lint-windows:
     name: Lint + tests (windows)
     runs-on: windows-latest
@@ -279,8 +303,31 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint-windows
+      - name: Cache WinRAR test builds
+        uses: actions/cache@v4
+        with:
+          path: .cache/winrar
+          key: winrar-tools-${{ hashFiles('scripts/fetch_winrar.py') }}
+      - name: Fetch WinRAR test builds
+        # The legacy suites build their archives with the official tool at run
+        # time instead of shipping blobs, so they need the releases on disk.
+        run: python scripts/fetch_winrar.py
       - name: Clippy (workspace, all features and targets)
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Cargo test (official-tool generated corpus)
+        # `SA_REQUIRE_WINRAR=1` turns a missing tool or a failed generation into
+        # a test failure, so this job proves the RAR 1.5-4.x decode coverage
+        # actually ran rather than silently skipping.
+        shell: bash
+        env:
+          SA_REQUIRE_WINRAR: "1"
+        run: |
+          cargo test -p rar-rs --lib --locked
+          cargo test -p rar-rs --locked \
+            --test rar4_read --test rar13_read --test rar4_rev3 \
+            --test rar4_edge_cases --test rar_vm_filters \
+            --test streaming_edge_cases --test structured_recovery_mutations \
+            --test archive_editor --test winrar_generation --test rar50_roundtrip
       - name: Cargo test (CLI switch contract + binding unit tests)
         # The binding's `error.rs`/`guard.rs` tests pin the public error
         # contract (code + status + marker prefix); clippy only compiles them.

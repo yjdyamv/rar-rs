@@ -10,12 +10,12 @@
 #
 # Usage: scripts/wsl/stage12-linux.sh      (env: REPO, RARLAB, WORK, SIZE_MB)
 # Prereqs: build with `cargo build --release -p rar-cli` (the script does it)
-#          and scripts/wsl/fetch-rarlab.sh for the official unrar.
+#          and `python3 scripts/fetch_winrar.py 7-23` for the official unrar.
 set -uo pipefail
 
 REPO=${REPO:-$HOME/rar-rs}
-RARLAB=${RARLAB:-$HOME/rarlab}
-UNRAR=${UNRAR:-$RARLAB/rar723/unrar}
+RARLAB=${RARLAB:-$REPO/.cache/winrar}
+UNRAR=${UNRAR:-$RARLAB/7-23/unrar}
 RAR=${RAR:-$REPO/target/release/rar}
 WORK=${WORK:-$HOME/stage12}
 SIZE_MB=${SIZE_MB:-66}
@@ -30,7 +30,7 @@ fi
 echo "=== build release CLI ==="
 cargo build --release -p rar-cli --locked 2>&1 | tail -2
 [ -x "$RAR" ] || { echo "missing $RAR" >&2; exit 1; }
-[ -x "$UNRAR" ] || { echo "missing $UNRAR -- run scripts/wsl/fetch-rarlab.sh" >&2; exit 1; }
+[ -x "$UNRAR" ] || { echo "missing $UNRAR -- run python3 scripts/fetch_winrar.py 7-23" >&2; exit 1; }
 "$UNRAR" | head -1
 
 rm -rf "$WORK"; mkdir -p "$WORK"; cd "$WORK" || exit 1

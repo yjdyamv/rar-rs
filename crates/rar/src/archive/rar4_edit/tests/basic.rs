@@ -83,14 +83,21 @@ fn scan_layout_accepts_an_archive_without_endarc() {
 /// `MHD_COMMENT`.
 #[test]
 fn patch_main_header_preserves_an_embedded_comment() {
-    let fixture = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/rar40/rar2/comment_nopsw.rar"
-    ))
-    .unwrap();
-    let main = &fixture[7..7 + 51];
-    assert_eq!(main.len(), 51);
+    let Some(made) = crate::test_winrar::archive_with(
+        "2-90",
+        &["-m0", "-zcomment.txt"],
+        &["a.txt", "b.txt"],
+        &["comment.txt"],
+    ) else {
+        return;
+    };
+    let bytes = made.read();
+    let head = &bytes[7..];
+    let size = usize::from(u16::from_le_bytes([head[5], head[6]]));
+    let main = &head[..size];
+    assert_eq!(main[2], 0x73, "main header");
     assert_ne!(u16::from_le_bytes([main[3], main[4]]) & MHD_COMMENT, 0);
+    assert!(size > 13, "the writer embedded the comment: {size} bytes");
 
     let patched = patch_main_header(main, MHD_RECOVERY).unwrap();
     assert_eq!(patched.len(), main.len(), "the embedded comment must stay");
@@ -105,18 +112,27 @@ fn patch_main_header_preserves_an_embedded_comment() {
 }
 
 /// The fixture-based RR edit (and a follow-up delete) on an archive whose
-/// comment lives in the main header must keep the full 51-byte header with
-/// its nested comment, stay parseable, and leave the members extractable.
+/// comment lives in the main header must keep the whole header with its
+/// nested comment, stay parseable, and leave the members extractable.
 /// Before the fix `patch_main_header` truncated the header to 13 bytes and
 /// every later block parsed 38 bytes late.
 #[test]
 fn recovery_and_delete_keep_an_embedded_main_comment() {
-    let fixture_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/rar40/rar2/comment_nopsw.rar"
-    );
-    let fixture = std::fs::read(fixture_path).unwrap();
-    // The fixture predates the optional end-of-archive marker; the editor
+    let Some(made) = crate::test_winrar::archive_with(
+        "2-90",
+        &["-m0", "-zcomment.txt"],
+        &["a.txt", "b.txt"],
+        &["comment.txt"],
+    ) else {
+        return;
+    };
+    let fixture = made.read();
+    let head = &fixture[7..];
+    let size = usize::from(u16::from_le_bytes([head[5], head[6]]));
+    let main = &head[..size];
+    let comment = main[13..].to_vec();
+
+    // The writer predates the optional end-of-archive marker; the editor
     // requires one.
     let mut bytes = fixture.clone();
     bytes.extend_from_slice(&build_endarc_single());
@@ -124,15 +140,15 @@ fn recovery_and_delete_keep_an_embedded_main_comment() {
     let path = dir.path().join("rar2_cmt.rar");
     std::fs::write(&path, &bytes).unwrap();
 
-    // Expected member bytes straight from the untouched fixture.
+    // Expected member bytes straight from the untouched archive.
     let (expected_1, expected_2) = {
-        let mut untouched = RarArchive::open(fixture_path).unwrap();
+        let mut untouched = RarArchive::open(made.path()).unwrap();
         (
             untouched
-                .read_with_options("FILE1.TXT", Default::default())
+                .read_with_options("a.txt", Default::default())
                 .unwrap(),
             untouched
-                .read_with_options("FILE2.TXT", Default::default())
+                .read_with_options("b.txt", Default::default())
                 .unwrap(),
         )
     };
@@ -146,11 +162,11 @@ fn recovery_and_delete_keep_an_embedded_main_comment() {
     }
     let edited = std::fs::read(&path).unwrap();
     let layout = scan_layout(&edited, 0, None).unwrap();
-    assert_eq!(layout.main_header.len(), 51, "full main header kept");
+    assert_eq!(layout.main_header.len(), size, "full main header kept");
     assert_ne!(layout.main_flags & MHD_RECOVERY, 0, "record flag set");
     assert_eq!(
         &layout.main_header[13..],
-        &fixture[20..58],
+        comment.as_slice(),
         "embedded comment unchanged"
     );
     assert_eq!(
@@ -160,17 +176,17 @@ fn recovery_and_delete_keep_an_embedded_main_comment() {
     let mut archive = RarArchive::open(&path).unwrap();
     assert_eq!(
         archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
-        ["FILE1.TXT", "FILE2.TXT"]
+        ["a.txt", "b.txt"]
     );
     assert_eq!(
         archive
-            .read_with_options("FILE1.TXT", Default::default())
+            .read_with_options("a.txt", Default::default())
             .unwrap(),
         expected_1
     );
     assert_eq!(
         archive
-            .read_with_options("FILE2.TXT", Default::default())
+            .read_with_options("b.txt", Default::default())
             .unwrap(),
         expected_2
     );
@@ -179,13 +195,13 @@ fn recovery_and_delete_keep_an_embedded_main_comment() {
     // embedded comment too.
     {
         let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
-        let file2 = editor.unique_entry("FILE2.TXT").unwrap();
+        let file2 = editor.unique_entry("b.txt").unwrap();
         assert_eq!(editor.delete_entries(&[file2]).unwrap(), 1);
     }
     let after_delete = std::fs::read(&path).unwrap();
     let layout = scan_layout(&after_delete, 0, None).unwrap();
-    assert_eq!(layout.main_header.len(), 51);
-    assert_eq!(&layout.main_header[13..], &fixture[20..58]);
+    assert_eq!(layout.main_header.len(), size);
+    assert_eq!(&layout.main_header[13..], comment.as_slice());
     assert_eq!(
         u16::from_le_bytes([layout.main_header[0], layout.main_header[1]]),
         header_crc16(&layout.main_header[2..13])
@@ -193,11 +209,11 @@ fn recovery_and_delete_keep_an_embedded_main_comment() {
     let mut archive = RarArchive::open(&path).unwrap();
     assert_eq!(
         archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
-        ["FILE1.TXT"]
+        ["a.txt"]
     );
     assert_eq!(
         archive
-            .read_with_options("FILE1.TXT", Default::default())
+            .read_with_options("a.txt", Default::default())
             .unwrap(),
         expected_1
     );
@@ -400,16 +416,16 @@ fn dir_rename_expands_to_descendants_and_rebuilds_rr() {
 /// UTF-16LE must decode back to the exact text `rar cw` would emit.
 #[test]
 fn reads_winrar_623_rar4_comment() {
-    let fixture = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/rar40/comment/comment_zh.rar"
-    );
-    let expected = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/rar40/comment/comment.txt"
-    ))
-    .unwrap();
-    let mut archive = RarArchive::open(fixture).unwrap();
+    let Some(made) = crate::test_winrar::archive_with(
+        "6-23",
+        &["-ma4", "-m3", "-zcomment_zh.txt"],
+        &["text.txt"],
+        &["comment_zh.txt"],
+    ) else {
+        return;
+    };
+    let expected = crate::test_winrar::payload("comment_zh.txt");
+    let mut archive = RarArchive::open(made.path()).unwrap();
     assert_eq!(archive.get_comment().unwrap(), Some(expected));
 }
 

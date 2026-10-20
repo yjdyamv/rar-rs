@@ -1,32 +1,17 @@
 #![allow(dead_code)] // every test binary links the whole module; each uses a subset
-//! Shared interop-test helpers: the vendored fixture manifest plus raw
-//! RAR5 block scanners used by the byte-level assertions.
+//! Shared interop-test helpers: on-the-fly archive generation with the real
+//! WinRAR builds, plus raw RAR5 block scanners used by the byte-level
+//! assertions.
+//!
+//! Archives are no longer vendored: `generate` drives the cached `Rar.exe`
+//! builds (see that module) so every test exercises archives that official
+//! software wrote moments ago.
+
+pub mod corpus;
+pub mod generate;
 
 use std::io::Write;
 use std::path::Path;
-
-pub const FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/rar50/winrar5_multiple_files.rar"
-);
-pub const FIXTURE_FILES: [(&str, &str); 4] = [
-    (
-        "test1.bin",
-        "7d89f86f9f69d744ffff3fc043e15bf89fc3ffc134ffcbb31d164a99bb8b67b0",
-    ),
-    (
-        "test2.bin",
-        "f81e6fceeeab366306b23466bf6bb3aac2875e0906dc20a8652be0696ceb15a2",
-    ),
-    (
-        "test3.bin",
-        "5e621f2b6ce8fed758c3df8221f994eda55d1e432c7cc4349c34a30ec2e1c43d",
-    ),
-    (
-        "test4.bin",
-        "2627f40180217252956edb9a426e8d3e344adaf89019d3bccbe04f6c3416dcdd",
-    ),
-];
 
 pub fn sha256(data: &[u8]) -> String {
     // sha2 is a dependency of the library; expose it via the already-linked

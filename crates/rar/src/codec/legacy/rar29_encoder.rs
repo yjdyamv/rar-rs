@@ -2338,6 +2338,34 @@ mod tests {
         );
     }
 
+    /// The delta filter record stores its channel count in one byte, so the
+    /// decoder has to cope with counts past 32 even though the writer only
+    /// picks small ones (`-mcd<N>+` allows 1-31).
+    #[test]
+    fn delta_filter_with_more_than_thirty_two_channels_roundtrips() {
+        const CHANNELS: usize = 64;
+        let mut input = Vec::with_capacity(CHANNELS * 512);
+        let mut level = [0u8; CHANNELS];
+        let mut seed = 99u32;
+        while input.len() < CHANNELS * 480 {
+            for sample in level.iter_mut() {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                *sample = sample.wrapping_add(((seed >> 24) % 9) as u8);
+                input.push(*sample);
+            }
+        }
+        let mut encoder = Unpack29Encoder::with_options(options_for_level(3));
+        let packed = encoder
+            .encode_member_with_filter(&input, Rar29FilterKind::Delta { channels: CHANNELS }, None)
+            .unwrap();
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
+        assert_eq!(
+            decoder.decode_member(&packed, input.len() as u64).unwrap(),
+            input,
+            "64-channel delta roundtrip mismatch"
+        );
+    }
+
     fn audio_wave_data(bytes: usize) -> Vec<u8> {
         // Interleaved 8-bit two-channel audio: per-channel smooth walk.
         let mut data = Vec::with_capacity(bytes);

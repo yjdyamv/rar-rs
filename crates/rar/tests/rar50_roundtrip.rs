@@ -15,11 +15,14 @@ fn opts(level: u8) -> rar_rs::EntryWriteOptions {
 }
 
 #[test]
-fn reads_winrar5_fixture_and_extracts_byte_identical_data() {
-    let mut rar = ArchiveReader::open(FIXTURE).expect("open fixture");
-    let count = rar.entries().count();
-    assert_eq!(count, 4);
-    for (name, _) in FIXTURE_FILES {
+fn reads_generated_rar5_archive_and_extracts_byte_identical_data() {
+    let Some(made) = support::corpus::rar5_multiple_files() else {
+        return;
+    };
+    let names = ["test1.bin", "test2.bin", "test3.bin", "test4.bin"];
+    let mut rar = ArchiveReader::open(made.path()).expect("open generated archive");
+    assert_eq!(rar.entries().count(), names.len());
+    for name in names {
         assert!(
             rar.entries().any(|e| e.name() == name),
             "missing entry {name}"
@@ -29,15 +32,19 @@ fn reads_winrar5_fixture_and_extracts_byte_identical_data() {
         assert_eq!(
             entry.version(),
             rar_rs::ArchiveVersion::V50,
-            "WinRAR 5 fixture members are v50"
+            "WinRAR 5+ members are v50"
         );
     }
 
-    for (name, expected_sha) in FIXTURE_FILES {
+    for name in names {
         let data = rar
             .read_entry(rar.unique_entry(name).unwrap())
             .expect("read entry");
-        assert_eq!(sha256(&data), *expected_sha, "content mismatch for {name}");
+        assert_eq!(
+            data,
+            support::generate::payload(name),
+            "content mismatch for {name}"
+        );
     }
 }
 
@@ -817,7 +824,7 @@ fn lz_tail_match_fixture_roundtrips_without_panic() {
     // 341bd79: this 362-byte fixture ends with two bytes that match an
     // earlier position at a cached distance, which used to index past the
     // end of the buffer at `pos = size - 2` and abort the process.
-    let data = include_bytes!("fixtures/rar50/tail-match-362.bin");
+    let data = include_bytes!("data/tail-match-362.bin");
     let dir = make_temp_dir();
     let path = dir.path().join("tail.rar");
 
@@ -908,7 +915,7 @@ fn multi_chunk_compressed_file_roundtrips() {
 fn dense_x86_multi_chunk_roundtrips_byte_identical() {
     let fixture = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/x86/ntoskrnl_dense_prefix.bin"
+        "/tests/data/ntoskrnl_dense_prefix.bin"
     );
     let data = std::fs::read(fixture).expect("read x86 fixture");
     // Small dict + small chunks make the window grow (and the frame slide)

@@ -5,6 +5,8 @@
 //! (`#[cfg(fuzzing)]`) and the standalone mutation loop (`standalone`),
 //! so the targets run on stable Rust without libFuzzer.
 
+use rar_rs::{ArchiveVersion, WriterOptions};
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -79,54 +81,93 @@ impl Rng {
     }
 }
 
-/// Embedded seed corpus: real WinRAR output plus the tail-match
-/// regression input. Mutations of these hit deep parser paths that raw
-/// random bytes almost never reach.
-pub static CORPUS_WINRAR: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../crates/rar/tests/fixtures/rar50/winrar5_multiple_files.rar"
-));
+/// Seed archives are built at run time by our own writer: the crate embeds no
+/// checked-in archives, and generating them keeps the seeds in step with the
+/// formats the library can produce (RAR 1.5/2.0/3.x/5).
+fn seed_payload(index: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut state = 0x9E37_79B9u32 ^ (index as u32).wrapping_mul(2_654_435_761);
+    while out.len() < 8_000 + index * 3_000 {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        if index % 2 == 0 {
+            // Compressible: repeating text with a slow drift.
+            out.extend_from_slice(b"rar-rs fuzz seed corpus, repeating line\r\n");
+        } else {
+            out.push((state >> 24) as u8);
+        }
+    }
+    out
+}
+
+fn build_seed(version: ArchiveVersion, level: u8, recovery_percent: Option<u8>) -> Vec<u8> {
+    let dir = tempfile::tempdir().expect("seed tempdir");
+    let path = dir.path().join("seed.rar");
+    let mut options = WriterOptions::new().compression(version);
+    if let Some(percent) = recovery_percent {
+        options = options.recovery_percent(percent);
+    }
+    let mut writer =
+        rar_rs::ArchiveWriter::create_with(&path, options).expect("create seed archive");
+    let entry = rar_rs::EntryWriteOptions::new()
+        .compression_level(rar_rs::CompressionLevel::try_from(level).expect("level"));
+    for (index, name) in ["test1.bin", "test2.bin", "test3.bin", "test4.bin"]
+        .iter()
+        .enumerate()
+    {
+        writer
+            .add_bytes(name, &seed_payload(index), entry)
+            .expect("add seed member");
+    }
+    writer.finish().expect("finish seed archive");
+    std::fs::read(&path).expect("read seed archive")
+}
+
+/// RAR5 archive with four members: the general-purpose parser seed.
+pub fn corpus_winrar() -> &'static [u8] {
+    static SEED: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    SEED.get_or_init(|| build_seed(ArchiveVersion::V50, 3, None))
+}
+
+/// Tail-match regression input (raw member payload, not an archive).
 pub static CORPUS_TAIL_MATCH: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../crates/rar/tests/fixtures/rar50/tail-match-362.bin"
+    "/../crates/rar/tests/data/tail-match-362.bin"
 ));
 
-pub static CORPUS_PARSE: &[&[u8]] = &[CORPUS_WINRAR, CORPUS_TAIL_MATCH];
-pub static CORPUS_ALL: &[&[u8]] = &[CORPUS_WINRAR, CORPUS_TAIL_MATCH, b"Rar!\x1a\x07\x01\x00"];
+pub fn corpus_parse() -> Vec<&'static [u8]> {
+    vec![corpus_winrar(), CORPUS_TAIL_MATCH]
+}
 
-/// Genuine WinRAR RAR 7.23 archive with a `-rr5%` inline recovery record
-/// (`{RB}` chunks with WinRAR's own plan/geometry).
-pub static CORPUS_RR: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../crates/rar/tests/fixtures/rar50/winrar5_with_recovery_rr5.rar"
-));
+pub fn corpus_all() -> Vec<&'static [u8]> {
+    let mut seeds = corpus_parse();
+    seeds.push(b"Rar!\x1a\x07\x01\x00");
+    seeds
+}
 
-/// Small genuine legacy archives: RAR 1.4, RAR 2.0, a WinRAR 5.91 STORE
-/// RAR4 archive, a RAR 3.0 compressed archive and a RAR 2.5 `PROTECT_HEAD`
-/// recovery-record archive. The `legacy` target mutates their block
-/// envelopes with the 16-bit header CRC recomputed where it is verified.
-pub static CORPUS_LEGACY: &[&[u8]] = &[
-    include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../crates/rar/tests/fixtures/rar13/MULTIFIL.RAR"
-    )),
-    include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../crates/rar/tests/fixtures/rar40/rar2/rar20.rar"
-    )),
-    include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../crates/rar/tests/fixtures/rar40/winrar591_store_m0.rar"
-    )),
-    include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../crates/rar/tests/fixtures/rar40/rar300/compressed_text_rar300.rar"
-    )),
-    include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../crates/rar/tests/fixtures/rar40/repair/rar250_protect_head_rr1.rar"
-    )),
-];
+/// RAR5 archive with an inline `{RB}` recovery record, written by us: the
+/// repair target mutates its real chunk fields and shard states.
+pub fn corpus_rr() -> &'static [u8] {
+    static SEED: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    SEED.get_or_init(|| build_seed(ArchiveVersion::V50, 3, Some(5)))
+}
+
+/// Small legacy archives — RAR 1.5, RAR 2.0, RAR 3.x STORE and compressed —
+/// whose block envelopes the `legacy` target mutates with the 16-bit header
+/// CRC recomputed where it is verified.
+pub fn corpus_legacy() -> &'static [Vec<u8>] {
+    static SEEDS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    SEEDS.get_or_init(|| {
+        vec![
+            build_seed(ArchiveVersion::V15, 0, None),
+            build_seed(ArchiveVersion::V20, 0, None),
+            build_seed(ArchiveVersion::V29, 0, None),
+            build_seed(ArchiveVersion::V29, 3, None),
+            build_seed(ArchiveVersion::V29, 5, Some(1)),
+        ]
+    })
+}
 
 /// Produce one mutated input from the corpus (dict-style: start from a
 /// seed, apply 1-8 byte-level edits, occasionally splice another seed).
@@ -732,8 +773,8 @@ pub fn recovery(data: &[u8]) {
     // reaches `split_prefix_shards`, the relocation scan and the
     // Reed-Solomon solve.
     let mut rng = Rng::new(structured::seed_from_bytes(data));
-    let prefix_len = 64 + rng.below(CORPUS_WINRAR.len().saturating_sub(64).max(1));
-    let prefix = &CORPUS_WINRAR[..prefix_len.min(CORPUS_WINRAR.len())];
+    let prefix_len = 64 + rng.below(corpus_winrar().len().saturating_sub(64).max(1));
+    let prefix = &corpus_winrar()[..prefix_len.min(corpus_winrar().len())];
     let pct = u64::from(data.first().copied().unwrap_or(2) % 20) + 1;
     for (case, _) in structured::inline_rr_cases(prefix, pct, &mut rng) {
         let _ = rar_rs::repair_archive(&case);
@@ -743,8 +784,8 @@ pub fn recovery(data: &[u8]) {
     // chunk fields/states with the CRC recomputed. Gated on a larger input
     // so the per-iteration cost stays close to the raw loop's.
     if data.len() >= 256 {
-        let _ = rar_rs::repair_archive(CORPUS_RR);
-        for (case, _) in structured::rr_archive_mutations(CORPUS_RR, &mut rng) {
+        let _ = rar_rs::repair_archive(corpus_rr());
+        for (case, _) in structured::rr_archive_mutations(corpus_rr(), &mut rng) {
             let _ = rar_rs::repair_archive(&case);
         }
     }
@@ -774,8 +815,8 @@ pub fn rev(data: &[u8]) {
 
     // Streaming repair of one structured inline-RR case (a different code
     // path from the in-memory repair in `recovery`).
-    let prefix_len = 64 + rng.below(CORPUS_WINRAR.len().saturating_sub(64).max(1));
-    let prefix = &CORPUS_WINRAR[..prefix_len.min(CORPUS_WINRAR.len())];
+    let prefix_len = 64 + rng.below(corpus_winrar().len().saturating_sub(64).max(1));
+    let prefix = &corpus_winrar()[..prefix_len.min(corpus_winrar().len())];
     let pct = u64::from(data.first().copied().unwrap_or(2) % 20) + 1;
     let cases = structured::inline_rr_cases(prefix, pct, &mut rng);
     if !cases.is_empty() {
@@ -923,7 +964,7 @@ pub fn legacy(data: &[u8]) {
     // recovery-repair exercise below — never ran. `executed` makes any
     // future starvation loud instead of silent.
     const CASES_PER_INPUT: usize = 64;
-    let per_seed: Vec<Vec<structured::Case>> = CORPUS_LEGACY
+    let per_seed: Vec<Vec<structured::Case>> = corpus_legacy()
         .iter()
         .map(|seed| structured::legacy_block_cases(seed, &mut rng))
         .collect();
@@ -958,7 +999,7 @@ pub fn legacy(data: &[u8]) {
             }
             // The RAR 2.5 `PROTECT_HEAD` seed exercises the legacy
             // recovery scan/repair on the mutated header stream.
-            if CORPUS_LEGACY[seed_index].starts_with(b"Rar!\x1a\x07\x00") {
+            if corpus_legacy()[seed_index].starts_with(b"Rar!\x1a\x07\x00") {
                 let _ = rar_rs::repair_legacy_archive_path(&path, &fixed);
             }
         }

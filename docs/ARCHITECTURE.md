@@ -21,7 +21,7 @@
 | `crates/rar-cli`    | binary crate：`rar` + `unrar`                                               |
 | `crates/rar-napi`   | napi-rs 绑定（原生 `.node` + `wasm32-wasip1-threads`）；不发 npm，CI 把产物 |
 | `fuzz/`             | cargo-fuzz 目标，独立 crate（不是 workspace 成员）                          |
-| `crates/rar/tests/` | 共享集成夹具与互操作测试                                                    |
+| `crates/rar/tests/` | 集成测试；归档现场生成（`support/generate.rs`），`data/` 放原始载荷     |
 
 三个 crate 都不依赖外部 RAR/UNRAR 二进制；库 crate 只用纯 Rust 基础依赖（CRC /
 AES / HMAC / SHA / rand / zeroize，`parallel` / `simd` 可选）。
@@ -301,7 +301,8 @@ CLI crate `crates/rar-cli` 产出 `rar` 与 `unrar`：
 
 测试：`crates/rar/tests/`（`rar50_roundtrip`、`format_assertions`、`rewrite_tests`、
 `official_interop`、`rar4_*`、`rar13_*`、`cancel_flag`、`quick_open_listing`
-等；官方 rar/unrar 由 `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` 门控）；
+等；官方 rar/unrar 由 `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` 门控，legacy
+归档由 `.cache/winrar/` 里的官方工具现场生成，见 `support/generate.rs`）；
 `crates/rar-cli/tests/cli_behavior/` 与 `winrar_interop/`（按域拆分 +
 `support`，后者需本机 WinRAR）。怎么跑、耗时与坑见
 [`testing.md`](testing.md)；fuzz 目标见

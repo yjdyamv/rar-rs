@@ -70,6 +70,13 @@ pub(crate) mod platform;
 // because the CLI's `-ts` handling needs the same math; see `time.rs`.
 pub mod time;
 
+// Unit tests that need an archive written by official software use the same
+// generator the integration suites use (`tests/support/generate.rs`), so no
+// archive binary is vendored anywhere in the tree.
+#[cfg(test)]
+#[path = "../tests/support/generate.rs"]
+pub(crate) mod test_winrar;
+
 // Recovery-record and recovery-volume support. The supported entry points
 // are re-exported at the crate root and through [`wire`].
 pub(crate) mod recovery;

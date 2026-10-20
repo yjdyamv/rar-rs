@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-10-02 @ `3dfd460`; every timing number here is a
+> Last verified: 2026-10-20 @ working tree; every timing number here is a
 > host-specific snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing
@@ -129,7 +129,7 @@ sudo bash scripts/wsl/setup-apt.sh     # mirror + build-essential (root)
 bash scripts/wsl/setup-rust.sh         # toolchain, cargo/crates mirrors
 bash scripts/wsl/setup-node.sh         # Node 24 + npm mirror
 git clone /mnt/c/path/to/rar-rs ~/rar-rs   # ext4 target/ beats building there
-bash scripts/wsl/fetch-rarlab.sh       # official rar 6.23 / unrar 7.23
+python3 scripts/fetch_winrar.py        # official rar 6.23 / unrar 7.23
 cd ~/rar-rs
 bash scripts/wsl/ci-linux.sh           # the Linux gate: checks + tests + interop + bindings
 bash scripts/wsl/stage12-linux.sh      # legacy streaming vs official unrar
@@ -174,7 +174,7 @@ arbitrary — **7.23's `Rar.exe` neither creates `-ma4` nor repairs RAR4**, so
 RAR4 write/repair must be validated against **6.23**, while the read side is
 validated against **7.23** (`scripts/wsl/ci-linux.sh` uses exactly
 `SA_OFFICIAL_RAR=rar623` + `SA_OFFICIAL_UNRAR=rar723`). Fetch the cache with
-`scripts/wsl/fetch-rarlab.sh`, or rely on WinRAR's default install path.
+`scripts/fetch_winrar.py`, or rely on WinRAR's default install path.
 
 - `SA_WINRAR_DIR` — whole tool directory, for `rar-cli`'s `winrar_interop`.
 - `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR` — explicit executables, for `rar-rs`'s
@@ -197,6 +197,71 @@ A missing tool prints `SKIPPED` and the suite passes; `SA_REQUIRE_WINRAR=1` /
 `SA_OFFICIAL_UNRAR` at 6.23 fails `v70::*` and
 `om_mark_of_the_web_matches_winrar`** — 6.23 predates RAR7 and its MOTW differs.
 That is a version difference, not a regression (confirmed on `1fbfaba`).
+
+## Generated test archives
+
+No archive files are committed. Legacy-format suites call
+`crates/rar/tests/support/generate.rs`, which runs a cached `Rar.exe` in a fresh
+temp directory on deterministic payloads built in Rust, then hands back the
+archive path (memoized per recipe). `crates/rar/tests/support/corpus.rs` names
+the recipes. `crates/rar/src/lib.rs` pulls the same file in as
+`pub(crate) mod test_winrar` (`#[path]`, `cfg(test)`), so in-crate tests reuse it
+instead of duplicating recipes.
+
+The cache is `.cache/winrar/<version>/` (gitignored): the Windows installers
+ship `Rar.exe` + `UnRAR.exe` + `Default.SFX`, the Linux tarballs `rar` +
+`unrar` + `default.sfx`, and both spellings are accepted. Override the root
+with `SA_WINRAR_CACHE`. Missing tool or failed generation
+prints `SKIP: …` and returns `None`, which the tests treat as "skip";
+`SA_REQUIRE_WINRAR=1` turns both into a hard failure — use it to prove a run
+actually exercised the generated corpus.
+
+`scripts/fetch_winrar.py` (Python 3, standard library only) fills the cache
+from rarlab and is the one place that maps a release to its installer:
+
+```sh
+python3 scripts/fetch_winrar.py           # the releases the suites need
+python3 scripts/fetch_winrar.py --all     # every release the script knows
+python3 scripts/fetch_winrar.py --check   # verify a cache, download nothing
+```
+
+Both package shapes are self-extracting — the Windows installers are PE stubs
+wrapping a RAR4 payload (up to 5.00) or a RAR5 payload (5.50 and newer), the
+Linux ones are plain `.tar.gz`. Extraction therefore goes through 7-Zip or a
+cached `Rar.exe`, newest release first, because an old release only understands
+the payload format of its own era. rarlab published Linux builds from 3.93 on,
+so `2-90` and `3-00` exist only for Windows: the recipes that need them
+(`corpus::rar20_*`, the RAR2 comment layout, `REV3_OLD`) self-skip on Linux,
+which is why the legacy `.rev` layout is *also* covered by `REV3_LATE` (3.93) —
+a third naming shape that Linux can generate.
+The host OS field follows the writer as well — Windows builds stamp `host_os 2`,
+Linux ones `3` — so assertions about it are per-host.
+
+Which release serves which format (the *newest* one that still supports it):
+
+| format | tool | why |
+| ------ | ---- | --- |
+| RAR 2.0 compressed (`-m0`-only v20 otherwise) | `2-90` | the 2.x line is the only one that still compresses v20 |
+| RAR 2.0 via `-ma4 -m0` | `6-23` | `-m0` writes `unp_ver 20` on every release up to 6.23 |
+| RAR 3.x (`unp_ver 29`) | `6-23` | newest release that still writes `-ma4`; 7.23 removed it |
+| RAR 5 | `7-23` | current |
+| `.rev` sets (`rv3`) | `4-20` / `3-93` / `3-00` | RAR5 dropped `rv3`; one writer per naming shape — 4.20 `.partN.rev`, 3.93 `<base>N.rev`, 3.00 `<base>4_3_N.rev` |
+| per-file comments (`cf`) | `4-20` | `cf` was removed in 5.00 |
+| RAR 1.3/1.4, v26/v36, v70 | our writer | no release writes them (`-ma14`/`-ma15`; `-ma*` else patches `unp_ver`) |
+
+Shapes no writer can emit — a 64-channel delta record, a 32-bit encoded VM
+control word, a mutated `.rev` header, a truncated payload — are produced by
+byte-level mutations of generated output (`generate::patch_unp_ver`,
+`tests/rar13_read.rs`) or by unit tests next to the decoder. `tests/data/`
+holds the two raw payload corpora (no archives).
+
+Consequence for CI: both GitHub jobs run
+`scripts/fetch_winrar.py` first, so the generated suites execute there instead
+of skipping. `lint-windows` fetches the full set and runs them with
+`SA_REQUIRE_WINRAR=1` (a missing tool or a failed generation fails the job);
+`lint` (Ubuntu) runs the same targets against the Linux builds without that
+flag, because 2.90/3.00 have no Linux release. `scripts/wsl/ci-linux.sh` still
+fetches the tools for the local Linux gate.
 
 ## Why test targets are optimized
 

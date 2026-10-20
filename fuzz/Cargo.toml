@@ -67,3 +67,9 @@ name = "rewrite"
 path = "fuzz_targets/rewrite.rs"
 test = false
 bench = false
+
+[[bin]]
+name = "seeds"
+path = "fuzz_targets/seeds.rs"
+test = false
+bench = false

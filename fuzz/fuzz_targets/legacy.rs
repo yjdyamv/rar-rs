@@ -17,7 +17,7 @@ fn main() {
     // Real file I/O per iteration, like the write-side targets.
     rar_rs_fuzz::standalone_with(
         "legacy",
-        rar_rs_fuzz::CORPUS_ALL,
+        &rar_rs_fuzz::corpus_all(),
         rar_rs_fuzz::legacy,
         20_000,
     );

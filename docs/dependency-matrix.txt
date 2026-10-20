@@ -27,6 +27,7 @@ options            -> error, version
 parallel           -> (none)
 platform           -> (none)
 recovery           -> crc32, detect, error, format, fs, io_util, vint, write_progress
+test_winrar        -> (none)
 time               -> (none)
 version            -> (none)
 vint               -> (none)

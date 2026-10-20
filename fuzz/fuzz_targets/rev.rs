@@ -15,5 +15,5 @@ fuzz_target!(|data: &[u8]| rar_rs_fuzz::rev(data));
 #[cfg(not(fuzzing))]
 fn main() {
     // Real file I/O per iteration, like the write-side targets.
-    rar_rs_fuzz::standalone_with("rev", rar_rs_fuzz::CORPUS_ALL, rar_rs_fuzz::rev, 20_000);
+    rar_rs_fuzz::standalone_with("rev", &rar_rs_fuzz::corpus_all(), rar_rs_fuzz::rev, 20_000);
 }

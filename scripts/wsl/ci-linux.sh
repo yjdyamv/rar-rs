@@ -22,14 +22,17 @@
 #
 # Usage: scripts/wsl/ci-linux.sh [FROM] [TO]      (defaults: 1 19)
 # Prereqs: scripts/wsl/setup-{apt,rust,node}.sh, a repo clone (REPO=~ by
-#          default at ~/rar-rs), scripts/wsl/fetch-rarlab.sh for step 14, and
+#          default at ~/rar-rs), `python3 scripts/fetch_winrar.py 6-23 7-23`
+#          for step 14, and
 #          cargo-deny (`cargo install cargo-deny --locked`) for step 12.
 #          Mirror rationale: docs/testing.md, "Running the Linux half under
 #          WSL2".
 set -uo pipefail
 
 REPO=${REPO:-$HOME/rar-rs}
-RARLAB=${RARLAB:-$HOME/rarlab}
+# Official tools live in the shared test cache, filled by
+# `python3 scripts/fetch_winrar.py` (see docs/testing.md).
+RARLAB=${RARLAB:-$REPO/.cache/winrar}
 FROM=${1:-1}
 TO=${2:-19}
 
@@ -48,10 +51,10 @@ export PATH="${NODE_BIN:-$HOME/.local/node/bin}:$PATH"
 
 # The interop suites and the binding's official-unrar check read these; with
 # them set the JS suite runs 59/59 instead of skipping one test.
-if [ -x "$RARLAB/rar723/unrar" ]; then
-  export SA_OFFICIAL_UNRAR=${SA_OFFICIAL_UNRAR:-$RARLAB/rar723/unrar}
-  export SA_OFFICIAL_RAR=${SA_OFFICIAL_RAR:-$RARLAB/rar623/rar}
-  export SA_OFFICIAL_SFX=${SA_OFFICIAL_SFX:-$RARLAB/rar623/default.sfx}
+if [ -x "$RARLAB/7-23/unrar" ]; then
+  export SA_OFFICIAL_UNRAR=${SA_OFFICIAL_UNRAR:-$RARLAB/7-23/unrar}
+  export SA_OFFICIAL_RAR=${SA_OFFICIAL_RAR:-$RARLAB/6-23/rar}
+  export SA_OFFICIAL_SFX=${SA_OFFICIAL_SFX:-$RARLAB/6-23/default.sfx}
 fi
 
 step() { printf '\n========== %s ==========\n' "$*"; }
@@ -168,9 +171,9 @@ fi
 
 if want 14; then
   step "14/20 official rar/unrar interop (rar 6.23 + unrar 7.23)"
-  for tool in "$RARLAB/rar623/rar" "$RARLAB/rar723/unrar" "$RARLAB/rar623/default.sfx"; do
+  for tool in "$RARLAB/6-23/rar" "$RARLAB/7-23/unrar" "$RARLAB/6-23/default.sfx"; do
     if [ ! -x "$tool" ]; then
-      echo "!!! missing $tool -- run scripts/wsl/fetch-rarlab.sh first" >&2
+      echo "!!! missing $tool -- run python3 scripts/fetch_winrar.py 6-23 7-23" >&2
       exit 1
     fi
   done

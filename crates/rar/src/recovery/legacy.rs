@@ -679,12 +679,11 @@ mod tests {
 
     #[test]
     fn protect_scan_finds_and_repairs_damage() {
-        // A genuine RAR 2.5 archive with a 5% PROTECT_HEAD recovery record.
-        let fixture = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/rar40/repair/rar250_protect_head_rr5.rar"
-        );
-        let original = std::fs::read(fixture).expect("read fixture");
+        // A RAR 2.x archive with a 5% PROTECT_HEAD record, written by 2.90.
+        let Some(made) = crate::test_winrar::archive("2-90", &["-rr5"], &["text.txt"]) else {
+            return;
+        };
+        let original = made.read();
         let scan = scan_protect(&original).expect("scan");
         let protect = scan.protect.expect("protect record present");
         assert_eq!(&protect.mark, b"Protect!");
@@ -843,11 +842,10 @@ mod tests {
     /// split from (signature offset and every record position).
     #[test]
     fn scan_protect_file_matches_the_slice_scan() {
-        let fixture = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/rar40/repair/rar250_protect_head_rr5.rar"
-        );
-        let original = std::fs::read(fixture).expect("read fixture");
+        let Some(made) = crate::test_winrar::archive("2-90", &["-rr5"], &["text.txt"]) else {
+            return;
+        };
+        let original = made.read();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("protect.rar");
         std::fs::write(&path, &original).unwrap();

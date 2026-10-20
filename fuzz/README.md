@@ -21,10 +21,11 @@ Seven targets covering the read and write attack surfaces of `rar-rs`:
 - **`rewrite`** — create, then delete/rename/append/comment/lock mutations with
   byte-for-byte survivor verification.
 
-The target bytes steer the structured mutations directly, and the seeds are
-genuine WinRAR output (`fixtures/rar50/winrar5_multiple_files.rar`, the
-tail-match regression input, a `-rr5%` archive, and five small legacy fixtures),
-so mutations reach deep parser paths that raw random bytes almost never touch.
+The target bytes steer the structured mutations directly, and the seeds are real
+archives built by the library's own writer at start-up (a RAR5 set, a
+`-rr5%`-style recovery-record archive, and RAR 1.5/2.0/3.x legacy sets, plus the
+tail-match regression payload), so mutations reach deep parser paths that raw
+random bytes almost never touch. Nothing is embedded from a checked-in archive.
 `crates/rar/tests/support/structured.rs` (shared with the regression tests via
 `#[path]`) derives valid-before-mutation records from them, with the CRC64-XZ /
 CRC32 / 16-bit-header checksums recomputed — otherwise the shard arithmetic,
@@ -84,23 +85,15 @@ parser robustness against hostile input**.
 `fuzz/corpus/` is **gitignored**: `cargo fuzz run <target>` reads
 `fuzz/corpus/<target>/` at startup and writes coverage-increasing mutations
 back, so the directory is a libFuzzer work area, never committed. The standalone
-loop never reads it — its seeds are `include_bytes!`-embedded in the harness.
-Seed it from the vendored fixtures before a libFuzzer run:
+loop never reads it — it generates its seeds in memory. Populate the directories
+for a libFuzzer run with the seed writer:
 
 ```sh
-mkdir -p fuzz/corpus/parse fuzz/corpus/rev fuzz/corpus/legacy
-cp crates/rar/tests/fixtures/rar50/winrar5_multiple_files.rar fuzz/corpus/parse/
-cp crates/rar/tests/fixtures/rar50/tail-match-362.bin fuzz/corpus/parse/
-cp crates/rar/tests/fixtures/rar50/winrar5_with_recovery_rr5.rar fuzz/corpus/recovery/
-cp crates/rar/tests/fixtures/rar40/rev3/rev_newstyle.part1.rar \
-   crates/rar/tests/fixtures/rar40/rev3/rev_newstyle.part2.rar \
-   crates/rar/tests/fixtures/rar40/rev3/rev_newstyle.part1.rev fuzz/corpus/rev/
-cp crates/rar/tests/fixtures/rar13/MULTIFIL.RAR \
-   crates/rar/tests/fixtures/rar40/rar2/rar20.rar \
-   crates/rar/tests/fixtures/rar40/winrar591_store_m0.rar \
-   crates/rar/tests/fixtures/rar40/rar300/compressed_text_rar300.rar \
-   crates/rar/tests/fixtures/rar40/repair/rar250_protect_head_rr1.rar fuzz/corpus/legacy/
+cd fuzz && cargo run --bin seeds
 ```
+
+That writes `seed-NN.bin` into `corpus/{parse,crypto,recovery,rev,write,rewrite,legacy}/`
+from the same generators, so libFuzzer starts from the identical shapes.
 
 `write` and `rewrite` have no fixture seeds (their archives are derived from the
 fuzz input), so their corpus directories start empty.
@@ -113,8 +106,8 @@ fuzz input), so their corpus directories start empty.
   bound the rest.
 - The crypto target masks the KDF strength byte to ≤ 2^14 iterations so hostile
   input cannot turn the fuzzer itself into a CPU bomb. **Do not add encrypted
-  archive fixtures to the parse corpus without a strength cap** — a mutated
-  `-hp` fixture could otherwise trigger 2^24-iteration KDF runs.
+  archive seeds to the parse corpus without a strength cap** — a mutated
+  header-encrypted seed could otherwise trigger 2^24-iteration KDF runs.
 - `fuzz/` is deliberately **not** a workspace member: CI's
   `cargo test --workspace --all-features` must not enable the `fuzzing` feature,
   which would drag in the C++ libFuzzer runtime.

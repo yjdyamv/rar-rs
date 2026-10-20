@@ -1,45 +1,26 @@
 //! RAR 1.5–4.x read support: STORE passthrough plus RAR3/4 (unp_ver >= 29)
-//! LZSS+Huffman decode with solid chains and RAR30 encryption, verified
-//! against genuine WinRAR 5.91 `-ma4` fixtures and legacy RAR 3.0 archives
-//! (from the rars fixture corpus).
+//! LZSS+Huffman decode with solid chains and RAR30 encryption.
+//!
+//! No archive is vendored: every case is generated on demand by
+//! [`support::corpus`] from the cached official builds (see that module for
+//! which release covers which container), so the assertions pin decoding
+//! behaviour instead of one build's byte output.
 
 #[path = "support/mod.rs"]
 mod support;
 #[allow(unused_imports)]
 use support::*;
 
-use rar_rs::{ArchiveReader, RarError};
+use std::path::Path;
 
-const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/");
-const RAR300: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar300/");
-const RAR2: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar2/");
-const RAR154: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rar154/");
-const MVOL: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/rar40/multivol/"
-);
-const ENC: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/rar40/encrypted/"
-);
-const W591: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/rar40/winrar591/"
-);
+use rar_rs::{ArchiveReader, ArchiveVersion, OpenOptions, RarError};
 
-/// The exact bytes WinRAR 5.91 `-ma4` stored/compressed in the fixtures: 4000
-/// lines of the same sentence + counter tail.
-fn repeat_content() -> Vec<u8> {
-    let line = b"The quick brown fox jumps over the lazy dog. 0123456789\n";
-    let mut out = Vec::with_capacity(line.len() * 4000);
-    for _ in 0..4000 {
-        out.extend_from_slice(line);
-    }
-    out
-}
+use support::{corpus, generate};
 
-/// Owned (name, size, crc32) snapshots so tests can release the `list()`
-/// borrow before calling `read`.
+// ── shared helpers ─────────────────────────────────────────────────────────
+
+/// (name, size, crc32) snapshots so a test can release the `list()` borrow
+/// before calling `read`.
 fn snapshots(archive: &ArchiveReader) -> Vec<(String, u64, Option<u32>)> {
     archive
         .entries()
@@ -47,164 +28,176 @@ fn snapshots(archive: &ArchiveReader) -> Vec<(String, u64, Option<u32>)> {
         .collect()
 }
 
-// ── STORE (full source path in the member name) ───────────────────────────
+/// Decode every member of `generated` and require it to equal the payload it
+/// was built from, byte for byte, with the header CRC agreeing.
+fn assert_all_members_match_payload(generated: &generate::Generated) {
+    let mut archive = ArchiveReader::open(generated.path()).expect("open generated archive");
+    let snaps = snapshots(&archive);
+    assert!(
+        !snaps.is_empty(),
+        "{}: no members",
+        generated.archive.display()
+    );
+    for (name, size, crc) in snaps {
+        let data = archive
+            .read_entry(archive.unique_entry(&name).unwrap())
+            .unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
+        assert_eq!(data.len() as u64, size, "{name}: size");
+        assert_eq!(data, generate::payload(&name), "{name}: content");
+        assert_eq!(Some(crc32(&data)), crc, "{name}: header CRC");
+    }
+}
 
-const RAR4_STORE_FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/rar40/winrar591_store_m0.rar"
-);
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
 
-/// WinRAR 5.91 `-ma4 -m0` stores the full source path in the member name.
-const MEMBER_NAME: &str = "Users\\yuan\\AppData\\Local\\Temp\\opencode\\rar4store\\hello.txt";
+fn member_versions(path: &Path) -> Vec<ArchiveVersion> {
+    ArchiveReader::open(path)
+        .expect("open")
+        .entries()
+        .map(|e| e.version())
+        .collect()
+}
+
+// ── STORE ─────────────────────────────────────────────────────────────────
 
 #[test]
 fn rar4_store_list_and_read() {
-    let mut archive = ArchiveReader::open(RAR4_STORE_FIXTURE).expect("open RAR4 STORE fixture");
+    let Some(made) = corpus::store() else { return };
+    let mut archive = ArchiveReader::open(made.path()).expect("open stored archive");
     assert_eq!(archive.entries().count(), 1);
-    assert_eq!(archive.entries().next().unwrap().name(), MEMBER_NAME);
+    assert_eq!(archive.entries().next().unwrap().name(), "hello.txt");
 
     let content = archive
-        .read_entry(archive.unique_entry(MEMBER_NAME).unwrap())
+        .read_entry(archive.unique_entry("hello.txt").unwrap())
         .expect("read member");
-    assert_eq!(&content, b"store hello content");
+    assert_eq!(content, generate::payload("hello.txt"));
 }
 
 #[test]
 fn rar4_store_header_fields() {
-    let archive = ArchiveReader::open(RAR4_STORE_FIXTURE).expect("open");
+    let Some(made) = corpus::store() else { return };
+    let archive = ArchiveReader::open(made.path()).expect("open");
     let entry = archive.entries().next().unwrap();
     assert_eq!(entry.method(), 0, "STORE normalizes to method 0");
     assert_eq!(entry.method_name(), "Store");
-    assert_eq!(entry.compressed_size(), 19, "packed size");
-    assert_eq!(entry.size(), 19, "unpacked size");
+    assert_eq!(
+        entry.compressed_size(),
+        entry.size(),
+        "stored: packed == unpacked"
+    );
+    assert_eq!(entry.size(), generate::payload("hello.txt").len() as u64);
+    // A stored member declares the minimum version the store method needs,
+    // not the container's: `-ma4 -m0` still writes `unp_ver` 20.
+    assert_eq!(entry.version(), ArchiveVersion::V20);
 }
 
-// ── WinRAR 5.91 `-ma4` compressed members (m3/m5 LZSS+Huffman) ────────────
+// ── Compressed members (-ma4 m3/m5 LZSS+Huffman) ──────────────────────────
 
 #[test]
-fn rar4_winrar591_m3_compressed_read() {
-    let mut archive = ArchiveReader::open(format!("{W591}c_m3.rar")).expect("open c_m3");
-    let repeat = snapshots(&archive)
+fn rar4_m3_compressed_read() {
+    let Some(made) = corpus::compressed_m3() else {
+        return;
+    };
+    let mut archive = ArchiveReader::open(made.path()).expect("open m3");
+    let (_, size, _) = snapshots(&archive)
         .into_iter()
         .find(|(name, _, _)| name == "repeat.txt")
         .unwrap();
-    assert_eq!(repeat.1, 224_000);
-    // method is part of list(); assert it here via a fresh borrow.
-    let repeat_method = archive
+    assert_eq!(size, generate::payload("repeat.txt").len() as u64);
+
+    let method = archive
         .entries()
         .find(|e| e.name() == "repeat.txt")
         .unwrap()
         .method();
-    assert_eq!(repeat_method, 3, "m3 method normalized");
+    assert_eq!(method, 3, "m3 method normalized");
 
     let content = archive
         .read_entry(archive.unique_entry("repeat.txt").unwrap())
         .expect("decode m3 member");
-    assert_eq!(content, repeat_content());
+    assert_eq!(content, generate::payload("repeat.txt"));
+    assert!(content.len() > 200_000, "payload is the 4000-line repeat");
 }
 
 #[test]
-fn rar4_winrar591_m5_lz_compressed_read() {
-    // -ma4 -m5 on this highly repetitive text picks LZSS (not PPMd).
-    let mut archive = ArchiveReader::open(format!("{W591}c_m5.rar")).expect("open c_m5");
+fn rar4_m5_compressed_read() {
+    // m5 on highly repetitive text still picks LZSS (not PPMd).
+    let Some(made) = corpus::compressed_m5() else {
+        return;
+    };
+    let mut archive = ArchiveReader::open(made.path()).expect("open m5");
     assert_eq!(
         archive
             .read_entry(archive.unique_entry("repeat.txt").unwrap())
             .expect("decode m5 member"),
-        repeat_content()
+        generate::payload("repeat.txt")
     );
 }
 
 #[test]
-fn rar4_winrar591_random_and_tiny_members() {
-    // Incompressible and tiny members store even under -m3/-m5.
-    for file in ["c_m3.rar", "c_m5.rar"] {
-        let mut archive = ArchiveReader::open(format!("{W591}{file}")).expect("open");
-        let snaps = snapshots(&archive);
-        for (name, size, crc) in snaps {
-            let data = archive
-                .read_entry(archive.unique_entry(&name).unwrap())
-                .expect("read member");
-            assert_eq!(data.len() as u64, size, "{file}/{name}");
-            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
-        }
-    }
+fn rar4_incompressible_members_store() {
+    let Some(made) = corpus::compressed_m3() else {
+        return;
+    };
+    let archive = ArchiveReader::open(made.path()).expect("open");
+    let random = archive
+        .entries()
+        .find(|e| e.name() == "random.bin")
+        .unwrap();
+    assert!(
+        random.compressed_size() >= random.size(),
+        "an incompressible member cannot pack smaller"
+    );
+    assert_all_members_match_payload(&made);
 }
 
-// ── Solid chains (WinRAR 5.91 `-ma4 -s -m3`) ──────────────────────────────
+// ── Solid chains ──────────────────────────────────────────────────────────
 
 #[test]
-fn rar4_solid_chain_winrar591() {
-    let mut archive = ArchiveReader::open(format!("{W591}c_solid.rar")).expect("open c_solid");
+fn rar4_solid_chain_decode() {
+    let Some(made) = corpus::solid_m3() else {
+        return;
+    };
+    let mut archive = ArchiveReader::open(made.path()).expect("open solid");
     let snaps = snapshots(&archive);
     assert_eq!(snaps.len(), 4);
-    // WinRAR sorts solid archives by name: a.txt, b.txt, repeat.txt, random.bin.
-    assert_eq!(snaps[0].0, "a.txt");
-    assert_eq!(snaps[3].0, "random.bin");
+    // Solid chains group members by extension (measured: `.bin` before `.txt`,
+    // alphabetical inside a group), so a bin member sorts ahead of a.txt.
+    let names: Vec<&str> = snaps.iter().map(|(n, _, _)| n.as_str()).collect();
+    assert_eq!(names, ["random.bin", "a.txt", "b.txt", "repeat.txt"]);
 
-    // Head member, a middle member (decodes through the shared window) and
-    // the tail member.
-    assert_eq!(
-        archive
-            .read_entry(archive.unique_entry("a.txt").unwrap())
-            .expect("head member"),
-        b"text-only content line one\n"
-    );
-    assert_eq!(
-        archive
-            .read_entry(archive.unique_entry("b.txt").unwrap())
-            .expect("middle solid member"),
-        b"second file content here\n"
-    );
-    assert_eq!(
-        archive
-            .read_entry(archive.unique_entry("repeat.txt").unwrap())
-            .expect("solid member"),
-        repeat_content()
-    );
-    let random = archive
-        .read_entry(archive.unique_entry("random.bin").unwrap())
-        .expect("tail solid member");
-    assert_eq!(random.len(), 65_536);
-    assert_eq!(rar5_crc32(&random), snaps[3].2.unwrap());
-}
-
-// ── Legacy RAR 3.0 archives (rars fixture corpus) ─────────────────────────
-
-#[test]
-fn rar4_rar300_compressed_text() {
-    let mut archive =
-        ArchiveReader::open(format!("{RAR300}compressed_text_rar300.rar")).expect("open");
-    let (name, size, crc) = snapshots(&archive).into_iter().next().unwrap();
-    assert_eq!(name, "text.txt");
-    assert_eq!(size, 2_400);
-    let data = archive
-        .read_entry(archive.unique_entry("text.txt").unwrap())
-        .expect("decode RAR3.0 m3 text");
-    assert_eq!(rar5_crc32(&data), crc.unwrap());
-}
-
-#[test]
-fn rar4_rar300_solid_archives() {
-    for file in ["solid_simple_rar300.rar", "solid_rar300.rar"] {
-        let mut archive = ArchiveReader::open(format!("{RAR300}{file}")).expect("open");
-        let snaps = snapshots(&archive);
-        assert!(!snaps.is_empty());
-        for (name, size, crc) in snaps {
-            let data = archive
-                .read_entry(archive.unique_entry(&name).unwrap())
-                .expect("decode solid member");
-            assert_eq!(data.len() as u64, size, "{file}/{name} size");
-            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
-        }
+    // Head member, a middle member (decodes through the shared window) and the
+    // tail member all have to reproduce their payload.
+    for name in ["a.txt", "b.txt", "repeat.txt", "random.bin"] {
+        let data = archive
+            .read_entry(archive.unique_entry(name).unwrap())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(data, generate::payload(name), "{name}");
     }
+    assert!(snaps.iter().all(|(_, _, crc)| crc.is_some()));
 }
 
-// ── Encryption (`-p`, RAR30 AES) ──────────────────────────────────────────
+// ── Member encryption (`-p`, RAR30 AES) ───────────────────────────────────
 
 #[test]
 fn rar4_encrypted_members_need_password() {
-    let mut archive = ArchiveReader::open(format!("{W591}c_pw.rar")).expect("open");
+    let Some(made) = corpus::member_password() else {
+        return;
+    };
+    let mut archive = ArchiveReader::open(made.path()).expect("open");
     match archive.read_entry(archive.unique_entry("repeat.txt").unwrap()) {
         Err(RarError::Encrypted(msg)) => assert!(msg.contains("no password")),
         other => panic!("expected Encrypted without password, got {other:?}"),
@@ -212,31 +205,34 @@ fn rar4_encrypted_members_need_password() {
 }
 
 #[test]
-fn rar4_encrypted_compressed_members_decode_with_password() {
-    let mut archive = ArchiveReader::open_with(
-        format!("{W591}c_pw.rar"),
-        rar_rs::OpenOptions::new().password("pass123"),
-    )
-    .expect("open");
+fn rar4_encrypted_members_decode_with_password() {
+    let Some(made) = corpus::member_password() else {
+        return;
+    };
+    let mut archive = ArchiveReader::open_with(made.path(), OpenOptions::new().password("pass123"))
+        .expect("open");
     assert_eq!(
         archive
             .read_entry(archive.unique_entry("repeat.txt").unwrap())
             .expect("decrypt + decode"),
-        repeat_content()
+        generate::payload("repeat.txt")
     );
-    let random = archive
-        .read_entry(archive.unique_entry("random.bin").unwrap())
-        .expect("decrypt + decode random");
-    assert_eq!(random.len(), 65_536);
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("random.bin").unwrap())
+            .expect("decrypt + decode random"),
+        generate::payload("random.bin")
+    );
 }
 
 #[test]
 fn rar4_wrong_password_fails() {
-    let mut archive = ArchiveReader::open_with(
-        format!("{W591}c_pw.rar"),
-        rar_rs::OpenOptions::new().password("not-the-password"),
-    )
-    .expect("open");
+    let Some(made) = corpus::member_password() else {
+        return;
+    };
+    let mut archive =
+        ArchiveReader::open_with(made.path(), OpenOptions::new().password("not-the-password"))
+            .expect("open");
     assert!(
         archive
             .read_entry(archive.unique_entry("repeat.txt").unwrap())
@@ -244,133 +240,121 @@ fn rar4_wrong_password_fails() {
     );
 }
 
-// ── Standard VM filters (RAR 3.0 fixtures from the rars corpus) ───────────
+// ── Standard VM filters ───────────────────────────────────────────────────
 
 #[test]
 fn rar4_standard_vm_filters_decode() {
-    // One genuine RAR 3.0 fixture per standard filter type: E8, E8E9, delta
-    // (4ch), audio (stereo), RGB (24-bit BMP), Itanium.
-    for file in [
-        "rarvm_x86_e8_rar300.rar",
-        "rarvm_x86_e8e9_rar300.rar",
-        "rarvm_delta_4ch_rar300.rar",
-        "rarvm_audio_stereo_rar300.rar",
-        "rarvm_rgb_gradient_rar300.rar",
-        "rarvm_itanium_synthetic_rar300.rar",
-    ] {
-        let mut archive = ArchiveReader::open(format!("{RAR300}{file}")).expect("open");
-        for (name, size, crc) in snapshots(&archive) {
-            let data = archive
-                .read_entry(archive.unique_entry(&name).unwrap())
-                .expect("decode filtered member");
-            assert_eq!(data.len() as u64, size, "{file}/{name} size");
-            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
-        }
+    // WinRAR picks the filter from the member's shape: audio for the WAV, RGB
+    // for the 24-bit BMP, x86 for the `E8 rel32` stream.
+    let Some(made) = corpus::vm_filters() else {
+        return;
+    };
+    assert_all_members_match_payload(&made);
+
+    // A filtered member must pack materially smaller than its payload.
+    let archive = ArchiveReader::open(made.path()).expect("open");
+    for entry in archive.entries() {
+        assert!(
+            entry.compressed_size() < entry.size(),
+            "{}: filter should not expand",
+            entry.name()
+        );
     }
 }
 
-#[test]
-fn rar4_vm_filter_edge_cases() {
-    // Solid chain whose later member carries an E8E9 filter (filter block
-    // position is member-relative), a PPMd member with an embedded filter
-    // record (escape code 3), a 64-channel delta, and two archives that
-    // exercise non-trivial record encodings on a real executable.
-    for file in [
-        "solid_e8_filter_member_offset.rar",
-        "ppmd_embedded_vm_filter.rar",
-        "delta_64_channels.rar",
-        "filter_bsdcat_exe.rar",
-        "vm_encoded_u32_filter.rar",
-    ] {
-        let path = format!("{FIX}rarvm/{file}");
-        let mut archive = ArchiveReader::open(&path).expect("open");
-        let snaps = snapshots(&archive);
-        assert!(!snaps.is_empty());
-        for (name, size, crc) in snaps {
-            let data = archive
-                .read_entry(archive.unique_entry(&name).unwrap())
-                .expect("decode filter member");
-            assert_eq!(data.len() as u64, size, "{file}/{name} size");
-            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
-        }
-    }
-}
-
-// ── Header-encrypted RAR3/4 (`-hp`, from the rars fixture corpus) ────────
+// ── Header encryption (`-hp`) ─────────────────────────────────────────────
 
 #[test]
 fn rar4_header_encrypted_archives_decode() {
-    // -hp hides file names behind AES-128 header encryption; listing needs
-    // the password at open time.
+    let Some(made) = corpus::header_password() else {
+        return;
+    };
     assert!(matches!(
-        ArchiveReader::open(format!("{ENC}header_rar300_password.rar")),
+        ArchiveReader::open(made.path()),
         Err(RarError::Encrypted(_))
     ));
 
-    let mut archive = ArchiveReader::open_with(
-        format!("{ENC}header_rar300_password.rar"),
-        rar_rs::OpenOptions::new().password("password"),
-    )
-    .expect("open with password");
+    let mut archive =
+        ArchiveReader::open_with(made.path(), OpenOptions::new().password("password"))
+            .expect("open with password");
     let snaps = snapshots(&archive);
     assert_eq!(snaps.len(), 1);
     assert_eq!(snaps[0].0, "hello.txt");
     let data = archive
         .read_entry(archive.unique_entry("hello.txt").unwrap())
         .expect("decode");
-    assert_eq!(rar5_crc32(&data), snaps[0].2.unwrap());
-
-    // Unicode name inside an encrypted header.
-    let archive = ArchiveReader::open_with(
-        format!("{ENC}header_enc_1234.rar"),
-        rar_rs::OpenOptions::new().password("1234"),
-    )
-    .expect("open with password");
-    let names: Vec<String> = snapshots(&archive).into_iter().map(|(n, _, _)| n).collect();
-    assert_eq!(names.len(), 2);
-    assert!(names.iter().any(|n| n.contains("中文")), "{names:?}");
+    assert_eq!(data, generate::payload("hello.txt"));
 
     // Wrong password must not silently list garbage.
-    assert!(
-        ArchiveReader::open_with(
-            format!("{ENC}header_rar300_password.rar"),
-            rar_rs::OpenOptions::new().password("nope")
-        )
-        .is_err()
-    );
+    assert!(ArchiveReader::open_with(made.path(), OpenOptions::new().password("nope")).is_err());
 }
 
 #[test]
-fn rar4_rar30_long_password_kdf_decodes() {
-    // RAR3/4 member encryption takes the mutate-in-place slow KDF once the
-    // UTF-16 password plus its 8-byte salt crosses a SHA-1 block (>= 28
-    // chars). This fixture is genuine Rar 6.23 output with a 49-char
-    // password, so the branch is checked against an external writer instead
-    // of being compared to itself.
-    const PW: &str = "0123456789012345678901234567890123456789012345678";
+fn rar4_header_encrypted_unicode_names() {
+    let Some(made) = corpus::header_password_unicode() else {
+        return;
+    };
+    let archive = ArchiveReader::open_with(made.path(), OpenOptions::new().password("1234"))
+        .expect("open with password");
+    let names: Vec<String> = archive.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(names.len(), 2);
+    assert!(names.iter().any(|n| n.contains("中文")), "{names:?}");
+}
 
-    let mut archive = ArchiveReader::open(format!("{ENC}rar4_longpw_p.rar")).expect("open");
+#[test]
+fn rar4_header_encrypted_multivol_decode() {
+    let Some(made) = corpus::header_password_multivol() else {
+        return;
+    };
+    let mut archive =
+        ArchiveReader::open_with(made.path(), OpenOptions::new().password("password"))
+            .expect("open with password");
+    assert!(made.files.len() > 1, "expected several volumes");
+    let snaps = snapshots(&archive);
+    assert!(!snaps.is_empty());
+    for (name, size, crc) in snaps {
+        let data = archive
+            .read_entry(archive.unique_entry(&name).unwrap())
+            .expect("decode split -hp member");
+        assert_eq!(data.len() as u64, size, "{name} size");
+        assert_eq!(Some(crc32(&data)), crc, "{name} CRC");
+        assert_eq!(data, generate::payload(&name), "{name} content");
+    }
+}
+
+// ── Long passwords (slow KDF branches) ────────────────────────────────────
+
+#[test]
+fn rar4_long_password_member_kdf_decodes() {
+    // Member encryption takes the salted slow KDF once the UTF-16 password
+    // plus its 8-byte salt crosses a SHA-1 block (>= 28 chars).
+    let Some(made) = corpus::long_password_member() else {
+        return;
+    };
+    let mut archive = ArchiveReader::open(made.path()).expect("open");
     assert!(matches!(
         archive.read_entry(archive.unique_entry("longpw.txt").unwrap()),
         Err(RarError::Encrypted(_))
     ));
 
     let mut archive = ArchiveReader::open_with(
-        format!("{ENC}rar4_longpw_p.rar"),
-        rar_rs::OpenOptions::new().password(PW),
+        made.path(),
+        OpenOptions::new().password(corpus::LONG_PASSWORD),
     )
     .expect("open with password");
-    let data = archive
-        .read_entry(archive.unique_entry("longpw.txt").unwrap())
-        .expect("decrypt with the long password");
-    assert_eq!(data, b"rar-rs long password fixture\n");
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("longpw.txt").unwrap())
+            .expect("decrypt with the long password"),
+        generate::payload("longpw.txt")
+    );
 
     // One character different must fail the integrity check.
-    let mut wrong = ArchiveReader::open_with(
-        format!("{ENC}rar4_longpw_p.rar"),
-        rar_rs::OpenOptions::new().password("0123456789012345678901234567890123456789012345679"),
-    )
-    .expect("open");
+    let mut wrong_pw = corpus::LONG_PASSWORD.to_string();
+    wrong_pw.pop();
+    wrong_pw.push('9');
+    let mut wrong =
+        ArchiveReader::open_with(made.path(), OpenOptions::new().password(wrong_pw)).expect("open");
     assert!(
         wrong
             .read_entry(wrong.unique_entry("longpw.txt").unwrap())
@@ -379,149 +363,183 @@ fn rar4_rar30_long_password_kdf_decodes() {
 }
 
 #[test]
-fn rar4_rar30_long_password_header_encryption_decodes() {
-    // -hp uses the same KDF without a salt, so the slow branch starts at 32
-    // UTF-16 chars; this fixture uses the same 49-char password.
-    const PW: &str = "0123456789012345678901234567890123456789012345678";
-
+fn rar4_long_password_header_kdf_decodes() {
+    // `-hp` uses the same KDF without a salt, so the slow branch starts at 32
+    // UTF-16 characters.
+    let Some(made) = corpus::long_password_header() else {
+        return;
+    };
     assert!(matches!(
-        ArchiveReader::open(format!("{ENC}rar4_longpw_hp.rar")),
+        ArchiveReader::open(made.path()),
         Err(RarError::Encrypted(_))
     ));
     let mut archive = ArchiveReader::open_with(
-        format!("{ENC}rar4_longpw_hp.rar"),
-        rar_rs::OpenOptions::new().password(PW),
+        made.path(),
+        OpenOptions::new().password(corpus::LONG_PASSWORD),
     )
     .expect("open with password");
-    let data = archive
-        .read_entry(archive.unique_entry("longpw.txt").unwrap())
-        .expect("decrypt header and member");
-    assert_eq!(data, b"rar-rs long password fixture\n");
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("longpw.txt").unwrap())
+            .expect("decrypt header and member"),
+        generate::payload("longpw.txt")
+    );
 }
 
-#[test]
-fn rar4_header_encrypted_multivol_decode() {
-    let mut archive = ArchiveReader::open_with(
-        format!("{ENC}header_encrypted_multivol_rar300.rar"),
-        rar_rs::OpenOptions::new().password("password"),
-    )
-    .expect("open with password");
-    let (name, size, crc) = snapshots(&archive).into_iter().next().unwrap();
-    assert_eq!(name, "bigtext_64k.bin");
-    let data = archive
-        .read_entry(archive.unique_entry(&name).unwrap())
-        .expect("decode split -hp member");
-    assert_eq!(data.len() as u64, size);
-    assert_eq!(rar5_crc32(&data), crc.unwrap());
-}
-
-// ── Multi-volume RAR4 (from the rars fixture corpus) ──────────────────────
+// ── Multi-volume RAR4 ─────────────────────────────────────────────────────
 
 #[test]
 fn rar4_multivolume_sets_decode() {
-    // Genuine RAR 3.0 split archives across 2–5 volumes: new `.partN.rar`
-    // naming, legacy `.r00` naming, a stored file, a compressed PRNG file,
-    // and an encrypted file. Every member is decoded through its volume
-    // segments with the header CRC as the byte-exactness gate.
-    let cases = [
-        ("multivol_newnaming_rar300.part01.rar", None),
-        ("multivol_newnaming_rar300.part02.rar", None), // any-volume open
-        ("multivol_oldnaming_rar300.rar", None),
-        ("multivol_oldnaming_rar300.r00", None),
-        ("stored_multivol_rar300.rar", None),
-        ("compressed_multivol_prng_rar300.rar", None),
-        ("encrypted_multivol_rar300.rar", Some("password")),
-    ];
-    for (file, password) in cases {
-        let mut options = rar_rs::OpenOptions::new();
-        if let Some(p) = password {
-            options = options.password(p);
-        }
-        let mut archive = ArchiveReader::open_with(format!("{MVOL}{file}"), options).expect("open");
-        let snaps = snapshots(&archive);
-        assert!(!snaps.is_empty(), "{file}");
-        for (name, size, crc) in snaps {
-            let data = archive
-                .read_entry(archive.unique_entry(&name).unwrap())
-                .expect("decode split member");
-            assert_eq!(data.len() as u64, size, "{file}/{name} size");
-            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
-        }
+    // Every member is decoded through its volume segments, with the header CRC
+    // as the byte-exactness gate.
+    for (label, made) in [
+        ("new naming", corpus::multivol_new_names()),
+        ("stored", corpus::multivol_stored()),
+    ] {
+        let Some(made) = made else { continue };
+        assert!(made.files.len() > 1, "{label}: expected several volumes");
+        assert_all_members_match_payload(&made);
+    }
+
+    // Opening a later volume directly must work too.
+    let Some(made) = corpus::multivol_new_names() else {
+        return;
+    };
+    let later = made
+        .files
+        .iter()
+        .find(|p| {
+            let name = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            name.ends_with("part02.rar")
+        })
+        .expect("second volume");
+    let archive = ArchiveReader::open(later).expect("any-volume open");
+    assert!(!archive.entries().next().is_none());
+}
+
+#[test]
+fn rar4_multivolume_old_numbering() {
+    let Some(made) = corpus::multivol_old_names() else {
+        return;
+    };
+    let names = made.names();
+    assert!(
+        names.iter().any(|n| n.to_lowercase().ends_with(".r00")),
+        "expected legacy .r00 numbering: {names:?}"
+    );
+    let volumes = rar_rs::discover_volumes(made.path());
+    assert!(volumes.len() >= 2, "{volumes:?}");
+    let mut archive = ArchiveReader::open(&volumes[0]).expect("open");
+    let data = archive
+        .read_entry(archive.unique_entry("random.bin").unwrap())
+        .expect("decode split member");
+    assert_eq!(data, generate::payload("random.bin"));
+}
+
+#[test]
+fn rar4_multivolume_encrypted_decode() {
+    let Some(made) = corpus::multivol_encrypted() else {
+        return;
+    };
+    let mut archive =
+        ArchiveReader::open_with(made.path(), OpenOptions::new().password("password"))
+            .expect("open with password");
+    let snaps = snapshots(&archive);
+    assert!(!snaps.is_empty());
+    for (name, size, crc) in snaps {
+        let data = archive
+            .read_entry(archive.unique_entry(&name).unwrap())
+            .expect("decode split member");
+        assert_eq!(data.len() as u64, size, "{name} size");
+        assert_eq!(Some(crc32(&data)), crc, "{name} CRC");
+        assert_eq!(data, generate::payload(&name), "{name} content");
     }
 }
 
-// ── RAR 1.5 (unp_ver 15, from the rars fixture corpus) ───────────────────
+// ── PPMd members ──────────────────────────────────────────────────────────
 
-/// Below `UnpVer` 20 the per-file FHD_SOLID bit is never written (and is
-/// ignored when present): a solid run is anchored by the archive-level
-/// MHD_SOLID flag plus member position. This crafted fixture is a solid
-/// RAR 1.5 pair whose second member had FHD_SOLID cleared and its header
-/// CRC recomputed; the member is 46 packed bytes standing for 2700
-/// unpacked, so it can only decode by carrying the shared window across.
 #[test]
-fn rar4_solid15_chain_ignores_cleared_fhd_solid() {
-    let path = format!("{RAR154}solid_flag_cleared_rar15.rar");
-    let mut archive = ArchiveReader::open(&path).expect("open");
-    let names: Vec<String> = archive.entries().map(|e| e.name().to_string()).collect();
-    assert_eq!(names.len(), 2);
-    let a = archive
-        .read_entry(archive.unique_entry(&names[0]).unwrap())
-        .expect("first solid member");
-    let b = archive
-        .read_entry(archive.unique_entry(&names[1]).unwrap())
-        .expect("second solid member");
-    assert_eq!(a.len(), 2700);
-    assert_eq!(b.len(), 2700);
-    assert_eq!(a, b, "both solid members share the same window content");
+fn rar4_ppmd_members_decode() {
+    let Some(made) = corpus::ppmd_text() else {
+        return;
+    };
+    assert_all_members_match_payload(&made);
+    assert_eq!(member_versions(made.path()), [ArchiveVersion::V29]);
 }
 
 #[test]
-fn rar4_rar154_fixtures_decode() {
-    // RAR 1.5.4-era archives: normal compression (incl. a 17-file doc set),
-    // DOS vs long file names, and a solid-flagged archive whose single
-    // member is stored.
-    for file in [
-        "readme_154_normal.rar",
-        "readme_154_store_solid.rar",
-        "doc_154_best.rar",
-        "audio_dos_names_unpack15.rar",
-        "audio_win_names_unpack15.rar",
+fn rar4_ppmd_mixed_and_phrase() {
+    for (label, made) in [
+        ("mixed", corpus::ppmd_mixed()),
+        ("phrase", corpus::ppmd_phrase()),
     ] {
-        let mut archive = ArchiveReader::open(format!("{RAR154}{file}")).expect("open");
-        let snaps = snapshots(&archive);
-        assert!(!snaps.is_empty(), "{file}");
-        for (name, size, crc) in snaps {
-            let data = archive
-                .read_entry(archive.unique_entry(&name).unwrap())
-                .expect("decode RAR1.5 member");
-            assert_eq!(data.len() as u64, size, "{file}/{name} size");
-            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
+        let Some(made) = made else { continue };
+        assert_all_members_match_payload(&made);
+        assert!(!made.names().is_empty(), "{label}");
+    }
+}
+
+#[test]
+fn rar4_ppmd_solid_chain_decodes() {
+    // Two members in one solid PPMd chain: the second references the first
+    // through the shared window.
+    let Some(made) = corpus::ppmd_solid() else {
+        return;
+    };
+    let archive = ArchiveReader::open(made.path()).expect("open");
+    assert_eq!(archive.entries().count(), 2);
+    assert_all_members_match_payload(&made);
+}
+
+// ── RAR 1.5 (unp_ver 15) ─────────────────────────────────────────────────
+
+#[test]
+fn rar4_rar154_members_decode() {
+    // Our writer emits RAR 1.5; the official UnRAR still has to accept it.
+    for (label, made) in [
+        ("single", corpus::rar154_normal()),
+        ("docset", corpus::rar154_docset()),
+    ] {
+        let Some(made) = made else { continue };
+        assert_all_members_match_payload(&made);
+        assert_eq!(
+            member_versions(made.path())[0],
+            ArchiveVersion::V15,
+            "{label} version"
+        );
+        if let Some(verdict) = corpus::official_accepts("7-23", &made) {
+            verdict.unwrap_or_else(|e| panic!("{label}: {e}"));
         }
     }
 }
 
 #[test]
 fn rar4_rar154_encrypted_members_decode_with_password() {
-    // RAR 1.5 member data encrypted with the legacy RAR15 stream cipher;
-    // the decrypted README matches the unencrypted fixture byte for byte.
-    let mut archive =
-        ArchiveReader::open(format!("{RAR154}readme_154_password.rar")).expect("open");
+    let Some(plain) = corpus::rar154_normal() else {
+        return;
+    };
+    let Some(encrypted) = corpus::rar154_password() else {
+        return;
+    };
+    let mut archive = ArchiveReader::open(encrypted.path()).expect("open");
     match archive.read_entry(archive.unique_entry("README.md").unwrap()) {
         Err(RarError::Encrypted(_)) => {}
         other => panic!("expected Encrypted without password, got {other:?}"),
     }
-    let mut archive = ArchiveReader::open_with(
-        format!("{RAR154}readme_154_password.rar"),
-        rar_rs::OpenOptions::new().password("password"),
-    )
-    .expect("open with password");
+    let mut archive =
+        ArchiveReader::open_with(encrypted.path(), OpenOptions::new().password("password"))
+            .expect("open with password");
     let data = archive
         .read_entry(archive.unique_entry("README.md").unwrap())
         .expect("decrypt RAR1.5 member");
-    assert_eq!(data.len(), 4_198);
-    assert_eq!(rar5_crc32(&data), 0x509e_5e3c);
+    assert_eq!(data, generate::payload("README.md"));
 
-    let mut plain = ArchiveReader::open(format!("{RAR154}readme_154_normal.rar")).expect("open");
+    // The decrypted bytes are the same member as the unencrypted archive.
+    let mut plain = ArchiveReader::open(plain.path()).expect("open plain");
     assert_eq!(
         plain
             .read_entry(plain.unique_entry("README.md").unwrap())
@@ -532,11 +550,12 @@ fn rar4_rar154_encrypted_members_decode_with_password() {
 
 #[test]
 fn rar4_rar154_wrong_password_fails() {
-    let mut archive = ArchiveReader::open_with(
-        format!("{RAR154}readme_154_password.rar"),
-        rar_rs::OpenOptions::new().password("wrong-password"),
-    )
-    .expect("open");
+    let Some(made) = corpus::rar154_password() else {
+        return;
+    };
+    let mut archive =
+        ArchiveReader::open_with(made.path(), OpenOptions::new().password("wrong-password"))
+            .expect("open");
     assert!(
         archive
             .read_entry(archive.unique_entry("README.md").unwrap())
@@ -544,67 +563,78 @@ fn rar4_rar154_wrong_password_fails() {
     );
 }
 
-// ── RAR 2.x (unp_ver 20/26, from the rars fixture corpus) ─────────────────
+#[test]
+fn rar4_rar154_old_numbered_split_set() {
+    let Some(made) = corpus::rar154_split_old() else {
+        return;
+    };
+    let volumes = rar_rs::discover_volumes(made.path());
+    assert!(volumes.len() >= 2, "expected several volumes: {volumes:?}");
+    let mut archive = ArchiveReader::open(&volumes[0]).expect("open");
+    let names: Vec<String> = archive.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(names, vec!["random.bin".to_string()]);
+    let data = archive
+        .read_entry(archive.unique_entry("random.bin").unwrap())
+        .expect("decode split member");
+    assert_eq!(data, generate::payload("random.bin"));
+}
+
+// ── RAR 2.x (unp_ver 20) ─────────────────────────────────────────────────
 
 #[test]
 fn rar4_rar2x_fixtures_decode() {
-    // RAR 2.0-era archives: plain LZ, audio-table blocks (a WAV), multiple
-    // blocks per member, kept tables, and an out-of-window zero-fill member.
-    for file in [
-        "comment_nopsw.rar",
-        "rar20.rar",
-        "unpack20_audio_text.rar",
-        "unpack20_keep_tables.rar",
-        "unpack20_multiblock.rar",
-    ] {
-        let mut archive = ArchiveReader::open(format!("{RAR2}{file}")).expect("open");
-        let snaps = snapshots(&archive);
-        assert!(!snaps.is_empty(), "{file}");
-        for (name, size, crc) in snaps {
-            let data = archive
-                .read_entry(archive.unique_entry(&name).unwrap())
-                .expect("decode RAR2 member");
-            assert_eq!(data.len() as u64, size, "{file}/{name} size");
-            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
-        }
+    // RAR 2.0-era codec: audio-table blocks (WAV) and plain LZ text.
+    let Some(made) = corpus::rar20_mixed() else {
+        return;
+    };
+    assert_all_members_match_payload(&made);
+    assert!(
+        member_versions(made.path())
+            .iter()
+            .all(|v| *v == ArchiveVersion::V20)
+    );
+    // The v20 stream comes from the 2.x line; official 2.90 must agree (or the
+    // tool is absent and that half of the check is skipped).
+    if let Some(verdict) = corpus::official_accepts("2-90", &made) {
+        verdict.expect("2.90 accepts its own output");
     }
 }
 
 #[test]
 fn rar4_rar202_encrypted_members_decode_with_password() {
-    // RAR 2.0 member data encrypted with the legacy RAR20 block cipher;
-    // contents pinned from the rars fixture corpus.
-    let mut archive = ArchiveReader::open(format!("{RAR2}comment_psw.rar")).expect("open");
+    let Some(made) = corpus::rar20_password() else {
+        return;
+    };
+    let mut archive = ArchiveReader::open(made.path()).expect("open");
     match archive.read_entry(archive.unique_entry("FILE1.TXT").unwrap()) {
         Err(RarError::Encrypted(_)) => {}
         other => panic!("expected Encrypted without password, got {other:?}"),
     }
-    let mut archive = ArchiveReader::open_with(
-        format!("{RAR2}comment_psw.rar"),
-        rar_rs::OpenOptions::new().password("password"),
-    )
-    .expect("open with password");
+    let mut archive =
+        ArchiveReader::open_with(made.path(), OpenOptions::new().password("password"))
+            .expect("open with password");
     assert_eq!(
         archive
             .read_entry(archive.unique_entry("FILE1.TXT").unwrap())
             .expect("decrypt FILE1"),
-        b"file1\r\n"
+        generate::payload("FILE1.TXT")
     );
     assert_eq!(
         archive
             .read_entry(archive.unique_entry("FILE2.TXT").unwrap())
             .expect("decrypt FILE2"),
-        b"file2\r\n"
+        generate::payload("FILE2.TXT")
     );
 }
 
 #[test]
 fn rar4_rar202_wrong_password_fails() {
-    let mut archive = ArchiveReader::open_with(
-        format!("{RAR2}comment_psw.rar"),
-        rar_rs::OpenOptions::new().password("wrong-password"),
-    )
-    .expect("open");
+    let Some(made) = corpus::rar20_password() else {
+        return;
+    };
+    let mut archive =
+        ArchiveReader::open_with(made.path(), OpenOptions::new().password("wrong-password"))
+            .expect("open");
     assert!(
         archive
             .read_entry(archive.unique_entry("FILE1.TXT").unwrap())
@@ -612,154 +642,55 @@ fn rar4_rar202_wrong_password_fails() {
     );
 }
 
-/// Genuine RAR 2.x per-file comments (nested `COMM_HEAD` 0x75). The covered
-/// subblock layout and its CRC ranges were verified against this fixture, so
-/// it guards the parse offset.
-#[test]
-fn rar4_rar2x_member_comments_decode() {
-    let archive = ArchiveReader::open(format!("{RAR2}comment_nopsw.rar")).expect("open");
-    let comments: Vec<(String, Option<Vec<u8>>)> = archive
-        .entries()
-        .map(|entry| {
-            (
-                entry.name().to_string(),
-                entry.comment().map(|c| c.to_vec()),
-            )
-        })
-        .collect();
-    let find = |name: &str| {
-        comments
-            .iter()
-            .find(|(n, _)| n == name)
-            .and_then(|(_, comment)| comment.clone())
-    };
-    assert_eq!(find("FILE1.TXT").as_deref(), Some(&b"file1comment"[..]));
-    assert_eq!(find("FILE2.TXT").as_deref(), Some(&b"file2comment"[..]));
-}
-
-// ── PPMd (RAR 3.0 m5 members from the rars fixture corpus) ────────────────
-
-#[test]
-fn rar4_ppmd_members_decode() {
-    // A 127 KiB lorem member compressed with PPMd by genuine RAR 3.0.
-    let mut archive = ArchiveReader::open(format!("{RAR300}ppmd_lorem_rar300.rar")).expect("open");
-    let (name, size, crc) = snapshots(&archive).into_iter().next().unwrap();
-    assert_eq!(name, "lorem_127k.txt");
-    assert_eq!(size, 130_048);
-    let data = archive
-        .read_entry(archive.unique_entry("lorem_127k.txt").unwrap())
-        .expect("decode PPMd member");
-    assert_eq!(data.len(), 130_048);
-    assert_eq!(rar5_crc32(&data), crc.unwrap(), "PPMd lorem CRC");
-}
-
-#[test]
-fn rar4_ppmd_mixed_and_escape_fixtures() {
-    for (file, member) in [
-        ("ppmd_mixed_rar300.rar", "binary_64k.bin"),
-        ("ppmd_escape_rar300.rar", "escape_64k.bin"),
-        ("ppmd_lz_match_rar300.rar", "repeated_phrase_64k.txt"),
-    ] {
-        let mut archive = ArchiveReader::open(format!("{RAR300}{file}")).expect("open");
-        let snaps = snapshots(&archive);
-        for (name, size, crc) in &snaps {
-            let data = archive
-                .read_entry(archive.unique_entry(name).unwrap())
-                .expect("decode PPMd member");
-            assert_eq!(data.len() as u64, *size, "{file}/{name} size");
-            assert_eq!(rar5_crc32(&data), crc.unwrap(), "{file}/{name} CRC");
-        }
-        let names: Vec<&str> = snaps.iter().map(|(n, _, _)| n.as_str()).collect();
-        assert!(names.contains(&member), "{file} member shape");
-    }
-}
-
-#[test]
-fn rar4_ppmd_solid_chain_decodes() {
-    // Two 96 KiB lorem files in one solid PPMd chain: the second member
-    // references the first through the shared window.
-    let mut archive = ArchiveReader::open(format!("{RAR300}ppmd_solid_rar300.rar")).expect("open");
-    let snaps = snapshots(&archive);
-    assert_eq!(snaps.len(), 2);
-    for (name, size, crc) in snaps {
-        let data = archive
-            .read_entry(archive.unique_entry(&name).unwrap())
-            .expect("decode solid PPMd member");
-        assert_eq!(data.len() as u64, size, "{name} size");
-        assert_eq!(rar5_crc32(&data), crc.unwrap(), "{name} CRC");
-    }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-fn rar5_crc32(data: &[u8]) -> u32 {
-    let mut c = 0xffff_ffffu32;
-    for &b in data {
-        c ^= b as u32;
-        for _ in 0..8 {
-            c = if c & 1 != 0 {
-                (c >> 1) ^ 0xEDB8_8320
-            } else {
-                c >> 1
-            };
-        }
-    }
-    !c
-}
-
-/// RAR 2.0 solid pair (WinRAR 2.5-era): MHD_SOLID main header, second
-/// member flagged FHD_SOLID. The shared 64 KiB window must carry across
-/// (payload CRCs 0x97668cf2 / 0x28833332 from the reference).
+/// RAR 2.0 solid pair: MHD_SOLID on the main header, FHD_SOLID on the second
+/// member, and a 64 KiB window that has to carry across.
 #[test]
 fn rar4_solid20_chain_shared_window() {
-    let path = format!("{RAR2}SOLID.RAR");
-    let mut archive = ArchiveReader::open(&path).expect("open");
+    let Some(made) = corpus::rar20_solid() else {
+        return;
+    };
+    let mut archive = ArchiveReader::open(made.path()).expect("open");
     let names: Vec<String> = archive.entries().map(|e| e.name().to_string()).collect();
     assert_eq!(
         names,
         vec!["SOLID1.TXT".to_string(), "SOLID2.TXT".to_string()]
     );
-    let a = archive
-        .read_entry(archive.unique_entry("SOLID1.TXT").unwrap())
-        .expect("first");
     let b = archive
         .read_entry(archive.unique_entry("SOLID2.TXT").unwrap())
         .expect("second");
-    assert_eq!(rar5_crc32(&a), 0x9766_8cf2, "SOLID1 payload CRC");
-    assert_eq!(rar5_crc32(&b), 0x2883_3332, "SOLID2 payload CRC");
+    assert_eq!(b, generate::payload("SOLID2.TXT"));
+    let a = archive
+        .read_entry(archive.unique_entry("SOLID1.TXT").unwrap())
+        .expect("first");
+    assert_eq!(a, generate::payload("SOLID1.TXT"));
 }
 
-/// RAR 1.54-era split set under the OLD numbering (`random.rar` + `.r00` +
-/// `.r01`), with a single member split across all three volumes (2 MiB
-/// unpacked). The 1.5.x block-header CRC sentinel (0xFFFF) must be
-/// tolerated. Payload CRC 0x1c9eb697 from the reference corpus.
-#[test]
-fn rar4_rar154_old_numbered_split_set() {
-    let base = format!("{RAR154}random.rar");
-    let volumes = rar_rs::discover_volumes(std::path::Path::new(&base));
-    assert!(volumes.len() >= 3, "expected several volumes: {volumes:?}");
-    let mut archive = ArchiveReader::open(&volumes[0]).expect("open");
-    let names: Vec<String> = archive.entries().map(|e| e.name().to_string()).collect();
-    assert_eq!(names, vec!["random.bin"]);
-    let data = archive
-        .read_entry(archive.unique_entry("random.bin").unwrap())
-        .expect("decode split member");
-    assert_eq!(data.len(), 2_097_152);
-    assert_eq!(rar5_crc32(&data), 0x1c9e_b697, "random.bin payload CRC");
-}
+// ── Host OS axis ─────────────────────────────────────────────────────────
 
-/// RAR 1.5 host codes stay distinguishable from Windows: DOS-era archives
-/// report `DOS`, our own writer reports `Windows`.
 #[test]
-fn rar4_host_os_names_distinguish_dos() {
-    let rar = ArchiveReader::open(format!("{RAR154}readme_154_normal.rar")).unwrap();
-    let entry = rar.entries().next().unwrap();
-    assert_eq!(entry.host_os_raw(), 0);
-    assert_eq!(entry.host_os_name(), "DOS");
-    assert_eq!(entry.host_os(), 0, "normalized axis stays Windows/Unix");
+fn rar4_host_os_names_report_the_writer() {
+    // RAR stamps the host it ran on — 2 on Windows, 3 on Unix — and the corpus
+    // is built by the release for this host, so the expected value depends on
+    // where the test runs. Our own writer always stamps Windows, which is what
+    // WinRAR did for every DOS/Windows archive it produced.
+    let (raw, name) = if cfg!(windows) {
+        (2, "Windows")
+    } else {
+        (3, "Unix")
+    };
+    let Some(made) = corpus::compressed_m3() else {
+        return;
+    };
+    let archive = ArchiveReader::open(made.path()).unwrap();
+    let entry = archive.entries().next().unwrap();
+    assert_eq!(entry.host_os_raw(), raw);
+    assert_eq!(entry.host_os_name(), name);
 
-    let rar = ArchiveReader::open(format!("{W591}c_m3.rar")).unwrap();
-    let entry = rar.entries().next().unwrap();
+    let Some(ours) = corpus::rar154_normal() else {
+        return;
+    };
+    let archive = ArchiveReader::open(ours.path()).unwrap();
+    let entry = archive.entries().next().unwrap();
     assert_eq!(entry.host_os_raw(), 2);
     assert_eq!(entry.host_os_name(), "Windows");
 }

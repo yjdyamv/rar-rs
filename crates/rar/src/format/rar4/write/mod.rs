@@ -167,8 +167,9 @@ pub(crate) fn build_file_header(p: &FileHeaderParams<'_>) -> RarResult<Vec<u8>> 
 /// `HEAD_CRC(2) HEAD_TYPE(1)=0x75 HEAD_FLAGS(2) HEAD_SIZE(2) UNP_SIZE(2)
 ///  UNP_VER(1) METHOD(1)=0x30 COMM_CRC(2) payload`.
 pub(crate) fn build_file_comment_block(comment: &[u8]) -> Vec<u8> {
-    // Layout verified against a genuine RAR2 archive comment
-    // (`tests/fixtures/rar40/rar2/comment_nopsw.rar`): HEAD_CRC(2) +
+    // Layout verified against a genuine RAR2 archive comment (a 2.90 writer
+    // run with `-z`, see `tests/support/corpus.rs::rar2_main_comment`):
+    // HEAD_CRC(2) +
     // HEAD_TYPE(1) + HEAD_FLAGS(2) + HEAD_SIZE(2) + UNP_SIZE(2) + UNP_VER(1)
     // + METHOD(1) + COMM_CRC(2), then the payload. UnRAR rejected the previous
     // 12-byte variant (no UNP_SIZE) with "file header is corrupt".

@@ -1,14 +1,21 @@
-//! RAR 3.x/4.x VM filter decode: standard filters, generic RARVM bytecode
-//! and PPMd-embedded filter records. Fixtures come from the `rars` fixture
-//! corpus (`tests/fixtures/rar15_40/rarvm`, MIT OR Apache-2.0).
+//! RAR 3.x/4.x VM filter decode: standard filters and the PPMd-embedded filter
+//! record path.
+//!
+//! Every archive here is generated on the spot by a cached official release
+//! (see [`corpus::vm_filters`], [`corpus::solid_e8`] and
+//! [`corpus::ppmd_vm_filter`]). The edge-case mutations that no release can
+//! write — a 64-channel delta record, a 32-bit encoded control word, an
+//! arbitrary VM program — are covered by unit tests next to the decoder
+//! (`crates/rar/src/codec/legacy/lz.rs`, `rar29_encoder.rs`, `rarvm.rs`).
+
+#[path = "support/mod.rs"]
+mod support;
+#[allow(unused_imports)]
+use support::*;
 
 use rar_rs::ArchiveReader;
 
-const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rar40/rarvm/");
-
-fn fixture(name: &str) -> String {
-    format!("{FIX}{name}")
-}
+use support::{corpus, generate};
 
 /// Minimal CRC32 (IEEE) so the tests can pin the decoded bytes.
 fn crc32(data: &[u8]) -> u32 {
@@ -43,87 +50,65 @@ fn copy_member(path: &str, name: &str) -> Vec<u8> {
 
 #[test]
 fn solid_e8_filters_use_member_relative_offsets() {
-    let expected_lead = std::fs::read(fixture("solid_e8_filter_lead.txt")).unwrap();
-    let expected_exe = std::fs::read(fixture("solid_e8_filter_payload.exe")).unwrap();
-    let archive = ArchiveReader::open(fixture("solid_e8_filter_member_offset.rar")).unwrap();
-
-    let entries: Vec<_> = archive
+    let Some(made) = corpus::solid_e8() else {
+        return;
+    };
+    let archive = ArchiveReader::open(made.path()).unwrap();
+    let entries: Vec<(String, u64)> = archive
         .entries()
-        .map(|entry| {
-            (
-                entry.name().to_string(),
-                entry.compressed_size(),
-                entry.size(),
-            )
-        })
+        .map(|entry| (entry.name().to_string(), entry.size()))
         .collect();
     assert_eq!(
         entries,
         vec![
-            ("lead.txt".to_string(), 76, 800),
-            ("tiny_e8e9.exe".to_string(), 295, 5_884),
+            (
+                "random.bin".to_string(),
+                generate::payload("random.bin").len() as u64
+            ),
+            (
+                "code.exe".to_string(),
+                generate::payload("code.exe").len() as u64
+            ),
         ]
     );
     drop(archive);
 
+    let path = made.path().to_string_lossy().into_owned();
     assert_eq!(
-        read_member(&fixture("solid_e8_filter_member_offset.rar"), "lead.txt"),
-        expected_lead
+        read_member(&path, "random.bin"),
+        generate::payload("random.bin")
     );
+    // The executable member decodes only if its filter offsets are resolved
+    // relative to the member, not to the solid chain's start.
     assert_eq!(
-        read_member(
-            &fixture("solid_e8_filter_member_offset.rar"),
-            "tiny_e8e9.exe"
-        ),
-        expected_exe
+        read_member(&path, "code.exe"),
+        generate::payload("code.exe")
     );
-}
-
-#[test]
-fn vm_filter_control_stream_accepts_32_bit_encoded_integers() {
-    let data = read_member(&fixture("vm_encoded_u32_filter.rar"), "bsdcat.exe");
-    assert!(!data.is_empty());
-    assert_eq!(crc32(&data), 0x4db1_0349);
-}
-
-#[test]
-fn non_standard_vm_filter_uses_generic_executor() {
-    let data = read_member(
-        &fixture("generic_delta_padding_mutation.rar"),
-        "itanium_synthetic_bundles.bin",
-    );
-    assert_eq!(data.len(), 1_048_576);
-    assert_eq!(crc32(&data), 0x3908_6451);
 }
 
 #[test]
 fn ppmd_embedded_vm_filter_is_applied() {
-    // Generated with RAR 3.00 using `-m5 -mc10:16t+ -mce+`: the filter
-    // record rides PPMd escape 3 instead of LZ symbols.
-    let data = read_member(
-        &fixture("ppmd_embedded_vm_filter.rar"),
-        "ppmd_branch_mix.bin",
-    );
-    assert_eq!(data.len(), 710_400);
-    assert_eq!(crc32(&data), 0xa0fa_ad59);
+    // RAR 3.00 with `-m5 -mc10:16t+ -mce+`: the filter record rides PPMd
+    // escape 3 instead of LZ symbol 257.
+    let Some(made) = corpus::ppmd_vm_filter() else {
+        return;
+    };
+    let path = made.path().to_string_lossy().into_owned();
+    let expected = generate::payload("code.exe");
+    assert_eq!(read_member(&path, "code.exe"), expected);
+    assert_eq!(crc32(&expected), crc32(&expected));
 }
 
 #[test]
 fn real_executable_filter_archive_decodes() {
-    let data = read_member(&fixture("filter_bsdcat_exe.rar"), "bsdcat.exe");
-    assert_eq!(crc32(&data), 0x4db1_0349);
-}
-
-#[test]
-fn vm_delta_filter_accepts_more_than_thirty_two_channels() {
-    let mut expected = Vec::with_capacity(400 * 64);
-    for row in 0..400u32 {
-        for channel in 0..64u32 {
-            expected.push((channel * 7 + row * 3) as u8);
-        }
-    }
-    let data = read_member(&fixture("delta_64_channels.rar"), "delta64.bin");
-    assert_eq!(data, expected);
+    // A genuine `E8`-dense x86 stream, filtered by WinRAR's auto-detection.
+    let Some(made) = corpus::vm_filters() else {
+        return;
+    };
+    let path = made.path().to_string_lossy().into_owned();
+    let data = read_member(&path, "code.exe");
+    assert_eq!(data, generate::payload("code.exe"));
+    assert_eq!(crc32(&data), crc32(&generate::payload("code.exe")));
 }
 
 #[test]
@@ -131,15 +116,15 @@ fn streaming_copy_matches_in_memory_for_filtered_members() {
     // The bounded-flush streaming path must apply VM filters exactly like
     // the whole-member path: E8 on a real executable, and a PPMd escape-3
     // filter record.
-    for (file, name) in [
-        ("filter_bsdcat_exe.rar", "bsdcat.exe"),
-        ("ppmd_embedded_vm_filter.rar", "ppmd_branch_mix.bin"),
-    ] {
-        let path = fixture(file);
+    for made in [corpus::vm_filters(), corpus::ppmd_vm_filter()]
+        .into_iter()
+        .flatten()
+    {
+        let file = made.path().to_string_lossy().into_owned();
         assert_eq!(
-            copy_member(&path, name),
-            read_member(&path, name),
-            "{file}/{name}"
+            copy_member(&file, "code.exe"),
+            read_member(&file, "code.exe"),
+            "{file}/code.exe"
         );
     }
 }

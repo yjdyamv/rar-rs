@@ -17,7 +17,7 @@ fn main() {
     // churn is slow), so they default lower than the read targets.
     rar_rs_fuzz::standalone_with(
         "rewrite",
-        rar_rs_fuzz::CORPUS_ALL,
+        &rar_rs_fuzz::corpus_all(),
         rar_rs_fuzz::rewrite,
         20_000,
     );

@@ -260,8 +260,20 @@ fn cli_vn_creates_old_style_rar4_volume_names() {
 /// Legacy `.partN.rar` sets print `volume N` in the totals row, like WinRAR.
 #[test]
 fn cli_legacy_new_numbering_totals_show_the_volume() {
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../rar/tests/fixtures/rar40/rev3/rev_newstyle.part2.rar");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("legacy");
+    let src = dir.path().join("payload.bin");
+    std::fs::write(&src, vec![0x5au8; 200_000]).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-v50k", "-m0", "-idq"])
+        .arg(&base)
+        .arg(&src)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rar a must build a legacy volume set");
+    let fixture = dir.path().join("legacy.part2.rar");
+    assert!(fixture.exists(), "legacy volumes use .partN.rar names");
     for command in ["l", "v"] {
         let out = std::process::Command::new(RAR_CLI)
             .arg(command)

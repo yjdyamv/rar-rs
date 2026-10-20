@@ -8,6 +8,11 @@ use rar_rs::{
     EntryWriteOptions, RarError, SolidMode, WriterOptions,
 };
 
+#[path = "support/mod.rs"]
+mod support;
+
+use support::{corpus, generate};
+
 fn stored() -> EntryWriteOptions {
     EntryWriteOptions::new().compression_level(CompressionLevel::STORE)
 }
@@ -1175,8 +1180,8 @@ fn rar4_writer_add_bytes_handles_unicode_and_ascii_names() {
 }
 
 /// RAR4 archive comments (ADR 0005 stage A): set / replace / remove through
-/// the editor, readback through get_comment, and reading a genuine
-/// WinRAR 6.23 comment fixture.
+/// the editor, readback through get_comment, and reading a generated 6.23
+/// archive whose comment WinRAR stored as UTF-16LE.
 #[test]
 fn rar4_archive_comments_roundtrip_and_read_623_fixture() {
     let dir = tempfile::tempdir().unwrap();
@@ -1209,21 +1214,14 @@ fn rar4_archive_comments_roundtrip_and_read_623_fixture() {
     let b = reader.unique_entry("b.txt").unwrap();
     assert_eq!(reader.read_entry(b).unwrap().len(), 60_000);
 
-    // A real WinRAR 6.23 archive with a UTF-8 comment (stored UTF-16LE)
-    // decodes back to the exact text.
-    let fixture = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/rar40/comment/comment_zh.rar"
-    );
+    // A fresh 6.23 RAR4 archive carrying a Chinese comment (stored as
+    // UTF-16LE) decodes back to the exact text.
+    let Some(made) = corpus::unicode_comment() else {
+        return;
+    };
     assert_eq!(
-        comment_of(fixture),
-        Some(
-            std::fs::read(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/rar40/comment/comment.txt"
-            ))
-            .unwrap()
-        )
+        comment_of(made.path()),
+        Some(generate::payload("comment_zh.txt"))
     );
 }
 

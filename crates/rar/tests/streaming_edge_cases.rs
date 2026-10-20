@@ -851,9 +851,9 @@ mod rar50_recovery_external {
     //! External cross-validation against a real WinRAR-produced RAR5 archive that
     //! carries a genuine data-recovery record.
     //!
-    //! The fixture `fixtures/rar50/winrar5_with_recovery_rr5.rar` was created with
-    //! `WinRAR RAR 7.23` (`Rar.exe a -rr5% -ma5 -s- -m5 -ep doc.txt data.bin`), so
-    //! it exercises the *real* RAR5 inline-recovery-record format rather than our
+    //! The archive is generated on demand by 7.23 (`Rar.exe a -rr5% -ma5 -s- -m5
+    //! -ep doc.txt data.bin`, see [`corpus::rar5_recovery_record`]), so it
+    //! exercises the *real* RAR5 inline-recovery-record format rather than our
     //! own writer. Two things must hold for the cross-validation to pass:
     //!
     //! 1. Our reader decodes WinRAR's members (proving our RAR5 parser handles the
@@ -865,18 +865,15 @@ mod rar50_recovery_external {
     use super::*;
 
     use rar_rs::{ArchiveReader, repair_archive};
-    use std::path::PathBuf;
-
-    fn fixture_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/rar50/winrar5_with_recovery_rr5.rar")
-    }
 
     #[test]
     fn winrar_rar5_recovery_record_parses_and_decodes() {
-        // Guard: the fixture really carries an inline recovery record.
-        let raw = include_bytes!("fixtures/rar50/winrar5_with_recovery_rr5.rar");
-        let text = String::from_utf8_lossy(raw);
+        let Some(made) = corpus::rar5_recovery_record() else {
+            return;
+        };
+        // Guard: the archive really carries an inline recovery record.
+        let raw = made.read();
+        let text = String::from_utf8_lossy(&raw);
         assert!(
             text.contains("RR"),
             "fixture must contain an RR service header"
@@ -887,7 +884,7 @@ mod rar50_recovery_external {
         );
 
         // Our reader must decode WinRAR's members correctly.
-        let mut reader = ArchiveReader::open(fixture_path()).expect("open WinRAR RAR5 archive");
+        let mut reader = ArchiveReader::open(made.path()).expect("open WinRAR RAR5 archive");
         assert_eq!(reader.entries().len(), 2, "expected doc.txt + data.bin");
 
         let doc_id = reader.unique_entry("doc.txt").expect("doc.txt entry");
@@ -908,9 +905,12 @@ mod rar50_recovery_external {
 
     #[test]
     fn winrar_rar5_recovery_record_repairs_damaged_archive() {
-        let raw = include_bytes!("fixtures/rar50/winrar5_with_recovery_rr5.rar");
-        // Guard: the fixture really carries an inline recovery record.
-        let text = String::from_utf8_lossy(raw);
+        let Some(made) = corpus::rar5_recovery_record() else {
+            return;
+        };
+        let raw = made.read();
+        // Guard: the archive really carries an inline recovery record.
+        let text = String::from_utf8_lossy(&raw);
         assert!(
             text.contains("RR") && text.contains("{RB}"),
             "fixture must carry an RR service header and {{RB}} recovery chunk"
