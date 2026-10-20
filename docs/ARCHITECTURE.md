@@ -21,7 +21,7 @@
 | `crates/rar-cli`    | binary crate：`rar` + `unrar`                                               |
 | `crates/rar-napi`   | napi-rs 绑定（原生 `.node` + `wasm32-wasip1-threads`）；不发 npm，CI 把产物 |
 | `fuzz/`             | cargo-fuzz 目标，独立 crate（不是 workspace 成员）                          |
-| `crates/rar/tests/` | 集成测试；归档现场生成（`support/generate.rs`），`data/` 放原始载荷     |
+| `crates/rar/tests/` | 集成测试；归档现场生成（`support/generate.rs`），`data/` 放原始载荷         |
 
 三个 crate 都不依赖外部 RAR/UNRAR 二进制；库 crate 只用纯 Rust 基础依赖（CRC /
 AES / HMAC / SHA / rand / zeroize，`parallel` / `simd` 可选）。

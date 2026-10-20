@@ -92,8 +92,9 @@ for a libFuzzer run with the seed writer:
 cd fuzz && cargo run --bin seeds
 ```
 
-That writes `seed-NN.bin` into `corpus/{parse,crypto,recovery,rev,write,rewrite,legacy}/`
-from the same generators, so libFuzzer starts from the identical shapes.
+That writes `seed-NN.bin` into
+`corpus/{parse,crypto,recovery,rev,write,rewrite,legacy}/` from the same
+generators, so libFuzzer starts from the identical shapes.
 
 `write` and `rewrite` have no fixture seeds (their archives are derived from the
 fuzz input), so their corpus directories start empty.

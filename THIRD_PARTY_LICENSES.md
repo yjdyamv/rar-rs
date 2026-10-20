@@ -1,8 +1,9 @@
 # Third-Party Source Inventory
 
-Where the non-original code and test data in this repository came from, and under
-what terms. Not legal advice, and not a substitute for [`LICENSE`](LICENSE),
-[`NOTICE`](NOTICE) or the upstream license texts ([`LICENSES/`](LICENSES/)).
+Where the non-original code and test data in this repository came from, and
+under what terms. Not legal advice, and not a substitute for
+[`LICENSE`](LICENSE), [`NOTICE`](NOTICE) or the upstream license texts
+([`LICENSES/`](LICENSES/)).
 
 The repository-wide SPDX expression is `BSD-2-Clause`: the `Cargo.toml`
 `[workspace.package] license` (inherited by all three crates and mirrored in

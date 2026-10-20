@@ -22,8 +22,8 @@
   MT（字节同等）+ NEWSUB 恢复记录。能力表见
   [`docs/rar4-creation-spec.md`](docs/rar4-creation-spec.md)。
 - **RAR 1.3 / 1.4 / 1.5 / 2.x 创建**：`-ma13` / `-ma14` / `-ma15` / `-ma2`，含
-  solid、 `-p` / `-hp`、旧命名分卷、归档注释（`-ma15`/`-ma2` 把注释嵌进主头，
-  与 1.5/2.x 读取器同构，2.90 可原样读回；这类归档的注释只能创建时写，
+  solid、 `-p` / `-hp`、旧命名分卷、归档注释（`-ma15`/`-ma2` 把注释嵌进主头， 与
+  1.5/2.x 读取器同构，2.90 可原样读回；这类归档的注释只能创建时写，
   编辑一律拒绝）。
 - **RAR4 编辑全补**（ADR 0005）：头/块级操作 + 非 solid 块拷贝 + solid 整档
   repack； `-hp` 与分卷（`rn`/`ch`/`k`/注释）均已支持。
@@ -43,18 +43,20 @@
 - **格式对拍**：`crates/rar/tests/format_parity.rs` 把同一批载荷分别喂给我们的
   writer 与官方 `Rar.exe`，逐块逐字段比对（自带 RAR4/RAR5 头解析器，不依赖库内
   解析代码）：STORE 档要求整档逐字节相同（RAR5 / RAR4 / RAR2 三族），压缩档只放
-  过 pack 长度与覆盖它的校验和；另有 locator、QO、solid 链、RAR2 无 ENDARC 的专项
-  契约。分卷同样要求逐卷逐字节相同（RAR5 store、RAR4 新旧两套卷名、RAR2 两套卷名）；
-  加密成员只放过密文与 KDF 盐。`.rev` 由 `rar-cli` 侧对拍：同一份逐字节相同的
-  数据卷喂给两边的 `rv3`，产出的 `.rev` 必须逐字节相同，且两边 `rc` 都能补回
+  过 pack 长度与覆盖它的校验和；另有 locator、QO、solid 链、RAR2 无 ENDARC
+  的专项 契约。分卷同样要求逐卷逐字节相同（RAR5 store、RAR4 新旧两套卷名、RAR2
+  两套卷名）； 加密成员只放过密文与 KDF 盐。`.rev` 由 `rar-cli`
+  侧对拍：同一份逐字节相同的 数据卷喂给两边的 `rv3`，产出的 `.rev`
+  必须逐字节相同，且两边 `rc` 都能补回
   被删的中间卷（`rar5_recovery_volumes_match_winrar_byte_for_byte`）。
   恢复记录 + 分卷（`-rr` + `-v`）只能字段级对拍：官方每卷预留并把剩余空间补零，
   我方不补（`recovery_records_repeat_in_every_volume`）。
 - **测试归档零提交**：legacy 套件（RAR 1.3–4.x、`.rev`、VM 过滤器、恢复记录）
-  全部由 `.cache/winrar/` 的官方 `Rar.exe` 现场生成（`tests/support/generate.rs` +
-  `corpus.rs`），RAR 1.3/1.4 与 v26/v36/v70 用我们自己的 writer 或改 `unp_ver`
-  字节；`tests/data/` 只留两份原始载荷。代价：没有 tool cache 的机器上这些套件
-  打 `SKIP:` 跳过（本地闸门覆盖，CI smoke 不覆盖）。
+  全部由 `.cache/winrar/` 的官方 `Rar.exe`
+  现场生成（`tests/support/generate.rs` + `corpus.rs`），RAR 1.3/1.4 与
+  v26/v36/v70 用我们自己的 writer 或改 `unp_ver` 字节；`tests/data/`
+  只留两份原始载荷。代价：没有 tool cache 的机器上这些套件 打 `SKIP:`
+  跳过（本地闸门覆盖，CI smoke 不覆盖）。
 
 ## 下一步
 
@@ -91,8 +93,8 @@
 - [x] **CI 拉官方工具跑生成套件**：`scripts/fetch_winrar.py`（标准库，双平台）
       是唯一下载入口，两个 GitHub job 都先跑它；`lint-windows` 用
       `SA_REQUIRE_WINRAR=1` 跑全套（覆盖 2.90/3.00 配方），Ubuntu job 跑同一批
-      target 但允许自跳（rarlab 的 Linux 版从 3.93 起）。
-      注意上限仍是 RAR4 写入 6.23、`cf` 4.20、`rv3` 4.20。
+      target 但允许自跳（rarlab 的 Linux 版从 3.93 起）。 注意上限仍是 RAR4 写入
+      6.23、`cf` 4.20、`rv3` 4.20。
 
 ### 通用库的对外面（已做一半，剩打包）
 
@@ -233,8 +235,8 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
   **`rar r` 不写 `fixed.<name>`**、**无控制台时的覆盖询问**：口径与理由见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 - **RAR5 元数据仍差三处**（字节外观，双向读写一致）：locator
-  偏移字段宽度、「官方 QO 默认阈值」、成员总大小 ≥ 1 MiB 时分卷头的
-  `data_size` 预留宽度，见上面「暂缓」与
+  偏移字段宽度、「官方 QO 默认阈值」、成员总大小 ≥ 1 MiB 时分卷头的 `data_size`
+  预留宽度，见上面「暂缓」与
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「分卷成员头的 `data_size` 宽度」。
 - **Windows 联接点的 redirect 目标字符串**：见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。

@@ -21,15 +21,15 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `stream_block_size_fields_use_the_reserved_width`。
 - **分卷成员头的 `data_size` 宽度跟着成员总大小走**：分卷里每个卷的
   `unpacked_size` 都是成员**总**大小，官方给 `data_size` 用的是同一个字段宽度，
-  而不是本卷数据块自己的宽度（实测 7.23：200 000 字节成员按 32 KiB 分卷，末卷
-  3 793 字节的数据块仍写在 3 字节里）。按本卷大小写最小宽度会让末卷头短 1 字节。
+  而不是本卷数据块自己的宽度（实测 7.23：200 000 字节成员按 32 KiB 分卷，末卷 3
+  793 字节的数据块仍写在 3 字节里）。按本卷大小写最小宽度会让末卷头短 1 字节。
   契约 `multivolume_sets_are_byte_identical_to_official_rar`。
-  已知差异：成员总大小 ≥ 1 048 064 时官方会**额外预留**宽度（实测 1 048 064–
-  1 048 575 → 4 字节、1 048 576–8 388 607 → 5 字节、≥8 388 608 → 6 字节，
+  已知差异：成员总大小 ≥ 1 048 064 时官方会**额外预留**宽度（实测 1 048 064– 1
+  048 575 → 4 字节、1 048 576–8 388 607 → 5 字节、≥8 388 608 → 6 字节，
   与分卷大小无关，阈值按值大小跳档，规律未探明），我们只写最小宽度，交错读取
   不受影响。
-- **主头 locator 只在有指向对象时写**：有 QO 记录或 `-rr` 记录才写 locator
-  （块 flags 含 `SKIP_IF_UNKNOWN`），否则官方 7.23 连记录都不写（主头只剩
+- **主头 locator 只在有指向对象时写**：有 QO 记录或 `-rr` 记录才写 locator （块
+  flags 含 `SKIP_IF_UNKNOWN`），否则官方 7.23 连记录都不写（主头只剩
   type/flags/归档 flags）；写了 locator 时 QO 标志先置、偏移写 0 占位，关闭时
   回填。**有 QO 与实际偏移无关的判断只看偏移非零，不看标志位**（只看标志会凭空
   重建 QO 记录、破坏前缀逐字节不变）。契约
@@ -37,15 +37,16 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `no_locator_without_quick_open_or_recovery` /
   `locator_parity`（`tests/format_parity.rs`）。
 - **QO 服务块没有 `SUBDATA` extra 记录**：官方 7.23 的 `QO` 块 flags 是
-  `0x06`（`DATA_AREA|SKIP_IF_UNKNOWN`）、extra 区为空，载荷就是 data
-  area；`RR` 块相反，`0x07` + extra 里的百分比字节。多发一条空
-  `SUBDATA` 记录（`type` only）会让每个归档多 3 字节且 flags 不同。
+  `0x06`（`DATA_AREA|SKIP_IF_UNKNOWN`）、extra 区为空，载荷就是 data area；`RR`
+  块相反，`0x07` + extra 里的百分比字节。多发一条空 `SUBDATA` 记录（`type`
+  only）会让每个归档多 3 字节且 flags 不同。
 - **QO 记录在编辑/追加时整体重建，不是原样拷贝**：记录里存的是每个成员头
   的副本与「回退到该头的相对偏移」，所以删除/改名/注释/`rr` 之后偏移必须重算。
-  编辑走 `transaction`（保留原有「有无 QO」的判定：`had_qo &&
-  !header_encryption`，`-hp` 归档因此不带记录），追加先截断尾部的 QO/RR 再按
-  现有+新增成员重写，关闭时回填 locator。契约
-  `edits_rebuild_the_quick_open_record` /
+  编辑走 `transaction`（保留原有「有无
+  QO」的判定：`had_qo &&
+  !header_encryption`，`-hp`
+  归档因此不带记录），追加先截断尾部的 QO/RR 再按 现有+新增成员重写，关闭时回填
+  locator。契约 `edits_rebuild_the_quick_open_record` /
   `edits_do_not_invent_a_quick_open_record`。注意我们总是缓存**全部**成员头，
   而官方默认只缓存相对大的文件，故编辑官方归档后记录会变大（合法但有别）。
 - **`-qo` 默认只给大文件建条目**（阈值随版本变），`-qo-` 关、`-qo+`
@@ -101,9 +102,9 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `max(2, ceil(prefix*P/(100*512)))`——只向上取整、绝不少于请求的百分比。裸
   `-rr<N>`（计数）精确对齐。
 - **带 `-rr` 的分卷会在 `ENDARC` 后补 0 填满卷**：官方 7.23 先为记录预留、再把
-  剩余空间补零（32 KiB 卷 `-rr1%`/`-rr5%` 补 7 字节、`-rr10%` 补 393 字节，
-  64 KiB 卷仍是 7 字节），我们按实际字节写出、不留填充；两者都被官方
-  `t`/`rc` 接受。`.rev` 编码本身逐字节一致（见
+  剩余空间补零（32 KiB 卷 `-rr1%`/`-rr5%` 补 7 字节、`-rr10%` 补 393 字节， 64
+  KiB 卷仍是 7 字节），我们按实际字节写出、不留填充；两者都被官方 `t`/`rc`
+  接受。`.rev` 编码本身逐字节一致（见
   `rar5_recovery_volumes_match_winrar_byte_for_byte`），所以两条 `.rev` 只差在
   喂进去的数据卷是否逐字节相同。对拍口径因此是「字段级」的：块序列、`RR` 的
   百分比 extra 记录、以及 `我们的分块 = 官方的分块 + 官方的补零`
@@ -143,8 +144,8 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   11）**，别试图"区分"。
 - **RAR4 solid 链中不落 STORE**：官方在 `-s` 链里即使载荷不可压也照写正常
   method（`0x33`），我们保留“压不小就 STORE”的短路。STORE 成员合法地中断链
-  （其后成员不再带 `FHD_SOLID`，读取器会重置表），但比官方少一段 ratio。
-  对拍 solid 时用可压成员，见 `solid_chain_flags_agree_with_official`。
+  （其后成员不再带 `FHD_SOLID`，读取器会重置表），但比官方少一段 ratio。 对拍
+  solid 时用可压成员，见 `solid_chain_flags_agree_with_official`。
 - **`-idn` 仍不生效、`-idc` 恒等效**（我们不打印官方版权/Trial 横幅）、`-iver`
   文案与官方不同；`rar r` 对载荷损坏的处置见上。
 
@@ -235,8 +236,8 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   tag `vX.Y.Z` 由 Release job 校验。改版本号要同步刷新 `Cargo.lock` 与
   `fuzz/Cargo.lock`。
 - **测试不在主 CI 里跑**：CI 的确定性 smoke 只跑库 `--all-features` 与 CLI
-  `--bins --test cli_behavior --test volume_bare_name`；**生成套件例外**——两个 job
-  都先 `python3 scripts/fetch_winrar.py` 拉官方工具再跑它们（Windows 带
+  `--bins --test cli_behavior --test volume_bare_name`；**生成套件例外**——两个
+  job 都先 `python3 scripts/fetch_winrar.py` 拉官方工具再跑它们（Windows 带
   `SA_REQUIRE_WINRAR=1`，Linux 因 2.90/3.00 无 Linux 版而允许自跳）。JS/WASI
   绑定套件仍是本地闸门。**改行为后本地必须自己跑受影响套件**——0.12.0 曾带着
   过期断言发布。
@@ -256,14 +257,14 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `MHD_COMMENT` 置位）。字段：`UNP_SIZE(2) UNP_VER(1) METHOD(1) COMM_CRC(2)` +
   数据；块头 CRC 只覆盖块自己的固定 11 字节（`block[2..13]`，**不含**数据），
   主头 CRC 只覆盖 `main[2..13]`，`COMM_CRC = crc32(text) & 0xffff`。载荷必须用
-  容器同代编解码器压缩并声明 method 4（0x34）：官方 1.5 Beta 用 Unpack15、
-  2.90 用 Unpack20，**即使压完更大也照压**；别图省事写 method 0x30（2.90 能
+  容器同代编解码器压缩并声明 method 4（0x34）：官方 1.5 Beta 用 Unpack15、 2.90
+  用 Unpack20，**即使压完更大也照压**；别图省事写 method 0x30（2.90 能
   容忍，但更老的 pre-3.0 读取器会判 "Comment header broken"，且与官方字节形状
-  不一致）。四个后果：
-  ① 注释必须在第一个成员之前写进去（`-z` 在创建时就入队，并行批量路径必须先
-  冲刷队列，否则被静默丢掉）；② 编辑/追加无法替换它，`ArchiveEditor` 直接
-  拒绝（"keeps its comment inside the main header"），别去写 `CMT` —— 老读取器
-  看不见；③ 读取端先认主头里的嵌套块，再回退到 `CMT`。
+  不一致）。四个后果： ① 注释必须在第一个成员之前写进去（`-z`
+  在创建时就入队，并行批量路径必须先 冲刷队列，否则被静默丢掉）；②
+  编辑/追加无法替换它，`ArchiveEditor` 直接 拒绝（"keeps its comment inside the
+  main header"），别去写 `CMT` —— 老读取器 看不见；③
+  读取端先认主头里的嵌套块，再回退到 `CMT`。
   契约：`legacy_versions_embed_the_archive_comment`、`legacy_comment_edits_are_refused_with_a_reason`、
   `cli_legacy_comment_is_embedded_at_creation`、`patch_main_header_preserves_an_embedded_comment`。
 - **测试归档不落盘、不提交**：legacy 套件一律现场生成
@@ -273,20 +274,21 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   RAR5 消失（4.20 是最后一个现代布局）、没有任何官方版本能写 v14/v15/v26/v36/v70
   （用我们自己的 writer 或改 `unp_ver` 字节）。缺工具时打 `SKIP:` 并跳过，
   `SA_REQUIRE_WINRAR=1` 把跳过变失败——**声称跑过生成套件就带上它**。
-  另一个坑：`-z<file>` / `cw` 读注释文件用的是**控制台 ANSI 代码页**（本机 cp936），
-  拿 UTF-8 文件喂它就会被当成 GBK 存成另一个字符串（UnRAR 回显反而看着正常——
-  GBK 往返）。要测 UTF-16 注释就把注释文件写成 **UTF-16LE + BOM**，工具会原样存；
-  断言用 `generate::comment_zh_text()`（UTF-8 文本），不要用注释文件本身的字节。
+  另一个坑：`-z<file>` / `cw` 读注释文件用的是**控制台 ANSI 代码页**（本机
+  cp936）， 拿 UTF-8 文件喂它就会被当成 GBK 存成另一个字符串（UnRAR
+  回显反而看着正常—— GBK 往返）。要测 UTF-16 注释就把注释文件写成 **UTF-16LE +
+  BOM**，工具会原样存； 断言用 `generate::comment_zh_text()`（UTF-8
+  文本），不要用注释文件本身的字节。
 - **工具缓存只有一个下载入口**：`scripts/fetch_winrar.py`（Python 3 标准库，
-  Windows/macOS/Linux 同一份），`scripts/wsl/` 不再自带下载器。rarlab 的
-  Windows 包是自解压 PE：**≤5.00 内嵌 RAR4、≥5.50 内嵌 RAR5**，只许用 7-Zip
+  Windows/macOS/Linux 同一份），`scripts/wsl/` 不再自带下载器。rarlab 的 Windows
+  包是自解压 PE：**≤5.00 内嵌 RAR4、≥5.50 内嵌 RAR5**，只许用 7-Zip
   或（新到旧的）缓存 `Rar.exe` 解，**永不执行**——直接跑会启动安装程序；旧
   `Rar.exe` 只认得自己那代的载荷，所以要新版本先装。**Linux 只有 3.93+ 的
   tarball**，2.90/3.00 的配方在 Linux 自跳；且 Linux `rar` 写 `host_os = 3`
   （Windows 是 2），host 断言必须按平台取值。rarlab 对个别老文件会在最后一
   字节后重置连接，下载是否完好要看载荷能否完整解出，而不是看传输是否报错。
-- **不要用带绝对路径的载荷名写归档**：`-m0` 会把源路径原样存进成员名
-  （历史 fixture 里那个 `Users\yuan\AppData\...` 成员就是这么来的）。
+- **不要用带绝对路径的载荷名写归档**：`-m0` 会把源路径原样存进成员名 （历史
+  fixture 里那个 `Users\yuan\AppData\...` 成员就是这么来的）。
 - **标记编译门用 `cfg(unix)`/`cfg(windows)`，别用格式常量**：`OS_WINDOWS`
   是格式常量不是编译门；`wasm32-wasip1-threads` 既非 unix 也非 windows，漏门会让
   CI 红。

@@ -204,17 +204,17 @@ Two things sit outside the fetched toolchain and are therefore **manual,
 optional, and never a reference**:
 
 - `wrar155.rar` — a genuine WinRAR 1.5 Beta (1995) release archive with an
-  ANSI-art comment (`T R A K - O N E !`). No fetched build can write a
-  1.3/1.5 container, so this is the only shipped evidence for that layout.
+  ANSI-art comment (`T R A K - O N E !`). No fetched build can write a 1.3/1.5
+  container, so this is the only shipped evidence for that layout.
   `crates/rar/tests/rar4_read.rs::genuine_rar155_beta_archive_decodes` decodes
-  its comment and both members and re-checks them with the official
-  `UnRAR.exe` 2.90 and 7.23; the test skips when the file is absent.
+  its comment and both members and re-checks them with the official `UnRAR.exe`
+  2.90 and 7.23; the test skips when the file is absent.
 - Older 2.x installers (`winrar200.exe`, `winrar206.exe`) are no longer served
   by rarlab (404 under `https://www.rarlab.com/rar/`); the copies used while
-  developing the legacy comment support came from a third-party mirror. They
-  are kept in `.cache/winrar-manual/` — **not** in `.cache/winrar/`, which is
-  what the suites scan — because a mirror build is not an official reference.
-  Keep them out of the tool cache and never let a test depend on them.
+  developing the legacy comment support came from a third-party mirror. They are
+  kept in `.cache/winrar-manual/` — **not** in `.cache/winrar/`, which is what
+  the suites scan — because a mirror build is not an official reference. Keep
+  them out of the tool cache and never let a test depend on them.
 
 ## Generated test archives
 
@@ -223,19 +223,19 @@ No archive files are committed. Legacy-format suites call
 temp directory on deterministic payloads built in Rust, then hands back the
 archive path (memoized per recipe). `crates/rar/tests/support/corpus.rs` names
 the recipes. `crates/rar/src/lib.rs` pulls the same file in as
-`pub(crate) mod test_winrar` (`#[path]`, `cfg(test)`), so in-crate tests reuse it
-instead of duplicating recipes.
+`pub(crate) mod test_winrar` (`#[path]`, `cfg(test)`), so in-crate tests reuse
+it instead of duplicating recipes.
 
 The cache is `.cache/winrar/<version>/` (gitignored): the Windows installers
 ship `Rar.exe` + `UnRAR.exe` + `Default.SFX`, the Linux tarballs `rar` +
-`unrar` + `default.sfx`, and both spellings are accepted. Override the root
-with `SA_WINRAR_CACHE`. Missing tool or failed generation
-prints `SKIP: …` and returns `None`, which the tests treat as "skip";
-`SA_REQUIRE_WINRAR=1` turns both into a hard failure — use it to prove a run
-actually exercised the generated corpus.
+`unrar` + `default.sfx`, and both spellings are accepted. Override the root with
+`SA_WINRAR_CACHE`. Missing tool or failed generation prints `SKIP: …` and
+returns `None`, which the tests treat as "skip"; `SA_REQUIRE_WINRAR=1` turns
+both into a hard failure — use it to prove a run actually exercised the
+generated corpus.
 
-`scripts/fetch_winrar.py` (Python 3, standard library only) fills the cache
-from rarlab and is the one place that maps a release to its installer:
+`scripts/fetch_winrar.py` (Python 3, standard library only) fills the cache from
+rarlab and is the one place that maps a release to its installer:
 
 ```sh
 python3 scripts/fetch_winrar.py           # the releases the suites need
@@ -250,36 +250,35 @@ cached `Rar.exe`, newest release first, because an old release only understands
 the payload format of its own era. rarlab published Linux builds from 3.93 on,
 so `2-90` and `3-00` exist only for Windows: the recipes that need them
 (`corpus::rar20_*`, the RAR2 comment layout, `REV3_OLD`) self-skip on Linux,
-which is why the legacy `.rev` layout is *also* covered by `REV3_LATE` (3.93) —
-a third naming shape that Linux can generate.
-The host OS field follows the writer as well — Windows builds stamp `host_os 2`,
-Linux ones `3` — so assertions about it are per-host.
+which is why the legacy `.rev` layout is _also_ covered by `REV3_LATE` (3.93) —
+a third naming shape that Linux can generate. The host OS field follows the
+writer as well — Windows builds stamp `host_os 2`, Linux ones `3` — so
+assertions about it are per-host.
 
-Which release serves which format (the *newest* one that still supports it):
+Which release serves which format (the _newest_ one that still supports it):
 
-| format | tool | why |
-| ------ | ---- | --- |
-| RAR 2.0 compressed (`-m0`-only v20 otherwise) | `2-90` | the 2.x line is the only one that still compresses v20 |
-| RAR 2.0 via `-ma4 -m0` | `6-23` | `-m0` writes `unp_ver 20` on every release up to 6.23 |
-| RAR 3.x (`unp_ver 29`) | `6-23` | newest release that still writes `-ma4`; 7.23 removed it |
-| RAR 5 | `7-23` | current |
-| `.rev` sets (`rv3`) | `4-20` / `3-93` / `3-00` | RAR5 dropped `rv3`; one writer per naming shape — 4.20 `.partN.rev`, 3.93 `<base>N.rev`, 3.00 `<base>4_3_N.rev` |
-| per-file comments (`cf`) | `4-20` | `cf` was removed in 5.00 |
-| RAR 1.3/1.4, v26/v36, v70 | our writer | no release writes them (`-ma14`/`-ma15`; `-ma*` else patches `unp_ver`) |
+| format                                        | tool                     | why                                                                                                             |
+| --------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| RAR 2.0 compressed (`-m0`-only v20 otherwise) | `2-90`                   | the 2.x line is the only one that still compresses v20                                                          |
+| RAR 2.0 via `-ma4 -m0`                        | `6-23`                   | `-m0` writes `unp_ver 20` on every release up to 6.23                                                           |
+| RAR 3.x (`unp_ver 29`)                        | `6-23`                   | newest release that still writes `-ma4`; 7.23 removed it                                                        |
+| RAR 5                                         | `7-23`                   | current                                                                                                         |
+| `.rev` sets (`rv3`)                           | `4-20` / `3-93` / `3-00` | RAR5 dropped `rv3`; one writer per naming shape — 4.20 `.partN.rev`, 3.93 `<base>N.rev`, 3.00 `<base>4_3_N.rev` |
+| per-file comments (`cf`)                      | `4-20`                   | `cf` was removed in 5.00                                                                                        |
+| RAR 1.3/1.4, v26/v36, v70                     | our writer               | no release writes them (`-ma14`/`-ma15`; `-ma*` else patches `unp_ver`)                                         |
 
 Shapes no writer can emit — a 64-channel delta record, a 32-bit encoded VM
 control word, a mutated `.rev` header, a truncated payload — are produced by
 byte-level mutations of generated output (`generate::patch_unp_ver`,
-`tests/rar13_read.rs`) or by unit tests next to the decoder. `tests/data/`
-holds the two raw payload corpora (no archives).
+`tests/rar13_read.rs`) or by unit tests next to the decoder. `tests/data/` holds
+the two raw payload corpora (no archives).
 
-Consequence for CI: both GitHub jobs run
-`scripts/fetch_winrar.py` first, so the generated suites execute there instead
-of skipping. `lint-windows` fetches the full set and runs them with
-`SA_REQUIRE_WINRAR=1` (a missing tool or a failed generation fails the job);
-`lint` (Ubuntu) runs the same targets against the Linux builds without that
-flag, because 2.90/3.00 have no Linux release. `scripts/wsl/ci-linux.sh` still
-fetches the tools for the local Linux gate.
+Consequence for CI: both GitHub jobs run `scripts/fetch_winrar.py` first, so the
+generated suites execute there instead of skipping. `lint-windows` fetches the
+full set and runs them with `SA_REQUIRE_WINRAR=1` (a missing tool or a failed
+generation fails the job); `lint` (Ubuntu) runs the same targets against the
+Linux builds without that flag, because 2.90/3.00 have no Linux release.
+`scripts/wsl/ci-linux.sh` still fetches the tools for the local Linux gate.
 
 ## Why test targets are optimized
 
