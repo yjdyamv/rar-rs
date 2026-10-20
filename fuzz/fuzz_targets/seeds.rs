@@ -7,14 +7,20 @@
 use std::path::Path;
 
 fn write(target: &str, seeds: &[&[u8]]) {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus").join(target);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("corpus")
+        .join(target);
     std::fs::create_dir_all(&dir).expect("create corpus dir");
     for (index, seed) in seeds.iter().enumerate() {
         let path = dir.join(format!("seed-{index:02}.bin"));
         std::fs::write(&path, seed).expect("write seed");
     }
     let total: usize = seeds.iter().map(|seed| seed.len()).sum();
-    println!("{target}: {} seeds, {total} bytes -> {}", seeds.len(), dir.display());
+    println!(
+        "{target}: {} seeds, {total} bytes -> {}",
+        seeds.len(),
+        dir.display()
+    );
 }
 
 fn main() {
