@@ -935,6 +935,168 @@ fn cached_names(archive: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// A volume set is a product of the same rules as a single archive: the split
+/// points, the per-volume main-header flags (`MHD_VOLUME` /
+/// `MHD_NEWNUMBERING`), the `prefix_crc32` in the end block and the numbering
+/// all have to land where WinRAR puts them. The two sides differ only in the
+/// archive base name, which no volume carries inside its bytes.
+/// Collect `dir`'s `<slug>*` volumes as `(suffix, bytes)` in name order.
+fn volume_set(dir: &Path, slug: &str) -> Vec<(String, Vec<u8>)> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(slug)
+        })
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            (
+                name.trim_start_matches(slug).to_string(),
+                std::fs::read(&path).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Compare two volume sets name by name, then byte by byte.
+fn assert_volume_sets_identical(
+    label: &str,
+    mine: &[(String, Vec<u8>)],
+    theirs: &[(String, Vec<u8>)],
+) {
+    let names = |set: &[(String, Vec<u8>)]| -> Vec<String> {
+        set.iter().map(|(name, _)| name.clone()).collect()
+    };
+    assert_eq!(names(mine), names(theirs), "{label}: volume naming");
+    assert!(mine.len() > 1, "{label}: the payload must span volumes");
+    for ((name, ours), (_, official)) in mine.iter().zip(theirs) {
+        if ours != official {
+            let at = ours
+                .iter()
+                .zip(official)
+                .position(|(a, b)| a != b)
+                .unwrap_or(ours.len().min(official.len()));
+            let lo = at.saturating_sub(16);
+            panic!(
+                "{label}: volume {name} differs at byte {at} \
+                 (ours {} bytes, official {} bytes)
+  ours    {}
+  official{}",
+                ours.len(),
+                official.len(),
+                hex(&ours[lo..ours.len().min(at + 32)]),
+                hex(&official[lo..official.len().min(at + 32)]),
+            );
+        }
+    }
+}
+
+/// Write a split STORE set of `member` with our writer and hand back its
+/// volumes, suffixes relative to `archive`'s stem.
+fn our_volume_set(
+    dir: &Path,
+    member: &str,
+    version: ArchiveVersion,
+    old_numbering: bool,
+) -> Vec<(String, Vec<u8>)> {
+    let src = sample(dir, member);
+    let path = dir.join("ours.rar");
+    let mut writer = ArchiveWriter::create_with(
+        &path,
+        WriterOptions::new()
+            .compression(version)
+            .volume_size(32 * 1024)
+            .old_numbering(old_numbering),
+    )
+    .unwrap();
+    writer
+        .add_path_as(
+            &src,
+            member,
+            EntryWriteOptions::new().compression_level(CompressionLevel::STORE),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    std::fs::remove_file(&src).unwrap();
+    volume_set(dir, "ours")
+}
+
+/// A multi-volume set is the same container rules applied per volume — plus
+/// the split flags, the per-volume end-of-archive block and the volume naming
+/// scheme — so a STORE set has to match byte for byte.
+#[test]
+fn multivolume_sets_are_byte_identical_to_official_rar() {
+    // Incompressible payload: a 32 KiB split of compressible data collapses
+    // into one volume and would test nothing.
+    for (label, tool, version, old_numbering, switches) in [
+        (
+            "rar5 store",
+            generate::TOOL_RAR50,
+            ArchiveVersion::V50,
+            false,
+            &["-ma5", "-m0", "-qo-", "-v32k"][..],
+        ),
+        (
+            "new numbering",
+            generate::TOOL_RAR29,
+            ArchiveVersion::V29,
+            false,
+            &["-ma4", "-m0", "-v32k"][..],
+        ),
+        (
+            "old numbering",
+            generate::TOOL_RAR29,
+            ArchiveVersion::V29,
+            true,
+            &["-ma4", "-m0", "-vn", "-v32k"][..],
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = our_volume_set(dir.path(), "big.bin", version, old_numbering);
+        let Some(made) = generate::archive_with(tool, switches, &["big.bin"], &[]) else {
+            return;
+        };
+        let theirs: Vec<(String, Vec<u8>)> = made
+            .volumes()
+            .into_iter()
+            .map(|(name, bytes)| (name.trim_start_matches("arc").to_string(), bytes))
+            .collect();
+        assert_volume_sets_identical(label, &mine, &theirs);
+    }
+}
+
+/// The RAR 2.x era: the volumes carry no end-of-archive block at all, the
+/// first volume is `<stem>.rar` and the rest count from `.r00`. RAR 2.90
+/// spells the *new* scheme `-vn`, the opposite of RAR 3.0 and later.
+#[test]
+fn rar20_volume_sets_are_byte_identical_to_official_rar() {
+    for (label, old_numbering, switches) in [
+        ("rar20 old numbering", true, &["-m0", "-v32k"][..]),
+        ("rar20 new numbering", false, &["-m0", "-vn", "-v32k"][..]),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = our_volume_set(dir.path(), "big.bin", ArchiveVersion::V20, old_numbering);
+        let Some(made) =
+            generate::archive_with(generate::TOOL_V20_COMPRESSED, switches, &["big.bin"], &[])
+        else {
+            return;
+        };
+        let theirs: Vec<(String, Vec<u8>)> = made
+            .volumes()
+            .into_iter()
+            .map(|(name, bytes)| (name.trim_start_matches("arc").to_string(), bytes))
+            .collect();
+        assert_volume_sets_identical(label, &mine, &theirs);
+    }
+}
+
 /// The quick-open record is a cache of the file headers, so it cannot survive
 /// an edit untouched: a delete has to drop the entry, an append has to add one,
 /// and every surviving cached offset has to move with the headers it names.

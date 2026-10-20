@@ -88,6 +88,20 @@ impl Generated {
     pub fn read(&self) -> Vec<u8> {
         std::fs::read(&self.archive).expect("read generated archive")
     }
+
+    /// Every file the run produced, name and bytes, sorted by name — a volume
+    /// set comes back in `arc.rar`, `arc.r00`, `arc.r01` order.
+    pub fn volumes(&self) -> Vec<(String, Vec<u8>)> {
+        let mut paths: Vec<&PathBuf> = self.files.iter().collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                (name, std::fs::read(path).expect("read generated volume"))
+            })
+            .collect()
+    }
 }
 
 fn workspace_root() -> PathBuf {
@@ -204,6 +218,24 @@ pub fn slug(s: &str) -> String {
         .collect()
 }
 
+/// The comment text `comment_zh.txt` carries, as UTF-8: what our reader has to
+/// hand back after WinRAR stored it as UTF-16LE inside a compressed `CMT`
+/// block. Keep every other assertion on this, not on [`payload`] — the payload
+/// itself is the UTF-16LE *file* the tool reads.
+pub fn comment_zh_text() -> &'static [u8] {
+    "第二段注释 ünï\n".as_bytes()
+}
+
+/// The `-z` comment *file*: a UTF-16LE BOM plus the text, which makes WinRAR
+/// store it verbatim instead of decoding it through the ANSI code page.
+fn comment_zh_file() -> Vec<u8> {
+    let mut out = vec![0xFF, 0xFE];
+    for unit in String::from_utf8_lossy(comment_zh_text()).encode_utf16() {
+        out.extend_from_slice(&unit.to_le_bytes());
+    }
+    out
+}
+
 /// Deterministic payload bytes for a member name.
 ///
 /// Tests assert extracted bytes against the same call, so the payloads are the
@@ -220,9 +252,12 @@ pub fn payload(name: &str) -> Vec<u8> {
         "img.bmp" => bitmap(64, 64),
         "itan.bin" => itanium(16 * 1024),
         "comment.txt" => b"archive comment\n".to_vec(),
-        // Not representable in an OEM code page, so the writer has to store the
-        // comment as UTF-16LE.
-        "comment_zh.txt" => "第二段注释 ünï\n".as_bytes().to_vec(),
+        // UTF-16LE with a BOM, on purpose: `-z<file>` reads a comment file in
+        // the console's ANSI code page, so handing it UTF-8 would store
+        // whatever that code page makes of the bytes (cp936 on a Chinese
+        // Windows turns "第二段" into six other characters). With a BOM the
+        // tool stores the text verbatim whatever the code page is.
+        "comment_zh.txt" => comment_zh_file(),
         // Corpus members whose logical content the read suites pin.
         "repeat.txt" => repeat(4000),
         "random.bin" => noise(0x1234_5678, 64 * 1024),

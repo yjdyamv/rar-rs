@@ -19,6 +19,15 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `vint_size(unpacked_size << 12)` 预留（官方先写头后回填，故更宽）。契约
   `member_size_fields_use_a_two_byte_minimum` /
   `stream_block_size_fields_use_the_reserved_width`。
+- **分卷成员头的 `data_size` 宽度跟着成员总大小走**：分卷里每个卷的
+  `unpacked_size` 都是成员**总**大小，官方给 `data_size` 用的是同一个字段宽度，
+  而不是本卷数据块自己的宽度（实测 7.23：200 000 字节成员按 32 KiB 分卷，末卷
+  3 793 字节的数据块仍写在 3 字节里）。按本卷大小写最小宽度会让末卷头短 1 字节。
+  契约 `multivolume_sets_are_byte_identical_to_official_rar`。
+  已知差异：成员总大小 ≥ 1 048 064 时官方会**额外预留**宽度（实测 1 048 064–
+  1 048 575 → 4 字节、1 048 576–8 388 607 → 5 字节、≥8 388 608 → 6 字节，
+  与分卷大小无关，阈值按值大小跳档，规律未探明），我们只写最小宽度，交错读取
+  不受影响。
 - **主头 locator 只在有指向对象时写**：有 QO 记录或 `-rr` 记录才写 locator
   （块 flags 含 `SKIP_IF_UNKNOWN`），否则官方 7.23 连记录都不写（主头只剩
   type/flags/归档 flags）；写了 locator 时 QO 标志先置、偏移写 0 占位，关闭时
@@ -241,6 +250,10 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   RAR5 消失（4.20 是最后一个现代布局）、没有任何官方版本能写 v14/v15/v26/v36/v70
   （用我们自己的 writer 或改 `unp_ver` 字节）。缺工具时打 `SKIP:` 并跳过，
   `SA_REQUIRE_WINRAR=1` 把跳过变失败——**声称跑过生成套件就带上它**。
+  另一个坑：`-z<file>` / `cw` 读注释文件用的是**控制台 ANSI 代码页**（本机 cp936），
+  拿 UTF-8 文件喂它就会被当成 GBK 存成另一个字符串（UnRAR 回显反而看着正常——
+  GBK 往返）。要测 UTF-16 注释就把注释文件写成 **UTF-16LE + BOM**，工具会原样存；
+  断言用 `generate::comment_zh_text()`（UTF-8 文本），不要用注释文件本身的字节。
 - **工具缓存只有一个下载入口**：`scripts/fetch_winrar.py`（Python 3 标准库，
   Windows/macOS/Linux 同一份），`scripts/wsl/` 不再自带下载器。rarlab 的
   Windows 包是自解压 PE：**≤5.00 内嵌 RAR4、≥5.50 内嵌 RAR5**，只许用 7-Zip

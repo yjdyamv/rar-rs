@@ -235,8 +235,13 @@ pub(crate) fn build_endarc(next_volume: bool, prefix_crc32: u32, volume_index: u
 
 /// On-disk size of a volume-set ENDARC block, for volume-budget arithmetic:
 /// the 20 plaintext bytes, or `[8-byte salt][align16(20)]` under `-hp`
-/// header encryption. Every split/defer decision must reserve this much.
-pub(crate) fn endarc_volume_reserve(header_encryption: bool) -> u64 {
+/// header encryption. RAR 1.5/2.x volumes end with the payload, so the RAR
+/// 2.x container (`unp_ver` < 29) reserves nothing. Every split/defer
+/// decision must reserve this much.
+pub(crate) fn endarc_volume_reserve(header_encryption: bool, unp_ver: u8) -> u64 {
+    if unp_ver < 29 {
+        return 0;
+    }
     let plain = u64::from(ENDARC_VOLUME_HEADER_SIZE);
     if header_encryption {
         8 + plain.next_multiple_of(16)

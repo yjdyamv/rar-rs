@@ -424,7 +424,7 @@ fn reads_winrar_623_rar4_comment() {
     ) else {
         return;
     };
-    let expected = crate::test_winrar::payload("comment_zh.txt");
+    let expected = crate::test_winrar::comment_zh_text().to_vec();
     let mut archive = RarArchive::open(made.path()).unwrap();
     assert_eq!(archive.get_comment().unwrap(), Some(expected));
 }

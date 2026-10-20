@@ -299,6 +299,7 @@ pub(super) fn add_rar4_file_streaming(
                 false,
                 false,
                 member_unp_ver,
+                level,
             )?;
             const COPY: u64 = 1 << 20;
             let mut pos = 0u64;
@@ -336,6 +337,7 @@ pub(super) fn add_rar4_file_streaming(
                     attr,
                     comment: None,
                     unp_ver: member_unp_ver,
+                    level,
                 };
                 emit_rar4_split(
                     cx,

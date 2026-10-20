@@ -341,21 +341,32 @@ fn set_rar4_dict_bits(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarRes
     let solid = cx.write_ctx().solid.mode;
     let mut max = 0u64;
     let mut sum = 0u64;
+    let mut all_store = true;
     for e in entries {
-        let size = match e {
-            BatchEntry::Bytes { data, .. } => data.len() as u64,
-            BatchEntry::File { path, .. } => fs::metadata(path)?.len(),
-            BatchEntry::Directory { .. } => 0,
-        };
-        max = max.max(size);
-        sum = sum.saturating_add(size);
+        match e {
+            BatchEntry::Bytes { data, level, .. } => {
+                max = max.max(data.len() as u64);
+                sum = sum.saturating_add(data.len() as u64);
+                all_store &= *level == 0;
+            }
+            BatchEntry::File { path, level, .. } => {
+                let len = fs::metadata(path)?.len();
+                max = max.max(len);
+                sum = sum.saturating_add(len);
+                all_store &= *level == 0;
+            }
+            BatchEntry::Directory { .. } => {}
+        }
     }
     let size = if solid { sum } else { max };
-    let bits = crate::format::rar4::write::archive_dict_bits(
-        cx.write_ctx().solid.rar4_unp_ver,
-        size,
-        solid,
-    );
+    let unp_ver = cx.write_ctx().solid.rar4_unp_ver;
+    // A store-only batch is a `-m0` archive, which WinRAR 5.00+ writes with
+    // the minimum window even for large members.
+    let bits = if all_store && !solid {
+        if unp_ver < 29 { 4 } else { 1 }
+    } else {
+        crate::format::rar4::write::archive_dict_bits(unp_ver, size, solid)
+    };
     cx.write_ctx_mut().solid.rar4_dict_bits = Some(bits);
     Ok(())
 }

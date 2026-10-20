@@ -393,6 +393,7 @@ pub(crate) fn add_rar4_data(
                 false,
                 false,
                 member_unp_ver,
+                level,
             )?;
             push_rar4_entry(
                 cx,
@@ -440,6 +441,7 @@ pub(crate) fn add_rar4_data(
                     attr,
                     comment: comment.clone(),
                     unp_ver: member_unp_ver,
+                    level,
                 };
                 emit_rar4_split(cx, &params, volume_size, packed_size, |_, offset, len| {
                     Ok(Cow::Borrowed(
@@ -527,7 +529,10 @@ pub(crate) fn write_rar4_dir_entry(
     // too small for even a fresh header must error instead of rolling
     // forever.
     if let Some(volume_size) = cx.write_ctx().output.volume_size {
-        let endarc = crate::format::rar4::write::endarc_volume_reserve(cx.header_encryption());
+        let endarc = crate::format::rar4::write::endarc_volume_reserve(
+            cx.header_encryption(),
+            cx.write_ctx().solid.rar4_unp_ver,
+        );
         let mut rolled = false;
         loop {
             let used = cx.bytes_written();

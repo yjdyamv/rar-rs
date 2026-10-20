@@ -42,7 +42,8 @@
   writer 与官方 `Rar.exe`，逐块逐字段比对（自带 RAR4/RAR5 头解析器，不依赖库内
   解析代码）：STORE 档要求整档逐字节相同（RAR5 / RAR4 / RAR2 三族），压缩档只放
   过 pack 长度与覆盖它的校验和；另有 locator、QO、solid 链、RAR2 无 ENDARC 的专项
-  契约。
+  契约。分卷同样要求逐卷逐字节相同（RAR5 store、RAR4 新旧两套卷名、RAR2 两套卷名）；
+  加密成员只放过密文与 KDF 盐。
 - **测试归档零提交**：legacy 套件（RAR 1.3–4.x、`.rev`、VM 过滤器、恢复记录）
   全部由 `.cache/winrar/` 的官方 `Rar.exe` 现场生成（`tests/support/generate.rs` +
   `corpus.rs`），RAR 1.3/1.4 与 v26/v36/v70 用我们自己的 writer 或改 `unp_ver`
@@ -225,8 +226,10 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 - **`-ts` 的「字母+数字」组合**、**`-rr<N>%` 取整**、**`rar rr` 恒 3%**、
   **`rar r` 不写 `fixed.<name>`**、**无控制台时的覆盖询问**：口径与理由见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
-- **RAR5 元数据的仍差两处**（字节外观，双向读写一致）：locator
-  偏移字段宽度与「官方 QO 默认阈值」，见上面「暂缓」。
+- **RAR5 元数据仍差三处**（字节外观，双向读写一致）：locator
+  偏移字段宽度、「官方 QO 默认阈值」、成员总大小 ≥ 1 MiB 时分卷头的
+  `data_size` 预留宽度，见上面「暂缓」与
+  [`docs/PITFALLS.md`](docs/PITFALLS.md)「分卷成员头的 `data_size` 宽度」。
 - **Windows 联接点的 redirect 目标字符串**：见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 

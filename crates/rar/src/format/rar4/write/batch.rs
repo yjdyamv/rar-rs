@@ -149,6 +149,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                 false,
                 false,
                 member_unp_ver,
+                level,
             )?;
             push_rar4_entry(
                 cx,
@@ -195,6 +196,7 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
                     attr,
                     comment: None,
                     unp_ver: member_unp_ver,
+                    level,
                 };
                 emit_rar4_split(cx, &params, volume_size, packed_size, |_, offset, len| {
                     Ok(Cow::Borrowed(

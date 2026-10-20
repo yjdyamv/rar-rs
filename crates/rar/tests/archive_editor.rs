@@ -1221,7 +1221,7 @@ fn rar4_archive_comments_roundtrip_and_read_623_fixture() {
     };
     assert_eq!(
         comment_of(made.path()),
-        Some(generate::payload("comment_zh.txt"))
+        Some(generate::comment_zh_text().to_vec())
     );
 }
 

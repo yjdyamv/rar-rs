@@ -56,6 +56,7 @@ pub(super) fn emit_rar4_segment(
     split_before: bool,
     split_after: bool,
     unp_ver: u8,
+    level: u8,
 ) -> RarResult<(u64, u64)> {
     use crate::format::rar4::write::{
         FileHeaderParams, build_file_comment_block, build_file_header,
@@ -99,12 +100,16 @@ pub(super) fn emit_rar4_segment(
     // container with the container's own size-driven bits; a solid run's
     // window spans members, so the solid fallback stays at the 4 MiB
     // maximum. The era test therefore reads the archive version, not the
-    // member's.
+    // member's. A `-m0` archive is the exception: WinRAR 5.00+ declares the
+    // minimum (bits 1) whatever the member sizes, since the dictionary goes
+    // unused, so a store-requested member falls back to 1.
     let solid_mode = this.write_ctx().solid.mode;
     let archive_unp_ver = this.write_ctx().solid.rar4_unp_ver;
     let window_bits = this.write_ctx().solid.rar4_dict_bits.unwrap_or_else(|| {
         if archive_unp_ver < 29 {
             4
+        } else if level == 0 {
+            1
         } else if solid_mode {
             6
         } else {
@@ -247,6 +252,9 @@ pub(super) struct Rar4SplitParams<'a> {
     /// Effective member `unp_ver` (see `super::member_unp_ver`); every
     /// segment of the member carries it.
     pub(super) unp_ver: u8,
+    /// Requested compression level 0..=5; the window bits a store-requested
+    /// member declares depend on it (see `emit_rar4_segment`).
+    pub(super) level: u8,
 }
 
 /// Largest segment size that fits the current volume behind a
@@ -307,7 +315,10 @@ pub(super) fn emit_rar4_split<'a>(
     // The volume-set end-of-archive block (20 plaintext bytes, or its `-hp`
     // encrypted envelope); this volume's NEWSUB recovery record (0 without
     // `-rr`) sits in front of it and protects everything written before it.
-    let eoa: u64 = crate::format::rar4::write::endarc_volume_reserve(this.header_encryption());
+    let eoa: u64 = crate::format::rar4::write::endarc_volume_reserve(
+        this.header_encryption(),
+        this.write_ctx().solid.rar4_unp_ver,
+    );
     let mut chunks = Vec::new();
     let mut sent = 0u64;
     let mut vol_index = this.current_volume_index();
@@ -359,6 +370,7 @@ pub(super) fn emit_rar4_split<'a>(
             split_before,
             split_after,
             params.unp_ver,
+            params.level,
         )?;
         chunks.push(crate::model::DataChunk {
             volume_index: vol_index,

@@ -5,7 +5,8 @@
 use crate::format::rar5::EXTRA_FILE_OWNER;
 use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader, FileHeader};
 use crate::format::rar5::{
-    ARCHIVE_FLAG_VOLUME, ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA,
+    ARCHIVE_FLAG_VOLUME, ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA,
+    BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, BLOCK_FLAG_EXTRA_DATA,
     BLOCK_FLAG_SKIP_IF_UNKNOWN, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_END_ARCHIVE,
     BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER, COMP_INFO_DICT_SHIFT,
     COMP_INFO_METHOD_SHIFT, COMP_INFO_SOLID_BIT, EXTRA_FILE_HASH, EXTRA_FILE_TIME,
@@ -120,12 +121,20 @@ impl FileHeader {
         if !self.extra_data.is_empty() {
             body.extend(vint::encode(self.extra_data.len() as u64));
         }
+        let unp_field = vint_at_least(self.unpacked_size, 2);
         if eff_block_flags & BLOCK_FLAG_DATA_AREA != 0 {
-            body.extend(vint_at_least(self.packed_size, 2));
+            // Every volume of a split member carries the member's TOTAL
+            // unpacked size, and WinRAR gives `data_size` the same field width
+            // as that total, not the width this volume's chunk would need
+            // (measured against 7.23: a 200 000-byte member split into 32 KiB
+            // volumes writes the 3 793-byte last chunk in three bytes).
+            let split = self.flags & (BLOCK_FLAG_DATA_CONTINUES | BLOCK_FLAG_DATA_CONTINUE_TO) != 0;
+            let width = if split { unp_field.len() } else { 2 };
+            body.extend(vint_at_least(self.packed_size, width));
         }
 
         body.extend(vint::encode(eff_file_flags));
-        body.extend(vint_at_least(self.unpacked_size, 2));
+        body.extend(unp_field);
         body.extend(vint::encode(self.attributes));
 
         if eff_file_flags & FILE_FLAG_TIME_UNIX != 0 {
@@ -586,6 +595,48 @@ mod tests {
         assert_eq!(parsed.packed_size, 11);
         assert_eq!(parsed.unpacked_size, 11);
         assert_eq!(parsed.crc32_val, Some(0x1234_5678));
+    }
+
+    /// Every volume of a split member repeats the member's TOTAL unpacked
+    /// size, and WinRAR gives `data_size` the same field width as that total
+    /// instead of the width this volume's chunk would need.
+    #[test]
+    fn split_volume_data_size_uses_the_member_total_width() {
+        let split = FileHeader {
+            name: "big.bin".into(),
+            unpacked_size: 200_000,
+            packed_size: 3_793,
+            crc32_val: Some(0x1234_5678),
+            flags: crate::format::rar5::BLOCK_FLAG_DATA_CONTINUE_TO,
+            ..Default::default()
+        };
+        let raw = crate::format::rar5::headers::parse_block_bytes(&split.to_bytes()).unwrap();
+        let body = &raw.header_data;
+        let mut off = 0usize;
+        let (_ty, _) = next(body, &mut off);
+        let (_flags, _) = next(body, &mut off);
+        let (ds, ds_n) = next(body, &mut off);
+        let (_ff, _) = next(body, &mut off);
+        let (us, us_n) = next(body, &mut off);
+        assert_eq!(us, 200_000);
+        assert_eq!((ds, ds_n), (3_793, us_n));
+        assert_eq!(ds_n, 3, "3 793 fits in two bytes; the total forces three");
+
+        // The same member in one volume keeps the two-byte minimum.
+        let whole = FileHeader {
+            name: "big.bin".into(),
+            unpacked_size: 200_000,
+            packed_size: 3_793,
+            crc32_val: Some(0x1234_5678),
+            ..Default::default()
+        };
+        let raw = crate::format::rar5::headers::parse_block_bytes(&whole.to_bytes()).unwrap();
+        let body = &raw.header_data;
+        let mut off = 0usize;
+        let (_ty, _) = next(body, &mut off);
+        let (_flags, _) = next(body, &mut off);
+        let (ds, ds_n) = next(body, &mut off);
+        assert_eq!((ds, ds_n), (3_793, 2));
     }
 
     #[test]

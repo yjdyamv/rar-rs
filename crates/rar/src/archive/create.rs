@@ -799,9 +799,12 @@ impl RarArchive {
             if !self.old_volume_numbering() {
                 flags |= MHD_NEWNUMBERING;
             }
-            // The first volume of a RAR4 set flags MHD_FIRSTVOLUME alongside
-            // MHD_VOLUME (matches WinRAR's convention).
-            if self.write_ctx().output.current_volume == 1 {
+            // The first volume of a RAR 3.0+ set flags MHD_FIRSTVOLUME
+            // alongside MHD_VOLUME; the RAR 1.5/2.x writers left it clear
+            // (WinRAR 2.90 writes 0x0001 on every volume).
+            if self.write_ctx().output.current_volume == 1
+                && self.write_ctx().solid.rar4_unp_ver >= 29
+            {
                 flags |= MHD_FIRSTVOLUME;
             }
         }
