@@ -253,7 +253,12 @@ so `2-90` and `3-00` exist only for Windows: the recipes that need them
 which is why the legacy `.rev` layout is _also_ covered by `REV3_LATE` (3.93) —
 a third naming shape that Linux can generate. The host OS field follows the
 writer as well — Windows builds stamp `host_os 2`, Linux ones `3` — so
-assertions about it are per-host.
+assertions about it are per-host. Our own RAR4 writer is Windows-styled on every
+host (`platform::rar4_file_attributes`), so `tests/format_parity.rs` mask those
+bytes on Linux — `host_os`, `attr` and the file-header checksum covering them —
+and still compares every other byte; contract
+`only_the_host_fields_may_follow_the_platform` keeps the mask that narrow on
+every host.
 
 Which release serves which format (the _newest_ one that still supports it):
 

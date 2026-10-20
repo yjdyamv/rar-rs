@@ -146,6 +146,7 @@ fn walk_rar4(archive: &[u8]) -> Result<Vec<Block>, String> {
             field("flags", format!("0x{flags:04x}")),
             field("head_size", size),
         ];
+        let start = p + RAR4_SIG.len();
         let mut data = 0usize;
         if kind == "file" {
             let pack = le32(body, p + 7).ok_or("truncated RAR4 pack size")?;
@@ -199,7 +200,7 @@ fn walk_rar4(archive: &[u8]) -> Result<Vec<Block>, String> {
         }
         blocks.push(Block {
             kind,
-            start: p + RAR4_SIG.len(),
+            start,
             fields,
         });
         p += size + data;
@@ -398,7 +399,132 @@ fn mismatches(ours: &[u8], theirs: &[u8], ignore: &[&str]) -> Vec<String> {
     out
 }
 
-// ── Fixtures ───────────────────────────────────────────────────────────────
+// ── The bytes a header stamps from the writer's host ──────────────────────
+//
+// A RAR4 file header carries the *writer's* platform: WinRAR's Windows builds
+// stamp `host_os 2` with DOS attributes, its Linux builds `host_os 3` with the
+// raw `st_mode`. Our RAR4 writer is deliberately Windows-styled on every host
+// (`platform::rar4_file_attributes`), so against an official Linux build the
+// two sides cannot agree on those fields — nor on the file-header checksum,
+// which covers them. Everything else, and the whole payload, still has to
+// match exactly. RAR5 is written per platform on both sides and needs no such
+// allowance.
+
+/// The RAR4 file-header fields that follow the writer's host.
+const HOST_STYLED_FIELDS: &[&str] = &["header_crc", "host_os", "attr"];
+
+/// Does a comparison against an official archive have to allow for the host
+/// platform to differ? Only RAR4 does.
+fn host_styled(archive: &[u8]) -> bool {
+    !cfg!(windows) && archive.starts_with(RAR4_SIG)
+}
+
+/// [`HOST_STYLED_FIELDS`] when this archive's host fields follow the platform,
+/// nothing otherwise.
+fn host_styled_fields(archive: &[u8]) -> &'static [&'static str] {
+    if host_styled(archive) {
+        HOST_STYLED_FIELDS
+    } else {
+        &[]
+    }
+}
+
+/// Absolute `(offset, length)` of every host-styled byte run in the archive.
+///
+/// Scanned here rather than read off [`walk`], because this has to work on the
+/// non-final volumes of a set: those are padded with zeros past the end block,
+/// which the strict walker refuses. Anything unparsable ends the scan — the
+/// spans are then compared between the two sides, so a short scan cannot make a
+/// difference disappear.
+fn host_styled_spans(archive: &[u8]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    if !archive.starts_with(RAR4_SIG) {
+        return spans;
+    }
+    let mut p = RAR4_SIG.len();
+    while p + 7 <= archive.len() {
+        let Some(size) = le16(archive, p + 5).map(usize::from) else {
+            break;
+        };
+        if size < 7 || p + size > archive.len() {
+            break;
+        }
+        let mut data = 0usize;
+        if archive[p + 2] == 0x74 {
+            // `host_os` is byte 15 of a RAR4 file header, `attr` the word at
+            // 28 (RAR 2.x uses the same layout), and the header checksum over
+            // both opens the block.
+            spans.push((p, 2));
+            spans.push((p + 15, 1));
+            spans.push((p + 28, 4));
+            data = usize::try_from(le32(archive, p + 7).unwrap_or(0)).unwrap_or(0);
+        }
+        p += size + data;
+    }
+    spans
+}
+
+/// Zero the host-styled bytes, so the rest can be compared exactly. The spans
+/// come from the layout, not from the platform, so this is the same masking a
+/// Unix host does (see [`assert_bytes_identical_with`]).
+fn mask_host_styled(archive: &[u8]) -> Vec<u8> {
+    let mut masked = archive.to_vec();
+    for (offset, len) in host_styled_spans(archive) {
+        if offset + len <= masked.len() {
+            masked[offset..offset + len].fill(0);
+        }
+    }
+    masked
+}
+
+/// Compare two archives byte for byte, allowing the host to differ where the
+/// format lets it ([`HOST_STYLED_FIELDS`]) and nowhere else.
+fn assert_bytes_identical(label: &str, ours: &[u8], theirs: &[u8]) {
+    assert_bytes_identical_with(label, ours, theirs, host_styled(ours));
+}
+
+/// [`assert_bytes_identical`] with the host allowance spelled out: the decision
+/// is the platform's, which a test on one host cannot otherwise exercise.
+fn assert_bytes_identical_with(label: &str, ours: &[u8], theirs: &[u8], allow_host: bool) {
+    if ours == theirs {
+        return;
+    }
+    if !allow_host {
+        panic!("{label}: bytes differ\n  {}", difference(ours, theirs));
+    }
+    // The masked offsets only mean anything if both sides put their file
+    // headers in the same place, so prove that before trusting the mask.
+    assert_eq!(
+        host_styled_spans(ours),
+        host_styled_spans(theirs),
+        "{label}: RAR4 file-header offsets"
+    );
+    let (mine, official) = (mask_host_styled(ours), mask_host_styled(theirs));
+    if mine == official {
+        return;
+    }
+    panic!(
+        "{label}: bytes differ with only the host-styled fields masked\n  {}",
+        difference(&mine, &official)
+    );
+}
+
+/// Where two byte strings part ways, with a little context around the offset.
+fn difference(ours: &[u8], theirs: &[u8]) -> String {
+    let at = ours
+        .iter()
+        .zip(theirs)
+        .position(|(a, b)| a != b)
+        .unwrap_or(ours.len().min(theirs.len()));
+    let lo = at.saturating_sub(16);
+    format!(
+        "at byte {at} (ours {} bytes, official {} bytes)\n  ours    {}\n  official{}",
+        ours.len(),
+        theirs.len(),
+        hex(&ours[lo..ours.len().min(at + 32)]),
+        hex(&theirs[lo..theirs.len().min(at + 32)]),
+    )
+}
 
 /// Copy [`generate::payload`] into `dir` and pin its mtime to the harness
 /// constant, so both writers see the same timestamp.
@@ -494,8 +620,10 @@ const PACKED: &[&str] = &[
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 /// A STORE archive is pure container rules, so it has to match byte for byte —
-/// including the member order, the timestamps, the attributes, the window bits
-/// and the end-of-archive block.
+/// including the member order, the timestamps, the window bits and the
+/// end-of-archive block. The only bytes left to the writer's host are the RAR4
+/// `host_os`/`attr` pair and the header checksum over them
+/// ([`HOST_STYLED_FIELDS`]).
 #[test]
 fn store_archives_are_byte_identical_to_official_rar() {
     let dir = tempfile::tempdir().unwrap();
@@ -557,7 +685,7 @@ fn store_archives_are_byte_identical_to_official_rar() {
             continue;
         };
         checked += 1;
-        let diffs = mismatches(&mine, &theirs, &[]);
+        let diffs = mismatches(&mine, &theirs, host_styled_fields(&mine));
         assert!(
             diffs.is_empty(),
             "{}: header fields differ\n  {}\n  ours {} bytes, official {} bytes",
@@ -566,16 +694,93 @@ fn store_archives_are_byte_identical_to_official_rar() {
             mine.len(),
             theirs.len()
         );
-        assert_eq!(
-            mine,
-            theirs,
-            "{}: STORE archives must be byte-identical (ours {} bytes, official {} bytes)",
-            case.label,
-            mine.len(),
-            theirs.len()
-        );
+        assert_bytes_identical(case.label, &mine, &theirs);
     }
     assert!(checked > 0, "no cached tool available for any STORE case");
+}
+
+/// Rewrite a RAR4 file header the way official rar does on a Unix host:
+/// `host_os 3`, the raw `st_mode` as the attribute word, and the header
+/// checksum that covers both.
+fn as_unix_written(archive: &[u8]) -> Vec<u8> {
+    let mut out = archive.to_vec();
+    let file = walk(archive)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.kind == "file")
+        .expect("the case has a member");
+    out[file.start + 15] = 3;
+    out[file.start + 28..file.start + 32].copy_from_slice(&0o100644u32.to_le_bytes());
+    let head_size: usize = file
+        .fields
+        .iter()
+        .find(|f| f.name == "head_size")
+        .unwrap()
+        .value
+        .parse()
+        .unwrap();
+    let crc = crc32(&out[file.start + 2..file.start + head_size]) as u16;
+    out[file.start..file.start + 2].copy_from_slice(&crc.to_le_bytes());
+    out
+}
+
+/// The RAR4 pair that follows the platform is exactly `host_os`, `attr` and the
+/// header checksum over them — nothing more. Exercised here on every platform
+/// by rewriting the official header into its Unix shape, so the allowance the
+/// Unix CI relies on cannot rot into a blanket exemption.
+#[test]
+fn only_the_host_fields_may_follow_the_platform() {
+    let dir = tempfile::tempdir().unwrap();
+    let case = Case {
+        label: "rar4 store",
+        tool: generate::TOOL_RAR29,
+        switches: &["-ma4", "-m0"],
+        version: ArchiveVersion::V29,
+        level: STORE,
+        members: &["text.txt"],
+        quick_open: false,
+        solid: false,
+    };
+    let Some((mine, theirs)) = both(&case, dir.path()) else {
+        return;
+    };
+    let unix = as_unix_written(&theirs);
+    assert_ne!(mine, unix, "the rewritten header has to differ");
+    // The masked comparison passes, and the field list explains why.
+    assert_bytes_identical_with("rar4 store on Unix", &mine, &unix, true);
+    assert_eq!(
+        mismatches(&mine, &unix, HOST_STYLED_FIELDS),
+        Vec::<String>::new(),
+        "only the host fields differ"
+    );
+    // The mask is tight: a difference anywhere else still surfaces.
+    let mut stray = unix.clone();
+    let file = walk(&stray)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.kind == "file")
+        .unwrap();
+    let head_size: usize = file
+        .fields
+        .iter()
+        .find(|f| f.name == "head_size")
+        .unwrap()
+        .value
+        .parse()
+        .unwrap();
+    stray[file.start + head_size] ^= 0x20;
+    assert_ne!(
+        mask_host_styled(&mine),
+        mask_host_styled(&stray),
+        "a payload difference must survive the mask"
+    );
+    // A zero-padded tail — what official leaves on a non-final volume of a set —
+    // must neither stop the scan nor leak into the comparison.
+    let mut padded_mine = mine.clone();
+    let mut padded_unix = unix.clone();
+    padded_mine.extend_from_slice(&[0; 16]);
+    padded_unix.extend_from_slice(&[0; 16]);
+    assert_bytes_identical_with("rar4 store, padded tail", &padded_mine, &padded_unix, true);
 }
 
 /// Compressed members: the encoder picks its own matches, so the packed bytes
@@ -621,7 +826,9 @@ fn compressed_archives_agree_field_for_field() {
             continue;
         };
         checked += 1;
-        let diffs = mismatches(&mine, &theirs, PACKED);
+        let mut ignore = PACKED.to_vec();
+        ignore.extend_from_slice(host_styled_fields(&mine));
+        let diffs = mismatches(&mine, &theirs, &ignore);
         assert!(
             diffs.is_empty(),
             "{}: header fields differ\n  {}",
@@ -829,7 +1036,7 @@ fn rar2_era_archives_end_after_the_last_member() {
     };
     assert_eq!(kinds(&mine), vec!["main", "file"]);
     assert_eq!(kinds(&mine), kinds(&theirs));
-    assert_eq!(mine, theirs, "the whole RAR 2.0 archive must match");
+    assert_bytes_identical("rar2", &mine, &theirs);
 }
 
 // ── The quick-open catalog is rebuilt by every edit ────────────────────────
@@ -988,24 +1195,7 @@ fn assert_volume_sets_identical(
     assert_eq!(names(mine), names(theirs), "{label}: volume naming");
     assert!(mine.len() > 1, "{label}: the payload must span volumes");
     for ((name, ours), (_, official)) in mine.iter().zip(theirs) {
-        if ours != official {
-            let at = ours
-                .iter()
-                .zip(official)
-                .position(|(a, b)| a != b)
-                .unwrap_or(ours.len().min(official.len()));
-            let lo = at.saturating_sub(16);
-            panic!(
-                "{label}: volume {name} differs at byte {at} \
-                 (ours {} bytes, official {} bytes)
-  ours    {}
-  official{}",
-                ours.len(),
-                official.len(),
-                hex(&ours[lo..ours.len().min(at + 32)]),
-                hex(&official[lo..official.len().min(at + 32)]),
-            );
-        }
+        assert_bytes_identical(&format!("{label}: volume {name}"), ours, official);
     }
 }
 

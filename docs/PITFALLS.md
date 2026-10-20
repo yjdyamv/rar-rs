@@ -82,7 +82,11 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `old_numbering_is_ignored_by_rar5_and_rar13`。
 - **RAR4 落 DOS 属性位**：Windows 上直拷 `0x1|0x2|0x4|0x20`（目录含 `0x10`；
   `FILE_ATTRIBUTE_NORMAL` 不落，无 archive 位的文件落 `0x00`），非 Windows 保持
-  `0x20`/`0x10`。
+  `0x20`/`0x10`——即 RAR4 的 `host_os`/`attr` 是**写死 Windows 风格**的，而官方
+  Linux 版写 `host_os 3` + `st_mode`。所以 Linux 上的 RAR4 对拍必须遮掉这三处
+  （`host_os`、`attr` 与覆盖它们的 file header CRC），其余字节仍逐字节相同；
+  契约 `only_the_host_fields_may_follow_the_platform`（任意宿主上都跑：把官方头
+  改写成 Unix 形状，再验证遮罩范围既够又不多）。RAR5 两侧都按平台写，不用遮。
 - **`NOT_CONTENT_INDEXED`（`0x2000`）要保留**：官方只额外保留这一位，offline /
   pinned / unpinned / no-scrub 一律丢弃，不进子集。写、抽取、`lt` 首列的 `I`
   三处都要处理。
