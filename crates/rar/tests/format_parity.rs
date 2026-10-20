@@ -1006,13 +1006,24 @@ fn our_volume_set(
     version: ArchiveVersion,
     old_numbering: bool,
 ) -> Vec<(String, Vec<u8>)> {
+    our_volume_set_with(dir, member, version, old_numbering, 32 * 1024)
+}
+
+/// Same, with an explicit split size.
+fn our_volume_set_with(
+    dir: &Path,
+    member: &str,
+    version: ArchiveVersion,
+    old_numbering: bool,
+    volume_size: u64,
+) -> Vec<(String, Vec<u8>)> {
     let src = sample(dir, member);
     let path = dir.join("ours.rar");
     let mut writer = ArchiveWriter::create_with(
         &path,
         WriterOptions::new()
             .compression(version)
-            .volume_size(32 * 1024)
+            .volume_size(volume_size)
             .old_numbering(old_numbering),
     )
     .unwrap();
@@ -1095,6 +1106,394 @@ fn rar20_volume_sets_are_byte_identical_to_official_rar() {
             .collect();
         assert_volume_sets_identical(label, &mine, &theirs);
     }
+}
+
+/// One block of a split volume, as the tolerant scan below reports it.
+struct VolBlock {
+    kind: u64,
+    /// Extra area, verbatim (the locator on the main header, the percent
+    /// record on a service block).
+    extra: Vec<u8>,
+    data_size: u64,
+}
+
+/// Scan the blocks of one volume and report how many zero bytes follow the
+/// end-of-archive block.
+///
+/// The strict [`walk`] deliberately refuses a trailing byte, because a
+/// single-volume archive must end exactly at the end block. Official RAR
+/// pads the tail of every *non-final* volume instead, so the multi-volume
+/// comparisons need this tolerant variant to see the blocks at all.
+fn volume_blocks(volume: &[u8]) -> (Vec<VolBlock>, usize) {
+    let body = volume
+        .strip_prefix(RAR5_SIG)
+        .expect("a RAR5 volume starts with the RAR5 signature");
+    let mut p = 0usize;
+    let mut blocks = Vec::new();
+    while p + 5 <= body.len() {
+        let (head_size, size_width) = vint(body, p + 4).expect("head size");
+        let head_size = usize::try_from(head_size).expect("head size");
+        let head_end = p + 4 + size_width + head_size;
+        let mut q = p + 4 + size_width;
+        let (kind, n) = vint(body, q).expect("block type");
+        q += n;
+        let (flags, n) = vint(body, q).expect("block flags");
+        q += n;
+        let mut extra_size = 0u64;
+        if flags & R5_BLOCK_EXTRA != 0 {
+            let (value, n) = vint(body, q).expect("extra size");
+            extra_size = value;
+            q += n;
+        }
+        let mut data_size = 0u64;
+        if flags & R5_BLOCK_DATA != 0 {
+            let (value, _) = vint(body, q).expect("data size");
+            data_size = value;
+        }
+        let extra_start = head_end - usize::try_from(extra_size).expect("extra size");
+        blocks.push(VolBlock {
+            kind,
+            extra: body[extra_start..head_end].to_vec(),
+            data_size,
+        });
+        p = head_end + usize::try_from(data_size).expect("data size");
+        if kind == 5 {
+            break;
+        }
+    }
+    let padding = &body[p..];
+    assert!(
+        padding.iter().all(|byte| *byte == 0),
+        "junk after the end-of-archive block: {}",
+        hex(padding)
+    );
+    (blocks, padding.len())
+}
+
+/// Every scan helper above addresses one archive; a recovery record adds a
+/// `RR` service block per volume, and official pads each non-final volume
+/// with zeros, so the sets cannot be byte-identical. Everything around that
+/// padding still has to agree: same names, same block sequence, the same
+/// percent record, and the split arithmetic that turns the padding into a
+/// smaller data chunk.
+#[test]
+fn recovery_records_repeat_in_every_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let member = "big.bin";
+    let total = generate::payload(member).len() as u64;
+    let src = sample(dir.path(), member);
+    let path = dir.path().join("ours.rar");
+    let mut writer = ArchiveWriter::create_with(
+        &path,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V50)
+            .volume_size(32 * 1024)
+            .recovery_percent(5),
+    )
+    .unwrap();
+    writer
+        .add_path_as(
+            &src,
+            member,
+            EntryWriteOptions::new().compression_level(CompressionLevel::STORE),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    let mine = volume_set(dir.path(), "ours");
+
+    let Some(made) = generate::archive_with(
+        generate::TOOL_RAR50,
+        &["-ma5", "-m0", "-qo-", "-v32k", "-rr5%"],
+        &[member],
+        &[],
+    ) else {
+        return;
+    };
+    let theirs: Vec<(String, Vec<u8>)> = made
+        .volumes()
+        .into_iter()
+        .map(|(name, bytes)| (name.trim_start_matches("arc").to_string(), bytes))
+        .collect();
+
+    assert_eq!(
+        mine.iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>(),
+        theirs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>(),
+        "volume naming"
+    );
+    assert!(mine.len() > 3, "the payload must span several volumes");
+
+    let mut our_payload = 0u64;
+    let mut their_payload = 0u64;
+    for (index, ((name, ours), (_, official))) in mine.iter().zip(&theirs).enumerate() {
+        let (our_blocks, our_padding) = volume_blocks(ours);
+        let (their_blocks, their_padding) = volume_blocks(official);
+        assert_eq!(our_padding, 0, "{name}: we never pad a volume");
+        assert_eq!(
+            our_blocks.iter().map(|b| b.kind).collect::<Vec<_>>(),
+            their_blocks.iter().map(|b| b.kind).collect::<Vec<_>>(),
+            "{name}: block sequence"
+        );
+
+        // The `RR` service block carries the requested percent as its only
+        // extra record, so it has to be identical on both sides.
+        let records = |blocks: &[VolBlock]| -> Vec<Vec<u8>> {
+            blocks
+                .iter()
+                .filter(|block| block.kind == 3)
+                .map(|block| block.extra.clone())
+                .collect()
+        };
+        assert_eq!(
+            records(&our_blocks),
+            records(&their_blocks),
+            "{name}: RR record"
+        );
+        assert_eq!(
+            records(&our_blocks).len(),
+            1,
+            "{name}: one recovery record per volume"
+        );
+
+        let our_data = our_blocks.iter().find(|b| b.kind == 2).expect("file block");
+        let their_data = their_blocks
+            .iter()
+            .find(|b| b.kind == 2)
+            .expect("file block");
+        our_payload += our_data.data_size;
+        their_payload += their_data.data_size;
+
+        // Official reserves the padding inside the volume budget, so its
+        // chunk is exactly the padding shorter; the last volume has no
+        // padding and no reserve.
+        if index + 1 < mine.len() {
+            assert_eq!(
+                our_data.data_size,
+                their_data.data_size + their_padding as u64,
+                "{name}: our chunk must cover what official pads"
+            );
+            assert!(
+                their_padding > 0,
+                "{name}: expected official to pad a non-final volume"
+            );
+        } else {
+            assert_eq!(their_padding, 0, "{name}: last volume is not padded");
+        }
+    }
+    assert_eq!(our_payload, total, "our volumes carry the whole payload");
+    assert_eq!(
+        their_payload, total,
+        "official volumes carry the whole payload"
+    );
+
+    let first = rar_rs::discover_volumes(&path)
+        .first()
+        .expect("our set has a first volume")
+        .clone();
+    if let Some(verdict) = generate::unrar_test(generate::TOOL_RAR50, &first) {
+        verdict.unwrap_or_else(|error| panic!("official UnRAR rejected our set: {error}"));
+    }
+}
+
+/// Width of the minimal vint that can hold `value`.
+fn minimal_vint_width(value: u64) -> usize {
+    let mut width = 1;
+    let mut left = value >> 7;
+    while left != 0 {
+        left >>= 7;
+        width += 1;
+    }
+    width
+}
+
+/// Field widths of the `data_size` and `unp_size` vints of the first file
+/// block. Split member headers reserve these fields, so the widths are part of
+/// the format even when the values agree.
+fn rar5_size_widths(archive: &[u8]) -> Option<(usize, usize)> {
+    let body = archive.get(RAR5_SIG.len()..)?;
+    let mut p = 0usize;
+    while p + 5 <= body.len() {
+        let (head_size, size_width) = vint(body, p + 4)?;
+        let head_end = p + 4 + size_width + usize::try_from(head_size).ok()?;
+        if head_end > body.len() {
+            return None;
+        }
+        let mut q = p + 4 + size_width;
+        let (block_type, n) = vint(body, q)?;
+        q += n;
+        let (block_flags, n) = vint(body, q)?;
+        q += n;
+        if block_flags & R5_BLOCK_EXTRA != 0 {
+            let (_, n) = vint(body, q)?;
+            q += n;
+        }
+        let mut data_width = 0usize;
+        let mut data_size = 0u64;
+        if block_flags & R5_BLOCK_DATA != 0 {
+            let (value, n) = vint(body, q)?;
+            data_size = value;
+            data_width = n;
+            q += n;
+        }
+        if block_type == 2 {
+            let (_, n) = vint(body, q)?;
+            q += n;
+            let (_, unp_width) = vint(body, q)?;
+            return Some((data_width, unp_width));
+        }
+        p = head_end + usize::try_from(data_size).ok()?;
+    }
+    None
+}
+
+/// Official RAR does not write the smallest possible size vint in a split
+/// member header: it reserves room for the size to grow, and the reserved
+/// width steps with the member total (`3` below 2^20-512, `4` up to 2^20,
+/// `5` up to 2^23, `6` above). We write the minimal width instead, which is
+/// legal and strictly smaller.
+///
+/// That extra width makes official's *header* longer, so its chunks are
+/// shorter and every volume drifts by a few bytes — the per-volume CRCs move
+/// with the chunk boundaries, so a set this big cannot be compared byte by
+/// byte. What must still hold: the same volume count and names, the same total
+/// payload, and our fields being minimal.
+#[test]
+fn rar5_split_size_fields_are_reserved_wider_by_official() {
+    let dir = tempfile::tempdir().unwrap();
+    let member = "huge.bin";
+    let total = generate::payload(member).len() as u64;
+    assert!(total >= 1 << 20, "the payload must cross the first step");
+
+    let mine = our_volume_set_with(dir.path(), member, ArchiveVersion::V50, false, 512 * 1024);
+    let Some(made) = generate::archive_with(
+        generate::TOOL_RAR50,
+        &["-ma5", "-m0", "-qo-", "-v512k"],
+        &[member],
+        &[],
+    ) else {
+        return;
+    };
+    let theirs: Vec<(String, Vec<u8>)> = made
+        .volumes()
+        .into_iter()
+        .map(|(name, bytes)| (name.trim_start_matches("arc").to_string(), bytes))
+        .collect();
+
+    assert_eq!(
+        mine.iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>(),
+        theirs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>(),
+        "volume naming"
+    );
+    assert!(mine.len() > 1, "the payload must span volumes");
+
+    let (our_data_w, our_unp_w) = rar5_size_widths(&mine[0].1).expect("our size fields");
+    let (their_data_w, their_unp_w) = rar5_size_widths(&theirs[0].1).expect("their size fields");
+    assert_eq!(our_data_w, our_unp_w, "ours share one width");
+    assert_eq!(their_data_w, their_unp_w, "theirs share one width");
+    assert_eq!(
+        our_data_w,
+        minimal_vint_width(total),
+        "we write the minimal width for the member total"
+    );
+    assert!(
+        their_data_w > our_data_w,
+        "official reserves room ({their_data_w}) beyond the minimal {our_data_w}"
+    );
+
+    for ((name, ours), (_, official)) in mine.iter().zip(&theirs) {
+        // Each wider header pushes 4 more bytes of payload into the next
+        // volume, so the drift accumulates and the last volume absorbs it.
+        let drift = ours.len().abs_diff(official.len());
+        let bound = 8 * mine.len();
+        assert!(
+            drift <= bound,
+            "{name}: only the reserved width may shift the chunk ({drift} > {bound})"
+        );
+        // The header is where the reservation lives; the payload behind it is
+        // the same bytes, just cut at a slightly different point.
+        let (our_fields, their_fields) = (walk(ours).unwrap(), walk(official).unwrap());
+        for (x, y) in our_fields.iter().zip(&their_fields) {
+            assert_eq!(x.kind, y.kind, "{name}: block kind");
+            for f in &x.fields {
+                if matches!(
+                    f.name,
+                    "header_crc32" | "head_size" | "data_size" | "unp_size"
+                ) {
+                    continue;
+                }
+                let other = y.fields.iter().find(|g| g.name == f.name);
+                if f.name == "file_crc32" {
+                    // The CRC in a non-final volume covers the data up to the
+                    // end of that volume, so it moves with the boundary.
+                    assert!(other.is_some(), "{name}: official also stores a CRC");
+                    continue;
+                }
+                assert_eq!(
+                    other.map(|g| g.value.as_str()),
+                    Some(f.value.as_str()),
+                    "{name}: {}",
+                    f.name
+                );
+            }
+        }
+    }
+
+    // Both sides reassemble to the same payload: ours through our own reader,
+    // official's verdict through its `UnRAR`.
+    let first = dir.path().join("ours.part1.rar");
+    let mut reader = rar_rs::ArchiveReader::open(&first).unwrap();
+    let ids: Vec<_> = reader.entries().map(|entry| entry.id()).collect();
+    let mut rebuilt = Vec::new();
+    for id in ids {
+        rebuilt.extend(reader.read_entry(id).unwrap());
+    }
+    assert_eq!(rebuilt.len() as u64, total, "our set reassembles");
+    assert_eq!(rebuilt, generate::payload(member), "same payload bytes");
+    let verdict = generate::unrar_test(generate::TOOL_RAR50, &first);
+    if let Some(verdict) = verdict {
+        verdict.unwrap_or_else(|e| panic!("official unrar rejects our split set: {e}"));
+    }
+}
+
+/// WinRAR pads the part number to the digit count of the volume total, so a
+/// set with more than 99 volumes names them `part001…`. Ours has to agree.
+#[test]
+fn volume_names_pad_to_the_digits_of_the_volume_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let mine = our_volume_set_with(dir.path(), "huge.bin", ArchiveVersion::V50, false, 8 * 1024);
+    let Some(made) = generate::archive_with(
+        generate::TOOL_RAR50,
+        &["-ma5", "-m0", "-qo-", "-v8k"],
+        &["huge.bin"],
+        &[],
+    ) else {
+        return;
+    };
+    let theirs: Vec<String> = made
+        .volumes()
+        .into_iter()
+        .map(|(name, _)| name.trim_start_matches("arc").to_string())
+        .collect();
+    let ours: Vec<String> = mine.into_iter().map(|(name, _)| name).collect();
+    assert!(ours.len() > 99, "the set must reach three digits");
+    assert_eq!(ours, theirs, "volume naming");
+    // Three digits for the whole set: `part001` … `part<count>`.
+    assert_eq!(ours[0], ".part001.rar", "first volume name");
+    assert_eq!(
+        ours[99], ".part100.rar",
+        "the hundredth volume keeps the padding"
+    );
+    let last = ours.len();
+    assert_eq!(ours[last - 1], format!(".part{last:03}.rar"), "last volume");
 }
 
 /// The quick-open record is a cache of the file headers, so it cannot survive

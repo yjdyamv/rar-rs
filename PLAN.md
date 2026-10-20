@@ -45,7 +45,11 @@
   解析代码）：STORE 档要求整档逐字节相同（RAR5 / RAR4 / RAR2 三族），压缩档只放
   过 pack 长度与覆盖它的校验和；另有 locator、QO、solid 链、RAR2 无 ENDARC 的专项
   契约。分卷同样要求逐卷逐字节相同（RAR5 store、RAR4 新旧两套卷名、RAR2 两套卷名）；
-  加密成员只放过密文与 KDF 盐。
+  加密成员只放过密文与 KDF 盐。`.rev` 由 `rar-cli` 侧对拍：同一份逐字节相同的
+  数据卷喂给两边的 `rv3`，产出的 `.rev` 必须逐字节相同，且两边 `rc` 都能补回
+  被删的中间卷（`rar5_recovery_volumes_match_winrar_byte_for_byte`）。
+  恢复记录 + 分卷（`-rr` + `-v`）只能字段级对拍：官方每卷预留并把剩余空间补零，
+  我方不补（`recovery_records_repeat_in_every_volume`）。
 - **测试归档零提交**：legacy 套件（RAR 1.3–4.x、`.rev`、VM 过滤器、恢复记录）
   全部由 `.cache/winrar/` 的官方 `Rar.exe` 现场生成（`tests/support/generate.rs` +
   `corpus.rs`），RAR 1.3/1.4 与 v26/v36/v70 用我们自己的 writer 或改 `unp_ver`

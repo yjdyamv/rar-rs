@@ -289,6 +289,9 @@ pub fn payload(name: &str) -> Vec<u8> {
         // Incompressible and larger than the split size, so volume sets and
         // recovery volumes really split.
         "big.bin" => noise(0x1234_5678, 200_000),
+        // Crosses 1 MiB, where official RAR stops writing minimal size vints
+        // in split member headers and starts reserving wider fields.
+        "huge.bin" => noise(0xC0FF_EE01, 1_500_000),
         // Four distinguishable members for the RAR5 read checks: two
         // compressible, two noise-like.
         "test1.bin" => noise(0x0000_0001, 40_000),
