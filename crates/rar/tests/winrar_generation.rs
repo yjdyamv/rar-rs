@@ -25,6 +25,43 @@ fn expected_version(dir: &str) -> ArchiveVersion {
     }
 }
 
+/// The fetch script's default list and the releases the recipes pin must not
+/// drift apart. A recipe that pins a release the script never downloads is
+/// invisible on a development cache that happens to hold it, and a hard
+/// failure under `SA_REQUIRE_WINRAR=1` — which is how the 3.93 `.rev` recipe
+/// broke the Windows `official-tool generated corpus` job while every local
+/// run stayed green.
+#[test]
+fn fetch_script_lists_every_release_a_recipe_pins() {
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fetch_winrar.py");
+    let source = std::fs::read_to_string(&script)
+        .unwrap_or_else(|err| panic!("read {}: {err}", script.display()));
+    let fetched: Vec<&str> = source
+        .lines()
+        .find_map(|line| line.split("\"SA_WINRAR_VERSIONS\", \"").nth(1))
+        .expect("scripts/fetch_winrar.py still spells the default list out as a literal")
+        .split('"')
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    for pinned in [
+        support::corpus::RAR_FILE_COMMENTS,
+        support::corpus::REV3,
+        support::corpus::REV3_OLD,
+        support::corpus::REV3_LATE,
+        generate::TOOL_RAR29,
+        generate::TOOL_V20_COMPRESSED,
+    ] {
+        assert!(
+            fetched.contains(&pinned),
+            "a recipe pins {pinned}, but scripts/fetch_winrar.py only downloads {fetched:?} \
+             by default — add it there so CI's SA_REQUIRE_WINRAR=1 run cannot panic on it"
+        );
+    }
+}
+
 #[test]
 fn every_cached_release_generates_an_archive_we_read() {
     let dirs = generate::cached_versions();

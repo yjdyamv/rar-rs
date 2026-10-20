@@ -77,10 +77,16 @@ TABLE: dict[str, tuple[str, str | None]] = {
 
 # What the generated corpus actually asks for: 2-90 (the only release that
 # still compresses format 20), 3-00 (legacy `.r00` + `<base>4_3_N.rev` naming),
-# 4-20 (last `cf` command, modern `.rev` naming), 6-23 (last release that can
-# write `-ma4`), 7-23 (current).
+# 3-93 (the `<base><N>.rev` recovery-volume naming, and the only one of the two
+# legacy naming shapes rarlab ships for Linux), 4-20 (last `cf` command, modern
+# `.rev` naming), 6-23 (last release that can write `-ma4`), 7-23 (current).
+#
+# A release the corpus asks for but this list omits is invisible to a
+# development cache that happens to hold it and a hard failure under
+# `SA_REQUIRE_WINRAR=1` (see `rar4_rev3`'s 3-93 recipe), so keep the two in
+# sync when a recipe starts pinning a new release.
 DEFAULT_VERSIONS = os.environ.get(
-    "SA_WINRAR_VERSIONS", "2-90 3-00 4-20 6-23 7-23"
+    "SA_WINRAR_VERSIONS", "2-90 3-00 3-93 4-20 6-23 7-23"
 ).split()
 
 WINDOWS = os.name == "nt"
