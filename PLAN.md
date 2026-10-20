@@ -189,10 +189,14 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
   还要重加密），已接受。
 - **RAR5 主头 locator 的偏移宽度**：官方按写主头时对最终大小的内部估计预留（实测
   3–6+ 字节，阈值 2^9/2^16/2^23），那套估计无法由我们自身的头字节推出，**CLI
-  不自动填**；库侧给了
-  `WriterOptions::estimated_size(bytes)`，给出预计大小即按官方分档预留（`-m0`
-  小归档与官方逐字节相同），不给则沿用历史定长 5 字节。默认仍比官方 +2 字节
-  （最小档）到 −1 字节（≥256 MiB 档）。
+  不自动填**；库侧给了 `WriterOptions::estimated_size(bytes)`，给出预计大小即
+  按官方分档预留。已对拍：`-m0 -qo+` 的单成员归档在 4 字节档（1 KiB 成员）与 5
+  字节档（100 KiB 成员）与官方**逐字节相同**
+  （`locator_width_follows_official_size_tiers`）；6 字节档只比 locator 宽度，
+  官方在那个量级还把成员尺寸字段留得更宽（见
+  [`docs/PITFALLS.md`](docs/PITFALLS.md)「分卷成员头的 `data_size` 宽度」）。
+  不给 `estimated_size` 则沿用历史定长 5 字节，比官方 +2 字节（最小档）到 −1
+  字节（≥256 MiB 档）。
 - **官方 QO 的默认阈值**：官方默认只给「相对大的文件」拷头（手册原文，阈值随
   版本变），`-qo-` 关、`-qo+` 强制全拷；`WriterOptions::quick_open(true)` 的语义
   等于 `-qo+`，所以对拍 QO 布局时官方必须也带 `-qo+`。只影响字节外观（官方多一条
@@ -235,8 +239,8 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
   **`rar r` 不写 `fixed.<name>`**、**无控制台时的覆盖询问**：口径与理由见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 - **RAR5 元数据仍差三处**（字节外观，双向读写一致）：locator
-  偏移字段宽度、「官方 QO 默认阈值」、成员总大小 ≥ 1 MiB 时分卷头的 `data_size`
-  预留宽度，见上面「暂缓」与
+  偏移字段宽度的**默认值**（给了 `estimated_size` 即对齐）、「官方 QO 默认
+  阈值」、成员总大小 ≥ 1 MiB 时分卷头的 `data_size` 预留宽度，见上面「暂缓」与
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「分卷成员头的 `data_size` 宽度」。
 - **Windows 联接点的 redirect 目标字符串**：见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。

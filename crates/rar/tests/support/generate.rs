@@ -289,6 +289,11 @@ pub fn payload(name: &str) -> Vec<u8> {
         // Incompressible and larger than the split size, so volume sets and
         // recovery volumes really split.
         "big.bin" => noise(0x1234_5678, 200_000),
+        // Sized to land inside each locator offset-width tier, so the
+        // reserved field width can be compared against official's.
+        "tier_1k.bin" => noise(0x2545_f491, 1024),
+        "tier_100k.bin" => noise(0x2545_f491, 100_000),
+        "tier_8m.bin" => noise(0x2545_f491, 8 << 20),
         // Crosses 1 MiB, where official RAR stops writing minimal size vints
         // in split member headers and starts reserving wider fields.
         "huge.bin" => noise(0xC0FF_EE01, 1_500_000),

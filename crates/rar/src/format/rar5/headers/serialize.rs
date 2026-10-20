@@ -10,7 +10,7 @@ use crate::format::rar5::{
     BLOCK_FLAG_SKIP_IF_UNKNOWN, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_END_ARCHIVE,
     BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER, COMP_INFO_DICT_SHIFT,
     COMP_INFO_METHOD_SHIFT, COMP_INFO_SOLID_BIT, EXTRA_FILE_HASH, EXTRA_FILE_TIME,
-    EXTRA_FILE_VERSION, FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX, OS_UNIX,
+    EXTRA_FILE_VERSION, FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX,
 };
 use crate::vint;
 
@@ -373,7 +373,10 @@ pub(crate) fn build_comment_block(comment: &[u8]) -> Vec<u8> {
     body.extend(vint::encode(0u64)); // attributes
     body.extend(crc32fast::hash(comment).to_le_bytes());
     body.extend(vint_at_least(0, 2)); // compression info (store)
-    body.extend(vint::encode(OS_UNIX));
+    // Service blocks describe the writer's host too: official rar stamps the
+    // platform it ran on, so a hardcoded Unix value breaks byte parity with a
+    // Windows build.
+    body.extend(vint::encode(crate::platform::host_os()));
     body.extend(vint::encode(3u64)); // name length
     body.extend(b"CMT");
 
@@ -408,7 +411,7 @@ pub(crate) fn build_service_block(
     body.extend(vint_at_least(data_size, 2)); // unpacked size
     body.extend(vint::encode(0u64)); // attributes
     body.extend(vint_at_least(0, 2)); // compression info (store)
-    body.extend(vint::encode(OS_UNIX));
+    body.extend(vint::encode(crate::platform::host_os()));
     body.extend(vint::encode(name.len() as u64));
     body.extend(name.as_bytes());
     body.extend(subdata);

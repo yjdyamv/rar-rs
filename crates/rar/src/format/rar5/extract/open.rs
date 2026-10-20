@@ -926,9 +926,12 @@ mod tests {
         body.extend(vint::encode(u64::from(u32::MAX) + 10));
         body.extend_from_slice(&header);
         let mut payload = Vec::new();
-        payload.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
-        payload.extend(vint::encode(body.len() as u64));
-        payload.extend_from_slice(&body);
+        // The entry checksum covers the body-size field together with the body.
+        let mut tail = Vec::new();
+        tail.extend(vint::encode(body.len() as u64));
+        tail.extend_from_slice(&body);
+        payload.extend_from_slice(&crc32fast::hash(&tail).to_le_bytes());
+        payload.extend(tail);
         let err = parse_quick_open_payload_capped(&payload, 1000, 4).unwrap_err();
         assert!(
             matches!(err, RarError::Format(_) | RarError::LimitExceeded { .. }),

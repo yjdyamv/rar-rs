@@ -403,8 +403,14 @@ fn mismatches(ours: &[u8], theirs: &[u8], ignore: &[&str]) -> Vec<String> {
 /// Copy [`generate::payload`] into `dir` and pin its mtime to the harness
 /// constant, so both writers see the same timestamp.
 fn sample(dir: &Path, name: &str) -> PathBuf {
+    sample_with(dir, name, &generate::payload(name))
+}
+
+/// Write `contents` as `name` and pin the mtime to the second, so both
+/// writers store the same timestamp without an extended-time record.
+fn sample_with(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, generate::payload(name)).unwrap();
+    std::fs::write(&path, contents).unwrap();
     let stamp =
         std::time::UNIX_EPOCH + std::time::Duration::from_secs(generate::PAYLOAD_MTIME_SECS);
     std::fs::File::options()
@@ -883,7 +889,8 @@ fn qo_catalog(archive: &[u8]) -> Option<Vec<(usize, Vec<u8>)>> {
 }
 
 /// Decode one quick-open payload: `[entry crc32][body size][flags][relative
-/// offset][header size][header block]`, repeated.
+/// offset][header size][header block]`, repeated. The checksum covers the
+/// size field together with the body, as official writers stamp it.
 fn decode_qo(payload: &[u8], qo_start: usize) -> Vec<(usize, Vec<u8>)> {
     let mut entries = Vec::new();
     let mut off = 0usize;
@@ -893,7 +900,11 @@ fn decode_qo(payload: &[u8], qo_start: usize) -> Vec<(usize, Vec<u8>)> {
         let body_start = off + 4 + n;
         let body_len = usize::try_from(body_len).unwrap();
         let body = &payload[body_start..body_start + body_len];
-        assert_eq!(crc32(body), stored, "cached entry checksum");
+        assert_eq!(
+            crc32(&payload[off + 4..body_start + body_len]),
+            stored,
+            "cached entry checksum"
+        );
         let (_flags, n) = vint(body, 0).unwrap();
         let (rel, m) = vint(body, n).unwrap();
         let (header_len, k) = vint(body, n + m).unwrap();
@@ -1296,6 +1307,122 @@ fn recovery_records_repeat_in_every_volume() {
         .clone();
     if let Some(verdict) = generate::unrar_test(generate::TOOL_RAR50, &first) {
         verdict.unwrap_or_else(|error| panic!("official UnRAR rejected our set: {error}"));
+    }
+}
+
+/// Width of the locator's quick-open offset field, i.e. how much room the
+/// writer reserved for an offset it only learns at close time.
+fn locator_qo_width(archive: &[u8]) -> usize {
+    let body = archive.strip_prefix(RAR5_SIG).expect("a RAR5 archive");
+    let (head_size, size_width) = vint(body, 4).expect("head size");
+    let head_end = 4 + size_width + usize::try_from(head_size).expect("head size");
+    let mut q = 4 + size_width;
+    let (_, n) = vint(body, q).expect("block type");
+    q += n;
+    let (flags, n) = vint(body, q).expect("block flags");
+    q += n;
+    assert!(
+        flags & R5_BLOCK_EXTRA != 0,
+        "the main header carries a locator"
+    );
+    let (extra_size, _) = vint(body, q).expect("extra size");
+    let extra = &body[head_end - usize::try_from(extra_size).expect("extra size")..head_end];
+    let mut r = 0usize;
+    while r < extra.len() {
+        let (record_size, n) = vint(extra, r).expect("record size");
+        let (record_type, type_width) = vint(extra, r + n).expect("record type");
+        let record_end = r + n + usize::try_from(record_size).expect("record size");
+        if record_type == 1 {
+            let mut q = r + n + type_width;
+            let (locator_flags, n) = vint(extra, q).expect("locator flags");
+            q += n;
+            assert!(
+                locator_flags & R5_LOCATOR_FLAG_QO != 0,
+                "expected a quick-open offset field"
+            );
+            return record_end - q;
+        }
+        r = record_end;
+    }
+    panic!("no locator record in the main header");
+}
+
+/// Official RAR reserves the locator offset field by tier: 3 bytes below 512,
+/// then 4 / 5 / 6 as the expected archive size passes 2^16 and 2^23. Its
+/// estimate is computed from the member list it scanned, so a streaming
+/// writer has to be told the size; with that estimate the reserved width, and
+/// therefore the whole main header, matches byte for byte.
+#[test]
+fn locator_width_follows_official_size_tiers() {
+    // From 2^20 bytes up, official also reserves wider `data_size`/`unp_size`
+    // fields than the value needs (5 bytes from 2^20, 6 bytes from 2^23), so
+    // the 8 MiB tier can only be compared on the locator width; the two
+    // smaller tiers are boxed into sizes where official writes the natural
+    // width and the whole archive is byte-identical.
+    for (label, member, identical) in [
+        ("4-byte tier", "tier_1k.bin", true),
+        ("5-byte tier", "tier_100k.bin", true),
+        ("6-byte tier", "tier_8m.bin", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let size = generate::payload(member).len();
+        let src = sample(dir.path(), member);
+        let path = dir.path().join("ours.rar");
+        let mut writer = ArchiveWriter::create_with(
+            &path,
+            WriterOptions::new()
+                .compression(ArchiveVersion::V50)
+                .quick_open(true)
+                .estimated_size(size as u64),
+        )
+        .unwrap();
+        writer
+            .add_path_as(
+                &src,
+                member,
+                EntryWriteOptions::new().compression_level(CompressionLevel::STORE),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+        let mine = std::fs::read(&path).unwrap();
+
+        let Some(made) = generate::archive_with(
+            generate::TOOL_RAR50,
+            &["-ma5", "-m0", "-qo+"],
+            &[member],
+            &[],
+        ) else {
+            return;
+        };
+        let theirs = made.read();
+        let widths = (locator_qo_width(&mine), locator_qo_width(&theirs));
+        assert_eq!(widths.0, widths.1, "{label}: reserved locator width");
+        assert_eq!(
+            widths.0,
+            match label {
+                "4-byte tier" => 4,
+                "5-byte tier" => 5,
+                _ => 6,
+            },
+            "{label}: unexpected locator width"
+        );
+        if identical && mine != theirs {
+            let at = mine
+                .iter()
+                .zip(&theirs)
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| mine.len().min(theirs.len()));
+            let lo = at.saturating_sub(16);
+            panic!(
+                "{label}: archive differs at byte {at} (ours {} bytes, official {} bytes)
+  ours    {}
+  official{}",
+                mine.len(),
+                theirs.len(),
+                hex(&mine[lo..mine.len().min(at + 32)]),
+                hex(&theirs[lo..theirs.len().min(at + 32)]),
+            );
+        }
     }
 }
 

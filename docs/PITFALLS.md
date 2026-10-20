@@ -40,6 +40,14 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `0x06`（`DATA_AREA|SKIP_IF_UNKNOWN`）、extra 区为空，载荷就是 data area；`RR`
   块相反，`0x07` + extra 里的百分比字节。多发一条空 `SUBDATA` 记录（`type`
   only）会让每个归档多 3 字节且 flags 不同。
+- **QO 条目 CRC 覆盖「体长 vint + 体」**：官方 7.23 的条目是
+  `[crc32][body size vint][body]`，校验和从 body size 那个字节算起；只覆盖 body
+  会让官方读到校验失败。契约 `decode_qo`（`tests/format_parity.rs`）按官方口径
+  校验，字节级对拍才能一致。
+- **服务块（QO/RR/CMT）也写写方 host_os**：官方按自己运行的平台填，Windows 是
+  0、Unix 是 1；写死 `OS_UNIX` 会让 Windows 官方产出的归档在服务块里差一字节
+  （`locator_width_follows_official_size_tiers` 就是这么发现的）。用
+  `crate::platform::host_os()`。
 - **QO 记录在编辑/追加时整体重建，不是原样拷贝**：记录里存的是每个成员头
   的副本与「回退到该头的相对偏移」，所以删除/改名/注释/`rr` 之后偏移必须重算。
   编辑走 `transaction`（保留原有「有无

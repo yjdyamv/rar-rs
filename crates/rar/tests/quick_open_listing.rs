@@ -292,7 +292,8 @@ fn move_quick_open_entry_offset(archive: &[u8], entry_index: usize) -> Vec<u8> {
         .find(|candidate| rar_rs::wire::vint::encode(*candidate).len() == rel_len)
         .expect("neighbor offset with the same varint width");
     run[rel_pos..rel_pos + rel_len].copy_from_slice(&rar_rs::wire::vint::encode(new_rel));
-    let crc = crc32fast::hash(&run[body_start..body_end]);
+    // The entry checksum covers the body-size field together with the body.
+    let crc = crc32fast::hash(&run[4..body_end]);
     run[0..4].copy_from_slice(&crc.to_le_bytes());
     splice_quick_open_payload(archive, payload_offset, &entries)
 }

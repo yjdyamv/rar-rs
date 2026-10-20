@@ -90,6 +90,11 @@ pub const COMP_INFO_DICT_MASK: u64 = 0x3C00;
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const OS_WINDOWS: u64 = 0x00;
+/// RAR5 `host_os` for Unix. Writers stamp the platform they run on
+/// (`crate::platform::host_os()`), so this is only spelled out where a header
+/// has to name Unix regardless of the host (tests and the reader's display
+/// path).
+#[cfg_attr(not(test), allow(dead_code))]
 pub const OS_UNIX: u64 = 0x01;
 
 // ── End-of-Archive Flags ───────────────────────────────────────────────────

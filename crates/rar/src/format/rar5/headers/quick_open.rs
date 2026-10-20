@@ -4,11 +4,14 @@
 //!
 //! Payload layout (repeated per member):
 //! ```text
-//! [entry CRC32] 4 bytes LE, over [body]
+//! [entry CRC32] 4 bytes LE, over [body size][body]
 //! [body size] vint
 //! [body] = [flags vint] [relative offset vint] [header size vint]
 //!          [complete file-header block bytes]
 //! ```
+//! The checksum covers the size field as well, which is what official
+//! writers stamp; covering only the body marks the record as corrupt for
+//! them.
 //! The relative offset points back from the QO record to the cached file
 //! header; the flags field is always 0 (a file-header entry).
 
@@ -38,10 +41,13 @@ pub(crate) fn encode_entry(rel: u64, header: &[u8]) -> Vec<u8> {
     body.extend(vint::encode(header.len() as u64));
     body.extend_from_slice(header);
 
-    let mut entry = Vec::with_capacity(8 + body.len());
-    entry.extend(crc32fast::hash(&body).to_le_bytes());
-    entry.extend(vint::encode(body.len() as u64));
-    entry.extend(body);
+    let mut tail = Vec::with_capacity(2 + body.len());
+    tail.extend(vint::encode(body.len() as u64));
+    tail.extend(body);
+
+    let mut entry = Vec::with_capacity(4 + tail.len());
+    entry.extend(crc32fast::hash(&tail).to_le_bytes());
+    entry.extend(tail);
     entry
 }
 
@@ -61,6 +67,7 @@ pub(crate) fn decode_payload(payload: &[u8], max_entries: usize) -> RarResult<Ve
         }
         let stored_crc = u32::from_le_bytes(payload[off..off + 4].try_into().unwrap());
         off += 4;
+        let size_field = off;
         let (body_size, n) = vint::decode_from_slice(payload, off)
             .map_err(|e| RarError::format(format!("quick-open: {e}")))?;
         off += n;
@@ -71,7 +78,7 @@ pub(crate) fn decode_payload(payload: &[u8], max_entries: usize) -> RarResult<Ve
         if body_end > payload.len() {
             return Err(RarError::format("quick-open: truncated entry body"));
         }
-        let actual = crc32fast::hash(&payload[off..body_end]);
+        let actual = crc32fast::hash(&payload[size_field..body_end]);
         if actual != stored_crc {
             return Err(RarError::crc(stored_crc, actual, "quick-open entry"));
         }
