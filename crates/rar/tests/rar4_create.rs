@@ -54,6 +54,22 @@ second line
             0,
             "{version}: MHD_COMMENT is set"
         );
+        // Both official pre-3.0 writers compress the comment with the
+        // container codec (WinRAR 1.5 Beta and 2.90 alike) and declare
+        // method 4, so the nested block carries an LZ payload, not the text.
+        let block = &head[13..size];
+        assert_eq!(block[2], 0x75, "{version}: nested comment block");
+        assert_eq!(block[10], 0x34, "{version}: method 4, like the officials");
+        assert_eq!(
+            usize::from(u16::from_le_bytes([block[7], block[8]])),
+            text.len(),
+            "{version}: unpacked size is the text length"
+        );
+        assert_eq!(
+            usize::from(u16::from_le_bytes([block[5], block[6]])),
+            block.len(),
+            "{version}: the block size covers the packed payload"
+        );
 
         let mut reader = ArchiveReader::open(&path).unwrap();
         assert_eq!(reader.comment().unwrap().as_deref(), Some(text.as_slice()));

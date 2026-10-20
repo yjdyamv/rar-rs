@@ -198,16 +198,23 @@ A missing tool prints `SKIPPED` and the suite passes; `SA_REQUIRE_WINRAR=1` /
 `om_mark_of_the_web_matches_winrar`** — 6.23 predates RAR7 and its MOTW differs.
 That is a version difference, not a regression (confirmed on `1fbfaba`).
 
-## Optional local sample: the 1995 RAR 1.5 Beta archive
+## Optional local samples (never machine-fetched)
 
-No release in the fetched toolchain can write a RAR 1.3/1.5 container, so the
-oldest layout is checked against one genuinely shipped archive: WinRAR 1.5
-Beta (`wrar155.rar`, 1995, solid, ANSI-art archive comment) kept outside the
-tool cache at `.cache/winrar-src/rar155/wrar155.rar`. It is *not* downloaded
-by `scripts/fetch_winrar.py`; `genuine_rar155_beta_archive_decodes` in
-`crates/rar/tests/rar4_read.rs` skips when the file is absent, and otherwise
-decodes the comment and both members and re-checks them with the official
-`UnRAR.exe` 2.90 and 7.23.
+Two things sit outside the fetched toolchain and are therefore **manual,
+optional, and never a reference**:
+
+- `wrar155.rar` — a genuine WinRAR 1.5 Beta (1995) release archive with an
+  ANSI-art comment (`T R A K - O N E !`). No fetched build can write a
+  1.3/1.5 container, so this is the only shipped evidence for that layout.
+  `crates/rar/tests/rar4_read.rs::genuine_rar155_beta_archive_decodes` decodes
+  its comment and both members and re-checks them with the official
+  `UnRAR.exe` 2.90 and 7.23; the test skips when the file is absent.
+- Older 2.x installers (`winrar200.exe`, `winrar206.exe`) are no longer served
+  by rarlab (404 under `https://www.rarlab.com/rar/`); the copies used while
+  developing the legacy comment support came from a third-party mirror. They
+  are kept in `.cache/winrar-manual/` — **not** in `.cache/winrar/`, which is
+  what the suites scan — because a mirror build is not an official reference.
+  Keep them out of the tool cache and never let a test depend on them.
 
 ## Generated test archives
 

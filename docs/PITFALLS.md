@@ -247,7 +247,11 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   把注释作为嵌套 `0x75` 块接在主头 13 字节之后（主头 HEAD_SIZE 覆盖整块，
   `MHD_COMMENT` 置位）。字段：`UNP_SIZE(2) UNP_VER(1) METHOD(1) COMM_CRC(2)` +
   数据；块头 CRC 只覆盖块自己的固定 11 字节（`block[2..13]`，**不含**数据），
-  主头 CRC 只覆盖 `main[2..13]`，`COMM_CRC = crc32(text) & 0xffff`。三个后果：
+  主头 CRC 只覆盖 `main[2..13]`，`COMM_CRC = crc32(text) & 0xffff`。载荷必须用
+  容器同代编解码器压缩并声明 method 4（0x34）：官方 1.5 Beta 用 Unpack15、
+  2.90 用 Unpack20，**即使压完更大也照压**；别图省事写 method 0x30（2.90 能
+  容忍，但更老的 pre-3.0 读取器会判 "Comment header broken"，且与官方字节形状
+  不一致）。四个后果：
   ① 注释必须在第一个成员之前写进去（`-z` 在创建时就入队，并行批量路径必须先
   冲刷队列，否则被静默丢掉）；② 编辑/追加无法替换它，`ArchiveEditor` 直接
   拒绝（"keeps its comment inside the main header"），别去写 `CMT` —— 老读取器

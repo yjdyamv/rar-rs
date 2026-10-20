@@ -490,12 +490,20 @@ fn writes_a_legacy_main_header_comment() {
         let main = &bytes[7..];
         let flags = u16::from_le_bytes([main[3], main[4]]);
         assert_ne!(flags & MHD_COMMENT, 0, "{version:?}");
-        let head_size = u16::from_le_bytes([main[5], main[6]]);
-        assert_eq!(
-            usize::from(head_size),
-            13 + 13 + text.len(),
-            "{version:?}: main header covers the nested comment"
+        let head_size = usize::from(u16::from_le_bytes([main[5], main[6]]));
+        // The comment payload is LZ-compressed with the container codec (both
+        // official pre-3.0 writers do that), so only the envelope is fixed:
+        // 13 fixed bytes plus the nested block, which itself starts with 13.
+        assert!(
+            head_size > 13 + 13,
+            "{version:?}: the main header carries the nested comment: {head_size}"
         );
+        assert_eq!(
+            usize::from(u16::from_le_bytes([main[13 + 5], main[13 + 6]])),
+            head_size - 13,
+            "{version:?}: the nested block fills the rest of the main header"
+        );
+        assert_eq!(main[13 + 10], 0x34, "{version:?}: comment method 4");
         // No RAR 3.0+ `CMT` NEWSUB block: pre-3.0 readers ignore those.
         assert!(
             !bytes.windows(3).any(|w| w == b"CMT"),

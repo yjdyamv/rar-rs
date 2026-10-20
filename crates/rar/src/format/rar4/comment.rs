@@ -64,10 +64,28 @@ pub(crate) fn parse_legacy_comment(main_header: &[u8]) -> Option<LegacyComment<'
     })
 }
 
-/// Build the legacy comment block for `text` (stored, method STORE). The
-/// caller appends it to the main header and grows that header's `head_size`.
+/// Build the legacy comment block for `text`. The caller appends it to the
+/// main header and grows that header's `head_size`.
+///
+/// Both official pre-3.0 writers compress the comment with the container's
+/// own codec and declare it as method 4 — WinRAR 1.5 Beta stores an
+/// Unpack15 stream, WinRAR 2.00/2.90 an Unpack20 one, even when the packed
+/// form ends up *longer* than the text. The shape matters: UnRAR 2.00 reads
+/// a stored comment declared `unp_ver 15` as "Comment header broken", so the
+/// payload has to follow the declared generation.
 pub(crate) fn build_legacy_comment_block(text: &[u8], unp_ver: u8) -> RarResult<Vec<u8>> {
-    let head_size = LEGACY_COMMENT_HEAD_SIZE + text.len();
+    if text.len() > usize::from(u16::MAX) {
+        return Err(RarError::invalid_option(
+            "comment too long for a legacy (unp_ver < 29) RAR4 archive",
+        ));
+    }
+    let unp_ver = unp_ver.min(20);
+    let packed = if unp_ver < 20 {
+        crate::codec::legacy::rar15_encoder::unpack15_encode(text)?
+    } else {
+        crate::codec::legacy::rar20_encoder::unpack20_encode_auto(text)?
+    };
+    let head_size = LEGACY_COMMENT_HEAD_SIZE + packed.len();
     let head_size = u16::try_from(head_size).map_err(|_| {
         RarError::invalid_option("comment too long for a legacy (unp_ver < 29) RAR4 archive")
     })?;
@@ -80,10 +98,10 @@ pub(crate) fn build_legacy_comment_block(text: &[u8], unp_ver: u8) -> RarResult<
     block.extend_from_slice(&0u16.to_le_bytes()); // flags: no LONG_BLOCK
     block.extend_from_slice(&head_size.to_le_bytes());
     block.extend_from_slice(&unp_size.to_le_bytes());
-    block.push(unp_ver.min(20)); // stored bytes never need a newer reader
-    block.push(crate::format::rar4::RAR4_METHOD_STORE);
+    block.push(unp_ver);
+    block.push(crate::format::rar4::RAR4_METHOD_STORE + 4);
     block.extend_from_slice(&(crate::crc32::crc32(text) as u16).to_le_bytes());
-    block.extend_from_slice(text);
+    block.extend_from_slice(&packed);
     // The CRC covers only the fixed 11-byte block header (measured against
     // WinRAR 2.90: the payload is not part of it, unlike a FILE_HEAD).
     let crc = header_crc16(&block[2..LEGACY_COMMENT_HEAD_SIZE]);
