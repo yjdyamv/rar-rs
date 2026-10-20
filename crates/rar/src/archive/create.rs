@@ -468,17 +468,12 @@ impl RarArchive {
             ));
         }
 
-        // Service header: type 3, name "QO", with an empty service-data
-        // extra record (type 0x07) and the payload as its data area.
-        let subdata = {
-            let mut extra = Vec::new();
-            extra.extend(vint::encode(1u64)); // record size: type only
-            extra.extend(vint::encode(0x07u64)); // service data record type
-            extra
-        };
+        // Service header: type 3, name "QO". WinRAR 7.23 writes no SUBDATA
+        // record for it (its extra area is empty), so the payload is the data
+        // area and nothing else.
         let hdr = crate::format::rar5::headers::build_service_block(
             "QO",
-            &subdata,
+            &[],
             payload.len() as u64,
             crate::format::rar5::BLOCK_FLAG_SKIP_IF_UNKNOWN,
         );
@@ -871,6 +866,12 @@ impl RarArchive {
     fn finish_volume_rar4(&mut self, next_volume: bool) -> RarResult<()> {
         if self.rar4_recovery_requested() {
             self.write_rar4_recovery_block()?;
+        }
+        // RAR 1.5/2.x writers end a volume after the last member: neither the
+        // 2.90 `a` nor any `-v` set it writes carries an end-of-archive block
+        // (`UnRAR 2.90` and the era's readers stop at the last data block).
+        if self.write_ctx().solid.rar4_unp_ver < 29 {
+            return Ok(());
         }
         self.write_rar4_end_block(next_volume)
     }

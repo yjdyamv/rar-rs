@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 /// A cached official release, addressed by its directory name (e.g. `"3-00"`).
 pub struct Tool {
@@ -491,6 +492,27 @@ pub fn archive_with(
     }
 }
 
+/// Modification time stamped on every payload file the harness writes, and the
+/// one a parity test must stamp on its own copy of the same payload.
+///
+/// It is a whole second in 2023, so the DOS/Unix time fields are identical on
+/// both sides and the writer has no sub-second precision to record. Without it
+/// WinRAR appends an `FHD_EXTTIME` area to every member (its console `a` saves
+/// the sub-second part of NTFS mtimes), which our writer deliberately omits.
+pub const PAYLOAD_MTIME_SECS: u64 = 1_700_000_000;
+
+/// Write `payload(name)` into `dir` and pin its mtime to
+/// [`PAYLOAD_MTIME_SECS`], so a generated archive carries a time field a parity
+/// test can reproduce.
+fn write_payload_file(dir: &Path, name: &str) {
+    let path = dir.join(name);
+    std::fs::write(&path, payload(name)).expect("write payload");
+    let stamp = SystemTime::UNIX_EPOCH + Duration::from_secs(PAYLOAD_MTIME_SECS);
+    if let Ok(file) = std::fs::File::options().write(true).open(&path) {
+        let _ = file.set_times(std::fs::FileTimes::new().set_modified(stamp));
+    }
+}
+
 fn generate(
     tool: &Tool,
     switches: &[&str],
@@ -520,10 +542,10 @@ fn generate(
     let dir = scratch_root().join(format!("{}-{:04}", slug(&key), n));
     std::fs::create_dir_all(&dir).expect("create generation dir");
     for m in members {
-        std::fs::write(dir.join(m), payload(m)).expect("write payload");
+        write_payload_file(&dir, m);
     }
     for m in extra.unwrap_or(&[]) {
-        std::fs::write(dir.join(m), payload(m)).expect("write extra payload");
+        write_payload_file(&dir, m);
     }
     let before: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()

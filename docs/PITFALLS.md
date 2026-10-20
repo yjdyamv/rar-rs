@@ -19,11 +19,29 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `vint_size(unpacked_size << 12)` 预留（官方先写头后回填，故更宽）。契约
   `member_size_fields_use_a_two_byte_minimum` /
   `stream_block_size_fields_use_the_reserved_width`。
-- **主头 locator 恒写**：每个归档的主头尾都有 locator（块 flags 含
-  `SKIP_IF_UNKNOWN`），无 QO 记录时 QO 标志仍置、偏移写 0 占位；**有 QO
-  与否只看偏移非零，不看标志位**（只看标志会凭空重建 QO
-  记录、破坏前缀逐字节不变）。契约
-  `locator_is_always_present_with_a_zero_qo_placeholder`。
+- **主头 locator 只在有指向对象时写**：有 QO 记录或 `-rr` 记录才写 locator
+  （块 flags 含 `SKIP_IF_UNKNOWN`），否则官方 7.23 连记录都不写（主头只剩
+  type/flags/归档 flags）；写了 locator 时 QO 标志先置、偏移写 0 占位，关闭时
+  回填。**有 QO 与实际偏移无关的判断只看偏移非零，不看标志位**（只看标志会凭空
+  重建 QO 记录、破坏前缀逐字节不变）。契约
+  `locator_is_present_with_a_zero_qo_placeholder` /
+  `no_locator_without_quick_open_or_recovery` /
+  `locator_parity`（`tests/format_parity.rs`）。
+- **QO 服务块没有 `SUBDATA` extra 记录**：官方 7.23 的 `QO` 块 flags 是
+  `0x06`（`DATA_AREA|SKIP_IF_UNKNOWN`）、extra 区为空，载荷就是 data
+  area；`RR` 块相反，`0x07` + extra 里的百分比字节。多发一条空
+  `SUBDATA` 记录（`type` only）会让每个归档多 3 字节且 flags 不同。
+- **QO 记录在编辑/追加时整体重建，不是原样拷贝**：记录里存的是每个成员头
+  的副本与「回退到该头的相对偏移」，所以删除/改名/注释/`rr` 之后偏移必须重算。
+  编辑走 `transaction`（保留原有「有无 QO」的判定：`had_qo &&
+  !header_encryption`，`-hp` 归档因此不带记录），追加先截断尾部的 QO/RR 再按
+  现有+新增成员重写，关闭时回填 locator。契约
+  `edits_rebuild_the_quick_open_record` /
+  `edits_do_not_invent_a_quick_open_record`。注意我们总是缓存**全部**成员头，
+  而官方默认只缓存相对大的文件，故编辑官方归档后记录会变大（合法但有别）。
+- **`-qo` 默认只给大文件建条目**（阈值随版本变），`-qo-` 关、`-qo+`
+  强制全建。`WriterOptions::quick_open(true)` 对应 `-qo+`，与官方对拍时必须让
+  官方也带 `-qo+`，否则官方在几十 KB 的归档上根本不写 QO 记录。
 - **RAR5 时间载体二选一**：头内 4 字节 mtime（`FILE_FLAG_TIME_UNIX`）**或**
   FILE_TIME extra 记录，绝不同时写；有记录就清头内标志（redirect
   与多卷分片头同规则）。契约
@@ -106,6 +124,10 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **RAR4 错口令与损坏头不可区分**：RAR4 没有口令校验值，加密块的垃圾
   `head_size`、解析/CRC 失败**统一映射 `WrongPassword`（exit
   11）**，别试图"区分"。
+- **RAR4 solid 链中不落 STORE**：官方在 `-s` 链里即使载荷不可压也照写正常
+  method（`0x33`），我们保留“压不小就 STORE”的短路。STORE 成员合法地中断链
+  （其后成员不再带 `FHD_SOLID`，读取器会重置表），但比官方少一段 ratio。
+  对拍 solid 时用可压成员，见 `solid_chain_flags_agree_with_official`。
 - **`-idn` 仍不生效、`-idc` 恒等效**（我们不打印官方版权/Trial 横幅）、`-iver`
   文案与官方不同；`rar r` 对载荷损坏的处置见上。
 

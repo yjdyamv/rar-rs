@@ -94,11 +94,16 @@ pub(super) fn emit_rar4_segment(
     }
     // `FHD` window bits: the archive-wide value WinRAR declares when the member
     // set is known upfront (`add_batch`), else a safe per-member stand-in. A
-    // RAR 2.x member declares the era's fixed 1 MiB; a solid run's window spans
-    // members, so the solid fallback stays at the 4 MiB maximum.
+    // RAR 2.x archive declares the era's fixed 1 MiB — even for a `-m0`
+    // member, which WinRAR 6.23 writes as `unp_ver 20` inside a `-ma4`
+    // container with the container's own size-driven bits; a solid run's
+    // window spans members, so the solid fallback stays at the 4 MiB
+    // maximum. The era test therefore reads the archive version, not the
+    // member's.
     let solid_mode = this.write_ctx().solid.mode;
+    let archive_unp_ver = this.write_ctx().solid.rar4_unp_ver;
     let window_bits = this.write_ctx().solid.rar4_dict_bits.unwrap_or_else(|| {
-        if unp_ver < 29 {
+        if archive_unp_ver < 29 {
             4
         } else if solid_mode {
             6

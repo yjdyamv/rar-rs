@@ -383,10 +383,17 @@ pub(crate) fn build_service_block(
 ) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend(vint::encode(BLOCK_TYPE_SERVICE_HEADER));
-    body.extend(vint::encode(
-        BLOCK_FLAG_EXTRA_DATA | BLOCK_FLAG_DATA_AREA | extra_flags,
-    ));
-    body.extend(vint::encode(subdata.len() as u64)); // extra area size
+    // The extra area only exists when the service has a SUBDATA record to put
+    // in it: WinRAR 7.23's "QO" block carries none (flags `0x06`, no extra
+    // area), while "RR" carries the percent byte (flags `0x07`).
+    let mut flags = BLOCK_FLAG_DATA_AREA | extra_flags;
+    if !subdata.is_empty() {
+        flags |= BLOCK_FLAG_EXTRA_DATA;
+    }
+    body.extend(vint::encode(flags));
+    if !subdata.is_empty() {
+        body.extend(vint::encode(subdata.len() as u64)); // extra area size
+    }
     body.extend(vint_at_least(data_size, 2)); // data size
     body.extend(vint::encode(0u64)); // file flags
     body.extend(vint_at_least(data_size, 2)); // unpacked size

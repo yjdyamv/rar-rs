@@ -204,7 +204,8 @@ fn nanosecond_mtime_roundtrip() {
 
 /// A caller-supplied size estimate reserves the locator offset fields at the
 /// width WinRAR uses for that size, so the main header matches its byte
-/// layout; without one the default 5-byte fields are used.
+/// layout; without one the default 5-byte fields are used. The locator only
+/// exists when it has something to point at, so quick open is requested.
 #[test]
 fn size_estimate_selects_the_locator_offset_width() {
     let dir = make_temp_dir();
@@ -219,26 +220,37 @@ fn size_estimate_selects_the_locator_offset_width() {
 
     let w3 = build(
         "w3.rar",
-        rar_rs::WriterOptions::default().estimated_size(400),
+        rar_rs::WriterOptions::default()
+            .quick_open(true)
+            .estimated_size(400),
     );
     let w4 = build(
         "w4.rar",
-        rar_rs::WriterOptions::default().estimated_size(60_000),
+        rar_rs::WriterOptions::default()
+            .quick_open(true)
+            .estimated_size(60_000),
     );
     let w5 = build(
         "w5.rar",
-        rar_rs::WriterOptions::default().estimated_size(4_000_000),
+        rar_rs::WriterOptions::default()
+            .quick_open(true)
+            .estimated_size(4_000_000),
     );
     let w6 = build(
         "w6.rar",
-        rar_rs::WriterOptions::default().estimated_size(20_000_000),
+        rar_rs::WriterOptions::default()
+            .quick_open(true)
+            .estimated_size(20_000_000),
     );
     assert_eq!(w4 - w3, 1, "the 512-byte bucket adds one offset byte");
     assert_eq!(w5 - w4, 1);
     assert_eq!(w6 - w5, 1);
 
     // A width-5 estimate is byte-identical to the default (no estimate).
-    let default = build("default.rar", rar_rs::WriterOptions::default());
+    let default = build(
+        "default.rar",
+        rar_rs::WriterOptions::default().quick_open(true),
+    );
     assert_eq!(default, w5, "the default is a 5-byte reservation");
 }
 

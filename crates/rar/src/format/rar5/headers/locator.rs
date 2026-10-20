@@ -39,31 +39,31 @@ pub(crate) fn locator_offset_width(estimate: u64) -> usize {
 /// reserved field width (the QO and RR fields always share one width, like
 /// WinRAR).
 ///
-/// WinRAR always writes the locator and always includes the QO offset field —
-/// with the QO flag set and the offset 0 when the archive has no quick-open
-/// record (its console `a` writes one only for larger archives) — while the
-/// RR field appears only when a recovery record exists. Readers treat a 0 QO
-/// offset as "no usable record" and fall back to a full scan, so the
-/// placeholder is inert.
+/// Each field is present only for the record it belongs to: the QO flag and
+/// the QO offset field come from `quick_open`, the RR flag and field from
+/// `recovery`. Verified against WinRAR 7.23: `-qo-` alone writes a main header
+/// with no locator record at all (flags `0x04`, header size 3), `-qo- -rr5%`
+/// writes the locator with the QO flag/field absent (body `02 c5 80 00`), and
+/// `-rr5%` writes both (body `03 80 80 00 c8 80 00`).
 pub(crate) fn build_locator_body(
     quick_open: bool,
     recovery: bool,
     offset_width: usize,
 ) -> (Vec<u8>, Option<usize>, Option<usize>) {
-    let _ = quick_open;
-    let mut flags = LOCATOR_FLAG_QUICK_OPEN;
+    let mut flags = 0u64;
+    if quick_open {
+        flags |= LOCATOR_FLAG_QUICK_OPEN;
+    }
     if recovery {
         flags |= LOCATOR_FLAG_RECOVERY;
     }
     let mut body = Vec::new();
     body.extend(vint::encode(flags));
-    // The QO field is always present; `quick_open` only says whether a real
-    // offset will be patched into it.
-    let qo = {
+    let qo = quick_open.then(|| {
         let p = body.len();
         body.extend_from_slice(&vint_fixed(0, offset_width));
-        Some(p)
-    };
+        p
+    });
     let rr = if recovery {
         let p = body.len();
         body.extend_from_slice(&vint_fixed(0, offset_width));
@@ -110,11 +110,23 @@ pub(crate) fn build_main_header(
 ) -> (Vec<u8>, Option<usize>, Option<usize>) {
     let (locator, qo_pos, rr_pos) = build_locator_body(quick_open, recovery, offset_width);
     let mut all_extra = extra.to_vec();
-    let record = frame_locator_record(&locator);
-    // The record is [record size vint][type vint][body]; the body is its
-    // tail, so it starts this far into the record.
-    let start = all_extra.len() + record.len() - locator.len();
-    all_extra.extend(record);
+    // WinRAR 7.23 writes no locator record at all when it has no quick-open
+    // information and no recovery record (`-qo-` without `-rr`): the main
+    // header shrinks to `type, flags(0x04), archive flags`. Without the
+    // record there is nothing to patch, so both field offsets are `None`.
+    let has_locator = quick_open || recovery;
+    let (record, start) = if has_locator {
+        let record = frame_locator_record(&locator);
+        // The record is [record size vint][type vint][body]; the body is its
+        // tail, so it starts this far into the record.
+        let start = all_extra.len() + record.len() - locator.len();
+        (Some(record), start)
+    } else {
+        (None, 0)
+    };
+    if let Some(record) = record {
+        all_extra.extend(record);
+    }
 
     let ah = ArchiveHeader {
         flags: arch_flags,
@@ -126,8 +138,12 @@ pub(crate) fn build_main_header(
     // before the end of the framed header.
     let extra_base = hdr.len() - ah.extra_data.len();
 
-    let qo_field = qo_pos.map(|p| extra_base + start + p);
-    let rr_field = rr_pos.map(|p| extra_base + start + p);
+    let qo_field = qo_pos
+        .filter(|_| has_locator)
+        .map(|p| extra_base + start + p);
+    let rr_field = rr_pos
+        .filter(|_| has_locator)
+        .map(|p| extra_base + start + p);
     (hdr, qo_field, rr_field)
 }
 
@@ -294,12 +310,12 @@ mod tests {
         let (hdr, qo_field, rr_field) = build_main_header(
             crate::format::rar5::ARCHIVE_FLAG_VOLUME,
             &[],
-            false,
+            true,
             false,
             Some(2),
             DEFAULT_OFFSET_WIDTH,
         );
-        // The locator is always written, so its QO field exists (left at 0);
+        // Quick open asked for a locator, so its QO field exists (left at 0);
         // the RR field only exists with a recovery record.
         assert!(qo_field.is_some());
         assert_eq!(rr_field, None);
@@ -310,13 +326,27 @@ mod tests {
         assert_ne!(ah.flags & crate::format::rar5::ARCHIVE_FLAG_VOLUME_NUM, 0);
     }
 
-    /// The locator is written even for an archive with no quick-open and no
-    /// recovery record, like WinRAR: the QO flag is set and its offset stays 0
-    /// (the inert placeholder the reader treats as "no record").
+    /// Neither quick open nor a recovery record: WinRAR 7.23 writes no locator
+    /// record at all, so the main header keeps just its archive flags and the
+    /// header carries no extra area to patch.
     #[test]
-    fn locator_is_always_present_with_a_zero_qo_placeholder() {
+    fn no_locator_without_quick_open_or_recovery() {
         let (hdr, qo_field, rr_field) =
             build_main_header(0, &[], false, false, None, DEFAULT_OFFSET_WIDTH);
+        assert!(qo_field.is_none());
+        assert!(rr_field.is_none());
+        let raw = parse_block_bytes(&hdr).unwrap();
+        let ah = ArchiveHeader::from_raw(&raw).unwrap();
+        assert!(ah.extra_data.is_empty(), "no locator record was written");
+    }
+
+    /// The locator exists exactly when there is something to point at, like
+    /// WinRAR 7.23: its QO flag is set and the offset stays 0 until close time
+    /// (the inert placeholder the reader treats as "no record yet").
+    #[test]
+    fn locator_is_present_with_a_zero_qo_placeholder() {
+        let (hdr, qo_field, rr_field) =
+            build_main_header(0, &[], true, false, None, DEFAULT_OFFSET_WIDTH);
         assert!(qo_field.is_some());
         assert!(rr_field.is_none());
 

@@ -38,6 +38,11 @@
   build 矩阵里跑一次；另有一条 `lint-windows`（clippy 全目标 + WinRAR 开关契约 +
   绑定单元测试），cargo deny 每周定时重跑一次以接住新的 RustSec 公告；七目标
   fuzz；取消钩子；QO 快路径；流式修复； 零填充分卷。
+- **格式对拍**：`crates/rar/tests/format_parity.rs` 把同一批载荷分别喂给我们的
+  writer 与官方 `Rar.exe`，逐块逐字段比对（自带 RAR4/RAR5 头解析器，不依赖库内
+  解析代码）：STORE 档要求整档逐字节相同（RAR5 / RAR4 / RAR2 三族），压缩档只放
+  过 pack 长度与覆盖它的校验和；另有 locator、QO、solid 链、RAR2 无 ENDARC 的专项
+  契约。
 - **测试归档零提交**：legacy 套件（RAR 1.3–4.x、`.rev`、VM 过滤器、恢复记录）
   全部由 `.cache/winrar/` 的官方 `Rar.exe` 现场生成（`tests/support/generate.rs` +
   `corpus.rs`），RAR 1.3/1.4 与 v26/v36/v70 用我们自己的 writer 或改 `unp_ver`
@@ -179,9 +184,10 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
   `WriterOptions::estimated_size(bytes)`，给出预计大小即按官方分档预留（`-m0`
   小归档与官方逐字节相同），不给则沿用历史定长 5 字节。默认仍比官方 +2 字节
   （最小档）到 −1 字节（≥256 MiB 档）。
-- **官方默认为较大归档写 QO 记录**（实测 ~8 KB 起写），我们只按 `-qo`
-  写。只影响字节外观（官方多一条 QO 服务块），不影响读取——无 QO
-  时双方都回退全扫。`docs/CLI.md` 的「console 默认不写 QO」只对小归档成立。
+- **官方 QO 的默认阈值**：官方默认只给「相对大的文件」拷头（手册原文，阈值随
+  版本变），`-qo-` 关、`-qo+` 强制全拷；`WriterOptions::quick_open(true)` 的语义
+  等于 `-qo+`，所以对拍 QO 布局时官方必须也带 `-qo+`。只影响字节外观（官方多一条
+  QO 服务块），不影响读取——无 QO 时双方都回退全扫。
 
 ## 开放议题
 
@@ -209,9 +215,9 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 ## 已知小差异（记录，互操作无碍）
 
 - **RAR4 solid 归档的成员排序**：solid
-  时官方按名字/扩展名启发式排序，我们按参数顺序，因此 solid
-  归档无法逐字节对拍（载荷与链字典同样按各自实现）。非 solid 的头字段与 `-m0`
-  已逐字节对齐。
+  时官方按名字/扩展名启发式排序，我们按参数顺序；顺序一致时头字段（`MHD_SOLID`、
+  `FHD_SOLID`、窗口位）已与官方逐字段对齐，载荷与链字典仍按各自实现。非 solid 的
+  头字段与 `-m0` 已逐字节对齐。
 - **`lb` 分片成员**：官方 `Rar.exe lb` 对跨卷成员不打印该成员名，官方
   `UnRAR.exe lb` 与我们一致；我们随 UnRAR。
 - **目录条目名带尾斜杠**；**RAR4 solid 且无 `rarfiles.lst`**
@@ -220,7 +226,7 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
   **`rar r` 不写 `fixed.<name>`**、**无控制台时的覆盖询问**：口径与理由见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 - **RAR5 元数据的仍差两处**（字节外观，双向读写一致）：locator
-  偏移字段宽度与「官方默认为较大归档写 QO 记录」，见上面「暂缓」。
+  偏移字段宽度与「官方 QO 默认阈值」，见上面「暂缓」。
 - **Windows 联接点的 redirect 目标字符串**：见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 
