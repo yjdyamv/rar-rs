@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use crate::support::{file_sha256, rar_bin, run, temp_dir, unrar_bin, unrar_test};
+use crate::support::{file_sha256, rar_bin, run, run_text, temp_dir, unrar_bin, unrar_test};
 
 /// A file to materialize: relative path plus its bytes.
 struct FileSpec {
@@ -622,13 +622,23 @@ fn unicode_archive_comment_matches_winrar() {
     assert!(out.status.success(), "WinRAR c failed");
 
     // Both archives must expose the comment through WinRAR and through us.
+    // `cw` prints the comment as text: a redirected `Rar.exe` writes it in the
+    // host OEM code page, so ask for Unicode (`-scuc`) and decode the UTF-16LE
+    // that produces — otherwise this assertion would only hold on machines
+    // whose console code page happens to be UTF-8.
     for (arc, tag) in [(&ours_arc, "ours"), (&off_arc, "off")] {
-        let (ok, out) = run(Command::new(&official_rar).arg("cw").arg(arc));
+        let (ok, out) = run_text(
+            Command::new(&official_rar)
+                .args(["cw", "-scuc", "-idq"])
+                .arg(arc),
+        );
         assert!(ok, "WinRAR cw {tag} failed:\n{out}");
         assert!(
             out.contains("第一行注释") && out.contains("second line"),
             "WinRAR did not see {tag}'s comment, got {out:?}"
         );
+        // Ours keeps the plain byte path for redirected stdout (UTF-8), so the
+        // same assertion doubles as a check that we never emit OEM text.
         let (ok, out) = run(Command::new(ours_rar).arg("cw").arg(arc));
         assert!(ok, "our cw {tag} failed:\n{out}");
         assert!(

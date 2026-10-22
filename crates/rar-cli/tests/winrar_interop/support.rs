@@ -100,6 +100,46 @@ pub(crate) fn run(cmd: &mut Command) -> (bool, String) {
     (out.status.success(), text)
 }
 
+/// Run a command whose text must be compared, decoding console output that the
+/// official tools emit as UTF-16LE.
+///
+/// `Rar.exe` writes redirected console text in the *OEM* code page (cp936 on a
+/// Chinese Windows, cp1252 elsewhere), so `run`'s UTF-8 decode mangles every
+/// non-ASCII character and any assertion on comment or member text becomes a
+/// test of the host code page rather than of the archive. Callers pass
+/// `-scuc` (Unicode text for comments) or `-scu` (Unicode text throughout);
+/// the result then starts with a UTF-16LE BOM, which
+/// [`decode_console_text`] honours. Our own binaries always write UTF-8, so a
+/// stream without the BOM still decodes exactly as before.
+pub(crate) fn run_text(cmd: &mut Command) -> (bool, String) {
+    let out = cmd.output().expect("run command");
+    let text = format!(
+        "{}{}",
+        decode_console_text(&out.stdout),
+        decode_console_text(&out.stderr)
+    );
+    (out.status.success(), text)
+}
+
+/// Decode one console stream: a leading UTF-16LE BOM switches the rest of the
+/// stream to UTF-16LE (an odd trailing byte is dropped); anything else is read
+/// as UTF-8 with a lossy fallback, which is what our own CLIs emit.
+pub(crate) fn decode_console_text(bytes: &[u8]) -> String {
+    const UTF16LE_BOM: [u8; 2] = [0xFF, 0xFE];
+    match bytes.strip_prefix(&UTF16LE_BOM[..]) {
+        Some(text) => {
+            let units: Vec<u16> = text
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        None => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
 /// `UnRAR t <archive>` must report success (optionally with a password).
 pub(crate) fn unrar_test(path: &Path, password: Option<&str>) -> (bool, String) {
     let mut cmd = Command::new(unrar_bin().expect("unrar"));
