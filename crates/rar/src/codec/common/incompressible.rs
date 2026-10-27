@@ -126,45 +126,51 @@ pub(crate) fn sample_is_incompressible(data: &[u8], method: u8) -> bool {
     if data.len() < SAMPLE_PROBE_MIN_INPUT {
         return false;
     }
+    let head = &data[..SAMPLE_PROBE_HEAD];
+    // Every sample has to sit strictly past the head and clear of the samples
+    // already taken: a region that overlaps another repeats it byte for byte by
+    // construction, and the distant-repeat check below would read that as
+    // long-range compressibility — a false "this file copies itself", which
+    // forces the member back through the full encode. At the floor's sizes the
+    // quarter points all land past the head, so this only guards against a
+    // floor that lets the samples crowd each other.
     let mut samples: Vec<&[u8]> = Vec::with_capacity(3);
-    let mut voting: Vec<&[u8]> = Vec::with_capacity(3);
+    let mut taken_to = SAMPLE_PROBE_HEAD;
     for &pos in &[data.len() / 4, data.len() / 2, data.len() * 3 / 4] {
-        if pos + SAMPLE_PROBE_TAIL <= data.len() {
-            samples.push(&data[pos..pos + SAMPLE_PROBE_TAIL]);
-            // A quarter sample that overlaps the head adds no information.
-            if pos >= SAMPLE_PROBE_HEAD {
-                voting.push(&data[pos..pos + SAMPLE_PROBE_TAIL]);
-            }
+        if pos < taken_to || pos + SAMPLE_PROBE_TAIL > data.len() {
+            continue;
         }
+        samples.push(&data[pos..pos + SAMPLE_PROBE_TAIL]);
+        taken_to = pos + SAMPLE_PROBE_TAIL;
     }
     // Cheap screen first: a member whose every sample shows structure is
     // compressible, so the sample encodes below cannot change the verdict and
     // their cost is pure waste.
     let mut regions = Vec::with_capacity(samples.len() + 1);
-    regions.push(&data[..SAMPLE_PROBE_HEAD]);
+    regions.push(head);
     regions.extend(samples.iter().copied());
     if samples_look_structured(&regions) {
         return false;
     }
 
     let mut bad = 0;
-    if incompressible_sample(&data[..SAMPLE_PROBE_HEAD], method) {
+    if incompressible_sample(head, method) {
         bad += 1;
     }
-    for sample in &voting {
+    for sample in &samples {
         if incompressible_sample(sample, method) {
             bad += 1;
         }
+    }
+    if bad < 2 {
+        return false;
     }
     // A file whose random-looking regions repeat each other (e.g. a
     // backup with a distant copy of a random block) is compressible via
     // long-range matching — the raw incompressibility vote must not
     // STORE it. Such regions are byte-identical, which no sampling
     // density can distinguish from plain randomness.
-    if bad >= 2 && samples_have_distant_repeats(&data[..SAMPLE_PROBE_HEAD], &samples) {
-        return false;
-    }
-    bad >= 2
+    !samples_have_distant_repeats(head, &samples)
 }
 
 /// Seekable-stream stride probe: head + samples at the quarter points.

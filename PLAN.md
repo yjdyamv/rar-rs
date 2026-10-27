@@ -173,9 +173,13 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 
 ### 功能缺口（按需，不阻塞发布）
 
-- [ ] **RAR4 solid 归档 MT**：legacy solid
-      链保持串行；成员级并行需跨成员共享窗口，属结构性代价（RAR5 的 chunk 级 MT
-      已兑现）。
+- [x] **RAR4 solid 归档 MT**：成员级并行不需要跨成员共享窗口——真正共享的是
+      *进入成员之前*的链状态，而每个候选（plain LZ / 逐个 `-mc` 过滤 / PPMd
+      试压）对它都只读，所以候选之间可以并行、胜负仍按串行顺序裁决，字节不变
+      （2026-10-27 已实现，`search_solid_member_parallel`，契约
+      `solid_search_parallel_matches_serial`）。30 MB 文本 solid m5：23.2 s →
+      14–17 s（16 核）；剩下的差距在 match finder
+      本身（官方 1.0 s），不是并行度。
 - [ ] **逐文件与上游对拍**：`rars` 移植的出处目前是 in-tree claim（每个文件头 +
       inventory 表），尚未与上游 diff。不影响已定的许可表达式。
 

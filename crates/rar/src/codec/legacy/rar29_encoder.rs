@@ -109,6 +109,31 @@ fn enc_err(msg: &'static str) -> RarError {
 //  EncodeOptions
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Smallest member whose solid candidate search fans out across the pool:
+/// below this the hand-off costs more than the search.
+#[cfg(feature = "parallel")]
+const RAR29_SOLID_PARALLEL_MIN_BYTES: usize = 128 * 1024;
+
+/// Largest member whose solid candidate search fans out: the search holds one
+/// working set per candidate, and members past
+/// [`RAR29_PARALLEL_MEMBER_THRESHOLD`] have their own block-level parallelism.
+#[cfg(feature = "parallel")]
+const RAR29_SOLID_PARALLEL_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Test seam: force the serial search even where the pool could fan out, so a
+/// test can encode the same chain both ways and compare the bytes. It can only
+/// take work away from the pool — never change what the search picks — so tests
+/// running next to it need no lock.
+#[cfg(all(test, feature = "parallel"))]
+static SOLID_SEARCH_SERIAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// See [`SOLID_SEARCH_SERIAL`].
+#[cfg(all(test, feature = "parallel"))]
+fn set_solid_search_serial(serial: bool) {
+    SOLID_SEARCH_SERIAL.store(serial, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Encoder configuration for one member (or chain of members).
 #[derive(Debug, Clone, Copy)]
 pub struct EncodeOptions {
@@ -1046,6 +1071,67 @@ fn ppmd_err(e: crate::codec::legacy::ppmd::Error) -> RarError {
     RarError::format(format!("RAR 2.9 PPMd encode: {e}"))
 }
 
+/// Code a member as PPMd, continuing `model` when `continuing` (0x80 header)
+/// or starting a fresh order-8 / 25 MiB model (0xA7 + dict byte header). The
+/// advanced model comes back so the caller can store it for the next PPMd
+/// member; nothing here reads or writes the encoder, which is what lets the
+/// solid search run this trial on a pool worker while it codes the LZ
+/// candidates.
+///
+/// `limit` (a fixed cap in bytes) and `live_limit` (a counter the LZ candidates
+/// keep lowering) bound the size the coded member may reach before it can no
+/// longer beat the LZ result. The serial search knows the LZ winner up front and
+/// passes it as `limit`; the parallel search passes the counter its LZ
+/// candidates keep lowering while the trial runs. Either way the bound never
+/// sits below the final LZ winner, and a PPMd member is only emitted when it is
+/// *strictly* smaller, so a trial that runs past the cap had already lost —
+/// giving up cannot change the bytes. Both `None` codes it out in full; a trial
+/// that gives up returns `None` and the model it carried is discarded, exactly
+/// as a losing trial's always is.
+fn ppmd_chain_packed(
+    input: &[u8],
+    model: Option<Box<crate::codec::legacy::ppmd::PpmdDecoder>>,
+    continuing: bool,
+    limit: Option<usize>,
+    live_limit: Option<&std::sync::atomic::AtomicUsize>,
+) -> RarResult<Option<(Vec<u8>, crate::codec::legacy::ppmd::PpmdDecoder)>> {
+    use crate::codec::legacy::ppmd::PpmdEncoder;
+    let mut out = Vec::new();
+    let mut encoder = match (continuing, model) {
+        (true, Some(model)) => {
+            out.push(0x80 | (PPMD_ORDER as u8 - 1)); // continuing header
+            PpmdEncoder::continuing(*model, PPMD_ESC)
+        }
+        _ => {
+            out.push(0x80 | 0x20 | (PPMD_ORDER as u8 - 1));
+            out.push(PPMD_DICTIONARY_MB - 1);
+            PpmdEncoder::new(PPMD_ORDER, PPMD_ESC, usize::from(PPMD_DICTIONARY_MB))
+                .map_err(ppmd_err)?
+        }
+    };
+    let header = out.len();
+    let cap_fn = move || {
+        let bound = match (limit, live_limit) {
+            (Some(fixed), Some(live)) => fixed.min(live.load(std::sync::atomic::Ordering::Relaxed)),
+            (Some(fixed), None) => fixed,
+            (None, Some(live)) => live.load(std::sync::atomic::Ordering::Relaxed),
+            (None, None) => return f64::INFINITY,
+        };
+        bound.saturating_sub(header) as f64 * 8.0
+    };
+    let cap: Option<&dyn Fn() -> f64> = if limit.is_none() && live_limit.is_none() {
+        None
+    } else {
+        Some(&cap_fn)
+    };
+    if !encode_ppmd_hybrid(input, &mut encoder, cap)? {
+        return Ok(None);
+    }
+    let (packed, model) = encoder.finish_keeping_model().map_err(ppmd_err)?;
+    out.extend_from_slice(&packed);
+    Ok(Some((out, model)))
+}
+
 /// One way of pricing an escape token: `length * literal_bits` is what the
 /// model would charge to code those bytes as literals, so an escape pays
 /// when that exceeds the measured cost of the token plus the context-break
@@ -1115,7 +1201,16 @@ fn ppmd_offset_one_repeat(input: &[u8], pos: usize) -> Option<usize> {
 ///
 /// The match finder covers only the member itself (a PPMd block's escape
 /// matches are intra-member); the model carries the cross-member context.
-fn encode_ppmd_hybrid(input: &[u8], encoder: &mut PpmdEncoder) -> RarResult<()> {
+///
+/// `limit_bits` bounds the trial: the range coder only appends bytes, so once
+/// the coded size passes the bound the member can no longer win and the trial
+/// returns `false` early. Callers that keep the result (a member actually
+/// coded as PPMd) pass `None`.
+fn encode_ppmd_hybrid(
+    input: &[u8],
+    encoder: &mut PpmdEncoder,
+    limit_bits: Option<&dyn Fn() -> f64>,
+) -> RarResult<bool> {
     let mut costs = PpmdTokenCosts::new();
     let mut finder = MatchFinder::new(
         input,
@@ -1127,6 +1222,11 @@ fn encode_ppmd_hybrid(input: &[u8], encoder: &mut PpmdEncoder) -> RarResult<()> 
     let mut pos = 0usize;
     let mut search_from = 0usize;
     while pos < input.len() {
+        if let Some(limit_bits) = limit_bits
+            && encoder.spent_bits() > limit_bits()
+        {
+            return Ok(false);
+        }
         if let Some(length) = ppmd_offset_one_repeat(input, pos)
             && costs.repeat_pays(length)
         {
@@ -1165,20 +1265,20 @@ fn encode_ppmd_hybrid(input: &[u8], encoder: &mut PpmdEncoder) -> RarResult<()> 
         costs.record_literal(encoder.spent_bits() - before);
         pos += 1;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Code one member as a single fresh-model PPMd block (order-8, 25 MiB
 /// suballocator), optionally escaping LZ matches into the model.
 /// Returns the wire bytes: `[0x80|0x20|order-1][dict_mb-1]` + range-coded
 /// payload. The model is not retained; solid-chain continuation lives in
-/// [`Unpack29Encoder::encode_ppmd_member_chain`].
+/// [`ppmd_chain_packed`].
 pub(crate) fn encode_ppmd_member_packed(input: &[u8], lz_escapes: bool) -> RarResult<Vec<u8>> {
     let mut out = vec![0x80 | 0x20 | (PPMD_ORDER as u8 - 1), PPMD_DICTIONARY_MB - 1];
     let mut encoder =
         PpmdEncoder::new(PPMD_ORDER, PPMD_ESC, PPMD_DICTIONARY_MB as usize).map_err(ppmd_err)?;
     if lz_escapes {
-        encode_ppmd_hybrid(input, &mut encoder)?;
+        encode_ppmd_hybrid(input, &mut encoder, None)?;
     } else {
         for &byte in input {
             encoder.encode_literal(byte).map_err(ppmd_err)?;
@@ -1879,48 +1979,39 @@ impl Unpack29Encoder {
         Ok(read_total)
     }
 
-    /// Code one member of a solid run as PPMd, continuing the carried model
-    /// when the previous compressed member was PPMd, otherwise starting a
-    /// fresh order-8 / 25 MiB model (0xA7 + dict byte header). The model is
-    /// stored back for the next PPMd member; LZ levels are left untouched.
-    /// Window: PPMd output equals the input, so `remember` is the caller's
-    /// job (the LZ candidate already remembered it when both were tried).
-    pub fn encode_ppmd_member_chain(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
-        use crate::codec::legacy::ppmd::PpmdEncoder;
-        let continuing = self.ppmd.is_some() && self.last_was_ppmd;
-        let mut out = Vec::new();
-        let mut encoder = match (continuing, self.ppmd.take()) {
-            (true, Some(model)) => {
-                out.push(0x80 | (PPMD_ORDER as u8 - 1)); // continuing header
-                PpmdEncoder::continuing(*model, PPMD_ESC)
-            }
-            _ => {
-                out.push(0x80 | 0x20 | (PPMD_ORDER as u8 - 1));
-                out.push(PPMD_DICTIONARY_MB - 1);
-                PpmdEncoder::new(PPMD_ORDER, PPMD_ESC, usize::from(PPMD_DICTIONARY_MB))
-                    .map_err(ppmd_err)?
-            }
-        };
-        encode_ppmd_hybrid(input, &mut encoder)?;
-        let (packed, model) = encoder.finish_keeping_model().map_err(ppmd_err)?;
-        out.extend_from_slice(&packed);
-        self.ppmd = Some(Box::new(model));
-        self.last_was_ppmd = true;
-        Ok(out)
-    }
-
     /// Solid-run member: the plain member and every `(kind, ranges)` filter
     /// candidate are measured against the chain as it stands, the smallest LZ
     /// result then competes with the chain-continuing PPMd trial (which reuses
     /// the carried model when the last member was PPMd; the model is cloned so
     /// a losing trial never disturbs it), and only the winner advances the
     /// chain state.
+    ///
     /// A filtered member stays an ordinary chain link: the LZ layer codes the
     /// transformed bytes, so those are what the reader's window holds and what
     /// the next member matches against — the same thing this encoder
     /// remembers (`remember(coded)`), which is why a solid `-mcx` run keeps
     /// its cross-member wins instead of breaking the chain.
+    ///
+    /// No candidate can see another's result (each codes against the same
+    /// pre-member `history`/`levels`, on the carried model or a copy of it), so
+    /// with the `parallel` feature the search runs them all at once — see
+    /// [`Self::search_solid_member_parallel`]. The winner is still picked in
+    /// the serial order afterwards, which keeps the bytes identical.
     pub(crate) fn encode_solid_member_with_filter_candidates(
+        &mut self,
+        input: &[u8],
+        candidates: &[(Rar29FilterKind, Vec<std::ops::Range<usize>>)],
+    ) -> RarResult<Vec<u8>> {
+        #[cfg(feature = "parallel")]
+        if self.solid_search_parallel_worthwhile(input.len()) {
+            return self.search_solid_member_parallel(input, candidates);
+        }
+        self.search_solid_member_serial(input, candidates)
+    }
+
+    /// The serial search: LZ candidates one after another, then the PPMd
+    /// trial. This is the reference order the parallel search reproduces.
+    fn search_solid_member_serial(
         &mut self,
         input: &[u8],
         candidates: &[(Rar29FilterKind, Vec<std::ops::Range<usize>>)],
@@ -1933,17 +2024,49 @@ impl Unpack29Encoder {
         // decision is made against exactly that state.
         let lz = self.best_lz_candidate(input, candidates)?;
         // The PPMd trial continues the carried model when the previous
-        // compressed member was PPMd (`encode_ppmd_member_chain` reads
-        // `last_was_ppmd` for that) and starts a fresh one otherwise. Trying
+        // compressed member was PPMd (`ppmd_chain_packed` reads the carried
+        // flag for that) and starts a fresh one otherwise. Trying
         // on a clone means a loss leaves the model untouched for a later
         // member.
         let saved = self.ppmd.clone();
-        let trial = self.encode_ppmd_member_chain(input);
+        let trial = self.ppmd_trial(input, saved.clone(), Some(lz.packed.len()), None);
+        self.finish_solid_member(input, lz, trial, saved)
+    }
+
+    /// Run the same PPMd trial the chain expects: continue the carried model
+    /// when the last emitted member was PPMd, else start a fresh one. `None`
+    /// means the trial lost — it gave up past `limit`, or the codec errored,
+    /// which the search has always treated as a loss.
+    fn ppmd_trial(
+        &self,
+        input: &[u8],
+        model: Option<Box<crate::codec::legacy::ppmd::PpmdDecoder>>,
+        limit: Option<usize>,
+        live_limit: Option<&std::sync::atomic::AtomicUsize>,
+    ) -> Option<(Vec<u8>, Box<crate::codec::legacy::ppmd::PpmdDecoder>)> {
+        let carrying = model.is_some() && self.last_was_ppmd;
+        match ppmd_chain_packed(input, model, carrying, limit, live_limit) {
+            Ok(Some((packed, model))) => Some((packed, Box::new(model))),
+            _ => None,
+        }
+    }
+
+    /// Commit the winner of a solid-member search. `trial` is the PPMd
+    /// candidate (a losing, failed or abandoned one leaves the chain
+    /// untouched), `saved` the model the chain carried before the search.
+    fn finish_solid_member(
+        &mut self,
+        input: &[u8],
+        lz: LzCandidate,
+        trial: Option<(Vec<u8>, Box<crate::codec::legacy::ppmd::PpmdDecoder>)>,
+        saved: Option<Box<crate::codec::legacy::ppmd::PpmdDecoder>>,
+    ) -> RarResult<Vec<u8>> {
         match trial {
-            Ok(ppmd) if ppmd.len() < lz.packed.len() => {
+            Some((ppmd, model)) if ppmd.len() < lz.packed.len() => {
                 // PPMd member emitted: the decoder's levels never moved past
                 // the pre-member value, and both engines feed the window with
                 // the member's own bytes.
+                self.ppmd = Some(model);
                 self.last_was_ppmd = true;
                 self.remember(input);
                 Ok(ppmd)
@@ -1961,6 +2084,117 @@ impl Unpack29Encoder {
                 Ok(lz.packed)
             }
         }
+    }
+
+    /// Whether the solid search should fan out: the candidates have to be big
+    /// enough to pay for the hand-off, small enough that the pool holds one
+    /// working set per candidate, and there has to be a pool to fan out to.
+    /// Members past [`RAR29_PARALLEL_MEMBER_THRESHOLD`] slice their own blocks
+    /// across the pool instead, and nesting that inside a candidate search
+    /// would only queue slices behind each other.
+    #[cfg(feature = "parallel")]
+    fn solid_search_parallel_worthwhile(&self, len: usize) -> bool {
+        #[cfg(test)]
+        if SOLID_SEARCH_SERIAL.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        (RAR29_SOLID_PARALLEL_MIN_BYTES..=RAR29_SOLID_PARALLEL_MAX_BYTES).contains(&len)
+            && crate::parallel::compression_pool().current_num_threads() > 1
+    }
+
+    /// The parallel search: every LZ candidate and the PPMd trial code at the
+    /// same time, then the results are ranked exactly as the serial search
+    /// ranks them (smallest LZ wins, ties keep the earlier candidate, then
+    /// PPMd wins only if strictly smaller). Bytes are identical to
+    /// [`Self::search_solid_member_serial`] because no candidate can observe
+    /// another: each one takes the pre-member `levels`, borrows the same
+    /// `history` and either clones the carried model or starts a fresh one.
+    #[cfg(feature = "parallel")]
+    fn search_solid_member_parallel(
+        &mut self,
+        input: &[u8],
+        candidates: &[(Rar29FilterKind, Vec<std::ops::Range<usize>>)],
+    ) -> RarResult<Vec<u8>> {
+        let saved = self.ppmd.clone();
+        let saved_for_trial = saved.clone();
+        // The trial codes against the best LZ size known so far: it starts at
+        // the member's own size (an LZ result at least that big is stored,
+        // never emitted) and every finished LZ candidate lowers it.
+        let live_best = std::sync::atomic::AtomicUsize::new(input.len());
+        let lz_slots = candidates.len() + 1; // plain + filters
+        let lz_results = std::sync::Mutex::new(
+            (0..lz_slots)
+                .map(|_| None)
+                .collect::<Vec<Option<RarResult<LzCandidate>>>>(),
+        );
+        let ppmd_result = std::sync::Mutex::new(None);
+        let this: &Self = self;
+        {
+            let lz_results = &lz_results;
+            let ppmd_result = &ppmd_result;
+            let live_best = &live_best;
+            let pool = crate::parallel::compression_pool();
+            pool.scope(|scope| {
+                scope.spawn(move |_| {
+                    let analysed = this.best_lz_candidate(input, &[]);
+                    if let Ok(candidate) = &analysed {
+                        live_best.fetch_min(
+                            candidate.packed.len(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    *lz_results.lock().unwrap().get_mut(0).expect("plain slot") = Some(analysed);
+                });
+                for (index, (kind, ranges)) in candidates.iter().enumerate() {
+                    // A candidate with no ranges is not one: the serial search
+                    // skips those before measuring (a filter that found nothing
+                    // to rewrite would only re-code the plain member).
+                    if ranges.is_empty() {
+                        continue;
+                    }
+                    let slot = index + 1;
+                    scope.spawn(move |_| {
+                        let analysed = this.filtered_lz_candidate(input, *kind, ranges);
+                        if let Ok(candidate) = &analysed {
+                            live_best.fetch_min(
+                                candidate.packed.len(),
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        *lz_results
+                            .lock()
+                            .unwrap()
+                            .get_mut(slot)
+                            .expect("filter slot") = Some(analysed);
+                    });
+                }
+                scope.spawn(move |_| {
+                    let trial = this.ppmd_trial(input, saved_for_trial, None, Some(live_best));
+                    *ppmd_result.lock().unwrap() = Some(trial);
+                });
+            });
+        }
+        // Plain first, then the filters in the order `best_lz_candidate` walks
+        // them: a tie keeps the earlier candidate.
+        let mut best: Option<LzCandidate> = None;
+        let collected = std::mem::take(&mut *lz_results.lock().unwrap());
+        for (index, slot) in collected.into_iter().enumerate() {
+            let Some(slot) = slot else { continue };
+            match slot {
+                // A filter these bytes cannot carry is not a candidate; the
+                // plain result stands, the same tolerance the serial search
+                // has.
+                Err(_) if index > 0 => continue,
+                Err(err) => return Err(err),
+                Ok(candidate) => match &best {
+                    Some(current) if candidate.packed.len() >= current.packed.len() => {}
+                    _ => best = Some(candidate),
+                },
+            }
+        }
+        let lz = best.expect("plain candidate");
+        let trial = std::mem::take(&mut *ppmd_result.lock().unwrap()).expect("PPMd trial ran");
+        self.finish_solid_member(input, lz, trial, saved)
     }
 
     /// Measure the plain member and every filter candidate against the chain
@@ -2035,8 +2269,8 @@ impl Unpack29Encoder {
     }
 
     /// Code one member as a PPMd block (m4/m5 text path). Always starts a
-    /// fresh model; [`Self::encode_ppmd_member_chain`] is the solid-run
-    /// variant that continues the carried model.
+    /// fresh model; [`ppmd_chain_packed`] is the solid-run variant that
+    /// continues the carried model.
     pub fn encode_ppmd_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
         encode_ppmd_member_packed(input, true)
     }
@@ -2733,6 +2967,111 @@ mod tests {
                     .decode_member(packed, expected.len() as u64)
                     .unwrap(),
                 *expected
+            );
+        }
+    }
+
+    /// The parallel solid search must reproduce the serial one byte for byte.
+    /// No candidate can observe another (each codes against the same
+    /// pre-member `history`/`levels` and either clones the carried model or
+    /// starts a fresh one), so fanning out may only change *when* the work
+    /// happens — never what wins or how it is written.
+    ///
+    /// Members are past [`RAR29_SOLID_PARALLEL_MIN_BYTES`], and each one is
+    /// shaped to make a different candidate win: text (PPMd), x86 with the
+    /// `-mc` E8/E8E9 filter (LZ), and incompressible bytes (STORE, where the
+    /// PPMd trial runs past its cap and gives up).
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn solid_search_parallel_matches_serial() {
+        if crate::parallel::compression_pool().current_num_threads() <= 1 {
+            return; // no pool to fan out to: both runs are serial anyway
+        }
+        const VOCAB: [&str; 12] = [
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+            "lambda", "mu",
+        ];
+        fn word_text(seed: u64, words: usize) -> Vec<u8> {
+            let mut state = seed | 1;
+            let mut text = String::with_capacity(words * 7);
+            for _ in 0..words {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                text.push_str(VOCAB[(state >> 33) as usize % VOCAB.len()]);
+                text.push(' ');
+            }
+            text.into_bytes()
+        }
+        let text = word_text(0x0BAD_F00D_1234_5678, 24_000); // ~190 KiB
+        let other = word_text(0xFEED_FACE_9E37_79B9, 22_000); // ~170 KiB
+        let x86 = x86_shaped(150_000);
+        let random: Vec<u8> = {
+            let mut state = 0xDEAD_BEEF_CAFE_F00Du64 | 1;
+            (0..140_000)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state as u8
+                })
+                .collect()
+        };
+        let candidates = [(
+            Rar29FilterKind::E8E9,
+            std::iter::once(0..x86.len()).collect::<Vec<_>>(),
+        )];
+        let level = options_for_level(5);
+        // Each member with the candidates it searches (an empty list leaves the
+        // plain member as the only LZ candidate).
+        type Search<'a> = &'a [(Rar29FilterKind, Vec<std::ops::Range<usize>>)];
+        let members: [(&[u8], Search<'_>); 4] = [
+            (&text, &[]),
+            (&x86, &candidates),
+            (&other, &[]),
+            (&random, &[]),
+        ];
+        let run = |serial: bool| {
+            set_solid_search_serial(serial);
+            let mut encoder = Unpack29Encoder::with_options(level);
+            let packed: Vec<Vec<u8>> = members
+                .iter()
+                .map(|(data, search)| {
+                    encoder
+                        .encode_solid_member_with_filter_candidates(data, search)
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(
+                encoder.solid_search_parallel_worthwhile(members[0].0.len()),
+                !serial,
+                "the run must really take the path it was asked for"
+            );
+            (packed, encoder.ppmd.is_some(), encoder.last_was_ppmd)
+        };
+        let (serial_packed, serial_model, serial_gate) = run(true);
+        let (parallel_packed, parallel_model, parallel_gate) = run(false);
+        set_solid_search_serial(false);
+
+        assert_eq!(
+            parallel_packed.iter().map(Vec::len).collect::<Vec<_>>(),
+            serial_packed.iter().map(Vec::len).collect::<Vec<_>>(),
+            "the two searches must pick the same winner for every member"
+        );
+        for (index, (serial, parallel)) in serial_packed.iter().zip(&parallel_packed).enumerate() {
+            assert_eq!(
+                fnv(parallel),
+                fnv(serial),
+                "member {index} must be byte-identical"
+            );
+        }
+        assert_eq!((parallel_model, parallel_gate), (serial_model, serial_gate));
+
+        let mut decoder = crate::codec::legacy::rar29::Rar29Decoder::new();
+        for (packed, (data, _)) in parallel_packed.iter().zip(&members) {
+            assert_eq!(
+                decoder.decode_member(packed, data.len() as u64).unwrap(),
+                *data
             );
         }
     }
