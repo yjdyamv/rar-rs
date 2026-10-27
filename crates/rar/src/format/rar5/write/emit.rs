@@ -24,14 +24,29 @@ pub(super) enum SplitPhase {
 }
 
 /// Bytes a volume must keep free once it holds `prefix_len` bytes: the
-/// end-of-archive block plus this volume's inline recovery record (0 without
-/// `-rr`).
+/// end-of-archive block, this volume's inline recovery record (0 without
+/// `-rr`) and this volume's quick-open record (0 without `-qo`, single-volume
+/// archives included).
 ///
 /// A per-volume record protects the bytes written before it, so WinRAR keeps
 /// it inside `volume_size` too — a volume carrying one holds slightly less
 /// payload than a volume that does not.
-pub(super) fn volume_tail_reserve(cx: &dyn Engine, prefix_len: u64) -> u64 {
-    cx.on_disk_header_len(8) + cx.recovery_volume_reserve(prefix_len)
+///
+/// `pending_header` is the plain length of the member header the caller is
+/// about to emit: the quick-open catalog caches every header written in the
+/// volume, so the one still to come is part of the reservation.
+pub(super) fn volume_tail_reserve(
+    cx: &dyn Engine,
+    prefix_len: u64,
+    pending_header: Option<u64>,
+) -> u64 {
+    // The QO record sits *before* the recovery record, so the parity payload
+    // protects this volume's catalog too: size the recovery reserve over the
+    // prefix the catalog leaves behind, or the record grows by a byte or two
+    // past what was reserved and the volume overflows.
+    let quick_open = cx.quick_open_volume_reserve(pending_header);
+    let recovery = cx.recovery_volume_reserve(prefix_len.saturating_add(quick_open));
+    cx.on_disk_header_len(8) + recovery + quick_open
 }
 
 /// Largest data budget that fits `remaining` volume bytes behind a
@@ -42,9 +57,16 @@ pub(super) fn volume_tail_reserve(cx: &dyn Engine, prefix_len: u64) -> u64 {
 /// the largest one lands on the exact fill WinRAR uses (a plain
 /// "shrink until it fits" walk would stop at the first feasible value and
 /// leave the recovered bytes of a smaller reserve unused).
-fn data_budget(cx: &dyn Engine, used: u64, hdr: u64, remaining: u64) -> u64 {
-    let fits =
-        |budget: u64| hdr + budget + volume_tail_reserve(cx, used + hdr + budget) <= remaining;
+fn data_budget(
+    cx: &dyn Engine,
+    used: u64,
+    hdr: u64,
+    remaining: u64,
+    pending_header: Option<u64>,
+) -> u64 {
+    let fits = |budget: u64| {
+        hdr + budget + volume_tail_reserve(cx, used + hdr + budget, pending_header) <= remaining
+    };
     let mut lo = 0u64;
     let mut hi = remaining.saturating_sub(hdr);
     if fits(hi) {
@@ -113,12 +135,18 @@ pub(crate) fn write_file_entry(
     let used = cx.bytes_written();
     // The recovery record protects this member too, so the tail reserve is
     // sized from the prefix the member would leave behind.
-    let total_needed =
-        hdr_on_disk + total_packed + volume_tail_reserve(cx, used + hdr_on_disk + total_packed);
+    let total_needed = hdr_on_disk
+        + total_packed
+        + volume_tail_reserve(
+            cx,
+            used + hdr_on_disk + total_packed,
+            Some(hdr_bytes.len() as u64),
+        );
     let remaining = volume_size.saturating_sub(used);
 
     if total_needed <= remaining {
         // Fits entirely
+        cx.record_quick_open_entry(&hdr_bytes)?;
         cx.write_block_header(&hdr_bytes)?;
         let stream = cx.stream_mut()?;
         stream.write_all(packed_data)?;
@@ -208,18 +236,20 @@ pub(super) fn write_split_member(
     if total_packed == 0 {
         let hdr_bytes = fh_base.to_bytes();
         let hdr_size = cx.on_disk_header_len(hdr_bytes.len() as u64);
+        let pending = Some(hdr_bytes.len() as u64);
         let used = cx.bytes_written();
         let remaining = volume_size.saturating_sub(used);
-        if remaining < hdr_size + volume_tail_reserve(cx, used + hdr_size) {
+        if remaining < hdr_size + volume_tail_reserve(cx, used + hdr_size, pending) {
             cx.start_next_volume()?;
             let used = cx.bytes_written();
             let remaining = volume_size.saturating_sub(used);
-            if remaining < hdr_size + volume_tail_reserve(cx, used + hdr_size) {
+            if remaining < hdr_size + volume_tail_reserve(cx, used + hdr_size, pending) {
                 return Err(RarError::invalid_option(format!(
                     "volume size {volume_size} is too small for a member header ({hdr_size} bytes) plus the end block"
                 )));
             }
         }
+        cx.record_quick_open_entry(&hdr_bytes)?;
         cx.write_block_header(&hdr_bytes)?;
         let data_offset = cx.stream_mut()?.stream_position()?;
         let volume_index = cx.current_volume_index();
@@ -323,20 +353,21 @@ pub(super) fn write_split_member(
         // are no longer than the estimate's (`packed_size` is at most
         // `remaining_vol`, the continue-to flag is cleared), so this
         // length bounds the header actually written for a final chunk.
-        let last_hdr_size = cx.on_disk_header_len(
-            FileHeader {
-                extra_data: chunk_extra(true, is_first),
-                ..chunk_fh
-            }
-            .to_bytes()
-            .len() as u64,
-        );
+        let last_hdr_plain = FileHeader {
+            extra_data: chunk_extra(true, is_first),
+            ..chunk_fh
+        }
+        .to_bytes();
+        let last_hdr_size = cx.on_disk_header_len(last_hdr_plain.len() as u64);
 
         // The recovery record protects this chunk, so both budgets are
         // settled against the tail reserve the chunk's own prefix implies.
+        // That reserve also holds the quick-open record of this volume, whose
+        // catalog lists every header written here — this chunk's included.
+        let pending = Some(last_hdr_plain.len() as u64);
         let used = cx.bytes_written();
-        let bytes_for_data = data_budget(cx, used, hdr_size, remaining_vol);
-        let bytes_for_last = data_budget(cx, used, last_hdr_size, remaining_vol);
+        let bytes_for_data = data_budget(cx, used, hdr_size, remaining_vol, pending);
+        let bytes_for_last = data_budget(cx, used, last_hdr_size, remaining_vol, pending);
         let remaining_member = total_packed - offset;
 
         // Middle chunks keep the mid estimate's budget; a chunk that
@@ -404,6 +435,7 @@ pub(super) fn write_split_member(
 
         let final_hdr = final_fh.to_bytes();
         let final_hdr_disk = cx.on_disk_header_len(final_hdr.len() as u64);
+        cx.record_quick_open_entry(&final_hdr)?;
         cx.write_block_header(&final_hdr)?;
         let data_offset = phase(cx, SplitPhase::Write, offset, chunk_size, is_last)?;
         cx.add_bytes_written(final_hdr_disk + chunk_size);

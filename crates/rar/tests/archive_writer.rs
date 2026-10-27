@@ -77,9 +77,10 @@ fn validated_value_types_enforce_boundaries_and_mappings() {
 fn writer_options_validate_combinations_before_staging_and_redact_passwords() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid.rar");
-    // Quick-open still cannot be combined with data volumes; the check runs
-    // before anything is staged (a recovery record, by contrast, is now legal
-    // alongside volumes and writes one record per volume).
+    // Quick-open cannot ride along with header encryption (WinRAR writes no
+    // QO record there either); the check runs before anything is staged. A
+    // recovery record, by contrast, is legal alongside volumes and writes one
+    // record per volume, and so is quick-open (one catalog per volume).
     let options = WriterOptions::new()
         .password("do-not-print")
         .encrypt_headers(true)
@@ -362,10 +363,11 @@ fn typed_append_roundtrips_and_legacy_drop_still_commits() {
 #[test]
 fn typed_options_reject_combos_the_legacy_layer_would_silently_downgrade() {
     let dir = tempfile::tempdir().unwrap();
-    // The legacy writer silently skips quick-open for header-encrypted and
-    // multi-volume archives, and ignores any dictionary size on RAR4. The
-    // typed builder rejects those combinations up front instead of writing
-    // an archive that did not honor the requested options.
+    // The legacy writer silently skips quick-open for header-encrypted
+    // archives and ignores any dictionary size on RAR4. The typed builder
+    // rejects those combinations up front instead of writing an archive that
+    // did not honor the requested options. (Quick-open on multi-volume sets is
+    // no longer rejected: every volume carries its own catalog.)
     for (name, options) in [
         (
             "qo-encrypted.rar",
@@ -373,10 +375,6 @@ fn typed_options_reject_combos_the_legacy_layer_would_silently_downgrade() {
                 .quick_open(true)
                 .encrypt_headers(true)
                 .password("pw"),
-        ),
-        (
-            "qo-volumes.rar",
-            WriterOptions::new().quick_open(true).volume_size(32 * 1024),
         ),
         (
             "rar4-dictionary.rar",

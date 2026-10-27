@@ -577,10 +577,13 @@ pub(crate) fn add_file_rar5(
 
 /// Roll to a fresh volume until `added` further bytes fit; `added` is what the
 /// operation will append to the volume (its header, plus any payload). The
-/// end-of-archive block and this volume's inline recovery record are reserved
-/// on top, the latter sized from the prefix it protects. No-op for
-/// single-volume archives, and a volume too small for one header errors
-/// instead of rolling forever (matching the file-member splitter).
+/// end-of-archive block, this volume's inline recovery record and its
+/// quick-open record are reserved on top, the recovery record sized from the
+/// prefix it protects. `added` also bounds the quick-open entry the header will
+/// add to this volume's catalog (the entry caches the header, never more than
+/// the header plus its payload). No-op for single-volume archives, and a volume
+/// too small for one header errors instead of rolling forever (matching the
+/// file-member splitter).
 pub(super) fn ensure_rar5_volume_space(cx: &mut dyn Engine, added: u64) -> RarResult<()> {
     let Some(volume_size) = cx.write_ctx().output.volume_size else {
         return Ok(());
@@ -588,7 +591,7 @@ pub(super) fn ensure_rar5_volume_space(cx: &mut dyn Engine, added: u64) -> RarRe
     let mut rolled = false;
     loop {
         let used = cx.bytes_written();
-        let needed = super::emit::volume_tail_reserve(cx, used + added) + added;
+        let needed = super::emit::volume_tail_reserve(cx, used + added, Some(added)) + added;
         if volume_size.saturating_sub(used) >= needed {
             return Ok(());
         }

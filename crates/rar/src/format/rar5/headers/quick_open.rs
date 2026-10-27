@@ -51,6 +51,22 @@ pub(crate) fn encode_entry(rel: u64, header: &[u8]) -> Vec<u8> {
     entry
 }
 
+/// Upper bound on the bytes [`encode_entry`] spends on one cached header of
+/// `header_len` bytes inside a volume that is at most `volume_size` bytes long.
+///
+/// The writer has to reserve room for the per-volume quick-open record
+/// *before* it knows where the volume will end, and the entry's distance back
+/// to the header is measured from that end. The widest distance the volume
+/// admits therefore bounds the entry, which keeps the reservation a pure
+/// function of the header sizes.
+pub(crate) fn entry_len_upper(volume_size: u64, header_len: u64) -> u64 {
+    let body = 1
+        + crate::vint::encoded_size(volume_size) as u64
+        + crate::vint::encoded_size(header_len) as u64
+        + header_len;
+    4 + crate::vint::encoded_size(body) as u64 + body
+}
+
 /// Decode a quick-open payload into `(relative offset, header block bytes)`
 /// pairs. Every entry CRC is verified and every declared size must fit the
 /// host address space; structural violations are errors (the caller falls

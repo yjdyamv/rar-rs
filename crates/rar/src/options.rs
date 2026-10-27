@@ -183,8 +183,9 @@ pub(crate) struct CreateOptions {
     /// ignore this.
     pub solid_reset: SolidReset,
     /// Add a RAR5 quick-open ("QO") service record containing a copy of
-    /// every file header. Only effective for single-volume archives
-    /// without header encryption.
+    /// every file header. A volume set carries one record per volume (each
+    /// caching that volume's own copies of the headers), the way WinRAR
+    /// does. Without header encryption only.
     pub quick_open: bool,
     /// Expected final archive size, used to reserve the locator's QO/RR
     /// offset fields at the width WinRAR would use for an archive that size
@@ -410,11 +411,6 @@ pub(crate) fn validate_combinations(rules: CombinationRules<'_>) -> RarResult<()
     if rules.quick_open && rules.encrypt_headers {
         return Err(RarError::invalid_option(
             "quick-open cannot be combined with header encryption",
-        ));
-    }
-    if rules.quick_open && rules.volume_size.is_some() {
-        return Err(RarError::invalid_option(
-            "quick-open cannot be combined with data volumes",
         ));
     }
     for (name, percent) in [

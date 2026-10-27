@@ -1,4 +1,5 @@
 use super::*;
+use crate::format::rar5::{BLOCK_TYPE_FILE_HEADER, RAR5_SIGNATURE};
 use crate::fs::safe_path::sanitize_archive_path;
 
 fn assert_invalid_option(result: RarResult<RarArchive>) {
@@ -58,11 +59,6 @@ fn create_options_reject_the_same_combinations_as_the_typed_builder() {
             quick_open: true,
             encrypt_headers: true,
             password: Some("pw".into()),
-            ..Default::default()
-        },
-        crate::options::CreateOptions {
-            quick_open: true,
-            volume_size: Some(32 * 1024),
             ..Default::default()
         },
         crate::options::CreateOptions {
@@ -267,6 +263,133 @@ fn encrypted_multiple_files() {
         );
     }
     std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn quick_open_volumes_cache_each_volume_headers_in_that_volume() {
+    // WinRAR's `-qo` + `-v` layout: every volume ends with its own QO record
+    // whose entries measure their distance back to the *local* copy of the
+    // file header, so the catalog never reaches across a volume boundary.
+    // Each entry is checked to land exactly on that header.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("qo.part1.rar");
+    let data = b"quick open volume payload ".repeat(10_000); // ~260 KiB
+    {
+        let mut ar = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                quick_open: true,
+                volume_size: Some(32 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ar.add_bytes("big.bin", &data, 0).unwrap();
+        ar.close().unwrap();
+    }
+
+    let volumes = discover_volumes(&base);
+    assert!(volumes.len() > 3, "expected a multi-volume set");
+    for volume in &volumes {
+        let bytes = std::fs::read(volume).unwrap();
+        assert!(
+            bytes.len() as u64 <= 32 * 1024,
+            "{} exceeds the volume size",
+            volume.display()
+        );
+        let mut cursor = std::io::Cursor::new(&bytes);
+        cursor
+            .seek(std::io::SeekFrom::Start(RAR5_SIGNATURE.len() as u64))
+            .unwrap();
+        let main = crate::format::rar5::headers::read_block(&mut cursor, None)
+            .unwrap()
+            .expect("main header");
+        let ah = crate::format::rar5::headers::ArchiveHeader::from_raw(&main.raw).unwrap();
+        let qo_rel = crate::format::rar5::headers::locator_quick_open_offset(&ah.extra_data)
+            .unwrap_or_else(|| panic!("{} has no quick-open locator", volume.display()));
+        let qo_abs = RAR5_SIGNATURE.len() as u64 + qo_rel;
+        cursor.seek(std::io::SeekFrom::Start(qo_abs)).unwrap();
+        let qo = crate::format::rar5::headers::read_block(&mut cursor, None)
+            .unwrap()
+            .expect("QO record");
+        assert_eq!(
+            crate::format::rar5::headers::parse_service_block_name(&qo.raw.header_data)
+                .unwrap()
+                .as_deref(),
+            Some("QO")
+        );
+        let payload = &bytes[qo.data_offset as usize..(qo.data_offset + qo.raw.data_size) as usize];
+        let entries =
+            crate::format::rar5::headers::quick_open::decode_payload(payload, 64).unwrap();
+        assert!(
+            !entries.is_empty(),
+            "{} has an empty catalog",
+            volume.display()
+        );
+        for (rel, header) in entries {
+            let start = usize::try_from(qo_abs - rel).expect("entry points inside the volume");
+            assert_eq!(
+                &bytes[start..start + header.len()],
+                header.as_slice(),
+                "{}: catalog entry does not point at its file header",
+                volume.display()
+            );
+            let mut probe = std::io::Cursor::new(&bytes[start..]);
+            let looked_up = crate::format::rar5::headers::read_block(&mut probe, None)
+                .unwrap()
+                .expect("cached header block");
+            assert_eq!(looked_up.block_type, BLOCK_TYPE_FILE_HEADER);
+        }
+    }
+
+    // The set still reads back whole.
+    let mut ar = RarArchive::open(&volumes[0]).unwrap();
+    assert_eq!(
+        ar.read_with_options("big.bin", Default::default()).unwrap(),
+        data
+    );
+}
+
+#[test]
+fn quick_open_and_recovery_records_share_the_volume_tail() {
+    // The QO record precedes the inline recovery record, so the parity payload
+    // protects the catalog too. Reserving the recovery record over the prefix
+    // *without* the catalog under-budgets by a byte or two and the volume
+    // ends up past `volume_size`.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("qorr.part1.rar");
+    let data = b"quick open recovery payload ".repeat(7_000); // ~190 KiB
+    {
+        let mut ar = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                quick_open: true,
+                volume_size: Some(32 * 1024),
+                recovery_percent: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ar.add_bytes("big.bin", &data, 0).unwrap();
+        ar.close().unwrap();
+    }
+
+    let volumes = discover_volumes(&base);
+    assert!(volumes.len() > 3, "expected a multi-volume set");
+    for volume in &volumes {
+        let len = std::fs::metadata(volume).unwrap().len();
+        assert!(
+            len <= 32 * 1024,
+            "{} is {len} bytes, past the volume size",
+            volume.display()
+        );
+    }
+
+    let mut ar = RarArchive::open(&volumes[0]).unwrap();
+    assert_eq!(
+        ar.read_with_options("big.bin", Default::default()).unwrap(),
+        data
+    );
 }
 
 #[test]

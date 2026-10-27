@@ -105,6 +105,10 @@ impl RarArchive {
         // that writes the volume's own inline recovery record, which protects
         // everything written so far (its patched main header included).
         self.finish_volume(true)?;
+        // Each volume carries its own quick-open catalog, and every entry's
+        // distance is measured back from *that* volume's record, so the
+        // catalog restarts empty here (WinRAR's `-qo` + `-v` layout).
+        self.write_ctx_mut().locator.quick_open_entries.clear();
         // Close current volume
         self.stream = None;
         self.write_ctx_mut().output.current_volume += 1;

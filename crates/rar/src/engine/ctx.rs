@@ -204,6 +204,12 @@ pub(crate) trait VolumeOps {
     /// requested). Geometry only, so the family writers reserve room for the
     /// record on top of the end block and keep the volume within `volume_size`.
     fn recovery_volume_reserve(&self, prefix_len: u64) -> u64;
+    /// Bytes the per-volume quick-open record will occupy at the tail of the
+    /// volume being written, one entry per member header cached in that volume
+    /// (`pending_header`: the header about to be emitted, which the budget is
+    /// being settled for). `0` when quick-open is off or the archive is
+    /// single-volume, so the family writers can add it unconditionally.
+    fn quick_open_volume_reserve(&self, pending_header: Option<u64>) -> u64;
     /// Account `bytes` written to the current volume.
     fn add_bytes_written(&mut self, bytes: u64);
     /// Zero-based index of the volume currently being written.

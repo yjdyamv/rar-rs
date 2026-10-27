@@ -294,6 +294,43 @@ impl RarArchive {
         self.on_disk_header_len(hdr.len() as u64) + payload
     }
 
+    /// Bytes the per-volume quick-open record will occupy at the tail of the
+    /// volume being written: the `QO` service header plus one entry per member
+    /// header cached *in this volume*, including the `pending_header`-byte
+    /// header about to be emitted. `0` when quick-open is off or the archive is
+    /// single-volume (there the record is written once, at close, and no volume
+    /// budget has to hold it).
+    ///
+    /// WinRAR writes one such record per volume, and each entry's distance is
+    /// measured from that volume's record back to that volume's copy of the
+    /// header, so the catalog never reaches across a volume boundary —
+    /// `start_next_volume` empties it for exactly that reason.
+    pub(super) fn quick_open_volume_reserve(&self, pending_header: Option<u64>) -> u64 {
+        if !self.write_ctx().locator.quick_open {
+            return 0;
+        }
+        let Some(volume_size) = self.write_ctx().output.volume_size else {
+            return 0;
+        };
+        let mut payload = 0u64;
+        for (_, header) in &self.write_ctx().locator.quick_open_entries {
+            payload += crate::format::rar5::headers::quick_open::entry_len_upper(
+                volume_size,
+                header.len() as u64,
+            );
+        }
+        if let Some(len) = pending_header {
+            payload += crate::format::rar5::headers::quick_open::entry_len_upper(volume_size, len);
+        }
+        let hdr = crate::format::rar5::headers::build_service_block(
+            "QO",
+            &[],
+            payload,
+            crate::format::rar5::BLOCK_FLAG_SKIP_IF_UNKNOWN,
+        );
+        self.on_disk_header_len(hdr.len() as u64) + payload
+    }
+
     /// Move the staged write files over their final paths. Called on
     /// successful close only; on failure the staged files are left in
     /// place for [`Drop`] to clean up.
@@ -659,6 +696,7 @@ impl RarArchive {
     /// the RR offset field that [`Self::finish_volume`] patches at close.
     pub(super) fn write_archive_header_vol(&mut self, volume_number: Option<u64>) -> RarResult<()> {
         let recovery = self.recovery_percent.is_some();
+        let quick_open = self.write_ctx().locator.quick_open;
         let mut arch_flags = ARCHIVE_FLAG_VOLUME;
         if recovery {
             arch_flags |= ARCHIVE_FLAG_RECOVERY;
@@ -666,7 +704,7 @@ impl RarArchive {
         let (hdr, qo_field, rr_field) = crate::format::rar5::headers::locator::build_main_header(
             arch_flags,
             &[],
-            false,
+            quick_open,
             recovery,
             volume_number,
             self.locator_offset_width(),

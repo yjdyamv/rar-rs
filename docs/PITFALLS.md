@@ -62,6 +62,25 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **`-qo` 默认只给大文件建条目**（阈值随版本变），`-qo-` 关、`-qo+`
   强制全建。`WriterOptions::quick_open(true)` 对应 `-qo+`，与官方对拍时必须让
   官方也带 `-qo+`，否则官方在几十 KB 的归档上根本不写 QO 记录。
+- **`-qo` + 分卷：每卷各带一份目录**。官方 7.23 跑 `-ma5 -m0 -v32k -qo+`
+  时**每卷各写一个 QO 服务块**（紧贴 ENDARC 之前，单成员时头 14 字节 +
+  载荷 50 字节），并在**每卷主头**的 extra 区加一条 `LOCATOR`
+  记录；`-qo-` 两样都没有。条目布局与单卷完全一致，`rel`
+  仍是「从本卷 QO 块起点回退到本卷那份分片头」的距离（实测 part1 =
+  32683−25 = 32658，part2 = 32683−26 = 32657），即分卷里每个分片头各自
+  生成一条条目，而不是全档共用一个绝对偏移。**我们照这个布局写**：
+  `record_quick_open_entry` 在每卷写头时就地记下该头相对本卷 QO 位置的
+  距离，卷尾 `write_quick_open_record` 打包；跨卷成员在下一卷开新头的
+  情形（同一卷里两个分片头）自然得到两条条目。预算上，卷尾要把
+  `ENDARC` + QO 块的最大长度一起算进 `quick_open_volume_reserve`，
+  并在 QO 放不下时整卷不写 QO（宁可少一份目录也不溢出）。契约
+  `quick_open_volumes_cache_each_volume_headers_in_that_volume`、
+  `official_unrar_validates_quick_open_volumes`。官方每卷在 ENDARC 后还留
+  8 字节零尾（与 `-rr` + `-v` 同一类松弛），我们填满不留，两种都能被
+  官方 `t`/`x` 接受。
+- **`quick_open` + `volume_size` 不再互斥**：`validate_combinations` 里原先
+  的拒绝项已删除，`header_encrypted` + `quick_open` 仍然互斥（`-hp`
+  没有主头可放 locator）。
 - **RAR5 时间载体二选一**：头内 4 字节 mtime（`FILE_FLAG_TIME_UNIX`）**或**
   FILE_TIME extra 记录，绝不同时写；有记录就清头内标志（redirect
   与多卷分片头同规则）。契约

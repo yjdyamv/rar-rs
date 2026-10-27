@@ -316,6 +316,68 @@ fn official_unrar_validates_header_encrypted_volumes_with_wide_headers() {
     );
 }
 
+/// Every volume of a `-qo` set carries its own quick-open catalog, so
+/// official UnRAR has to find the local copy of each file header and still
+/// reassemble the member byte-identically.
+#[test]
+fn official_unrar_validates_quick_open_volumes() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(), // skipped unless the interop script sets it
+    };
+    let dir = make_temp_dir();
+    let content: Vec<u8> = (0..900_000u32).map(|i| (i % 251) as u8).collect();
+    let src = dir.path().join("qo.bin");
+    std::fs::write(&src, &content).unwrap();
+
+    let path = dir.path().join("qo-vols.rar");
+    let mut writer = rar_rs::ArchiveWriter::create_with(
+        &path,
+        rar_rs::WriterOptions::default()
+            .quick_open(true)
+            .volume_size(64 * 1024),
+    )
+    .unwrap();
+    writer
+        .add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::STORE),
+        )
+        .unwrap();
+    let report = writer.finish().unwrap();
+    assert!(
+        report.volume_paths().len() > 3,
+        "expected a volume set, got {}",
+        report.volume_paths().len()
+    );
+    let first = report.volume_paths()[0].as_os_str().to_owned();
+
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg("-idq")
+        .arg(&first)
+        .status()
+        .expect("spawn unrar");
+    assert!(status.success(), "unrar t rejected the -qo volume set");
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(&unrar)
+        .arg("x")
+        .arg("-idq")
+        .arg("-o+")
+        .arg(&first)
+        .arg(out.as_os_str())
+        .status()
+        .expect("spawn unrar");
+    assert!(status.success(), "unrar x failed on the -qo volume set");
+    assert_eq!(
+        std::fs::read(out.join("qo.bin")).unwrap(),
+        content,
+        "UnRAR must reassemble the -qo volume set byte-identically"
+    );
+}
+
 /// A solid RAR4 m5 archive whose members are all coded PPMd carries one model
 /// across the chain: after the first member the encoder emits 0x87 continuing
 /// headers instead of fresh 0xA7 models. Official UnRAR has to rebuild the

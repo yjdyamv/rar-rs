@@ -108,6 +108,8 @@ version`，以及 `crates/rar-napi/package.json` 的
   `push_entry` / `clear_catalog` / `replace_catalog`（catalog 只能经引擎增删，
   顺序与 payload-offset 身份不被绕过）、`bytes_written` / `add_bytes_written` /
   `current_volume_index`（卷字节记账单一入口）、`record_quick_open_entry`、
+  `recovery_volume_reserve` / `quick_open_volume_reserve`（卷尾记录的几何预算法，
+  族写入器把它们当不变量直接用）、
   `begin_solid_member`（RAR5 链状态播种 + 成员帧开始）。`Parts`
   一次借出同一结构体的不相交字段（`entries` + `stream` + `read` + `password` +
   `cancel`），保留转换前的借用形状。

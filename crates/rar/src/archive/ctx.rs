@@ -182,6 +182,10 @@ impl VolumeOps for RarArchive {
         RarArchive::recovery_volume_reserve(self, prefix_len)
     }
 
+    fn quick_open_volume_reserve(&self, pending_header: Option<u64>) -> u64 {
+        RarArchive::quick_open_volume_reserve(self, pending_header)
+    }
+
     fn add_bytes_written(&mut self, bytes: u64) {
         let ctx = self.write_ctx_mut();
         ctx.output.bytes_written = ctx.output.bytes_written.saturating_add(bytes);
