@@ -406,12 +406,22 @@ fn mismatches(ours: &[u8], theirs: &[u8], ignore: &[&str]) -> Vec<String> {
 // raw `st_mode`. Our RAR4 writer is deliberately Windows-styled on every host
 // (`platform::rar4_file_attributes`), so against an official Linux build the
 // two sides cannot agree on those fields — nor on the file-header checksum,
-// which covers them. Everything else, and the whole payload, still has to
-// match exactly. RAR5 is written per platform on both sides and needs no such
-// allowance.
+// which covers them. A volume set then echoes both once more: each volume's
+// 20-byte ENDARC carries a CRC-32 over the volume's prefix, host bytes and
+// header checksums included, plus the header checksum over that field. So the
+// allowance has to follow the *derived* fields as well ([`host_derived_spans`]).
+// Everything else, and the whole payload, still has to match exactly. RAR5 is
+// written per platform on both sides and needs no such allowance.
 
 /// The RAR4 file-header fields that follow the writer's host.
 const HOST_STYLED_FIELDS: &[&str] = &["header_crc", "host_os", "attr"];
+
+/// An absolute `(offset, length)` byte run inside an archive.
+type Span = (usize, usize);
+
+/// `HEAD_SIZE` of the volume-set ENDARC (the single-volume one is 7 bytes and
+/// carries no prefix CRC).
+const ENDARC_VOLUME_HEADER_SIZE: usize = 20;
 
 /// Does a comparison against an official archive have to allow for the host
 /// platform to differ? Only RAR4 does.
@@ -436,10 +446,53 @@ fn host_styled_fields(archive: &[u8]) -> &'static [&'static str] {
 /// which the strict walker refuses. Anything unparsable ends the scan — the
 /// spans are then compared between the two sides, so a short scan cannot make a
 /// difference disappear.
-fn host_styled_spans(archive: &[u8]) -> Vec<(usize, usize)> {
+fn host_styled_spans(archive: &[u8]) -> Vec<Span> {
     let mut spans = Vec::new();
+    rar4_blocks(archive, |start, head_type, _size| {
+        if head_type == 0x74 {
+            // `host_os` is byte 15 of a RAR4 file header, `attr` the word at
+            // 28 (RAR 2.x uses the same layout), and the header checksum over
+            // both opens the block.
+            spans.push((start, 2));
+            spans.push((start + 15, 1));
+            spans.push((start + 28, 4));
+        }
+    });
+    spans
+}
+
+/// Absolute `(offset, length)` of every byte run that only *echoes* the
+/// host-styled ones: the prefix CRC-32 of a volume-set ENDARC and the header
+/// checksum over it.
+///
+/// The CRC covers the volume prefix, so it inherits the writer's host through
+/// the file headers inside that prefix. Masking the sources alone would leave
+/// a cross-host volume one field apart (which is exactly how the Unix CI first
+/// reported it), so the mask has to reach the echo too — but only when the
+/// sources really do differ, so a same-host comparison keeps checking it (see
+/// [`host_mask_spans`]).
+fn host_derived_spans(archive: &[u8]) -> Vec<Span> {
+    let mut spans = Vec::new();
+    rar4_blocks(archive, |start, head_type, size| {
+        if head_type == 0x7b && size >= ENDARC_VOLUME_HEADER_SIZE {
+            spans.push((start, 2));
+            spans.push((start + 7, 4));
+        }
+    });
+    spans
+}
+
+/// Call `f(start, head_type, head_size)` for every RAR4 block of the archive,
+/// skipping each block's data area.
+///
+/// A scan rather than [`walk`], because this has to work on the non-final
+/// volumes of a set: those are padded with zeros past the end block, which the
+/// strict walker refuses. Anything unparsable ends the scan — the spans are
+/// then compared between the two sides, so a short scan cannot make a
+/// difference disappear.
+fn rar4_blocks(archive: &[u8], mut f: impl FnMut(usize, u8, usize)) {
     if !archive.starts_with(RAR4_SIG) {
-        return spans;
+        return;
     }
     let mut p = RAR4_SIG.len();
     while p + 7 <= archive.len() {
@@ -449,27 +502,22 @@ fn host_styled_spans(archive: &[u8]) -> Vec<(usize, usize)> {
         if size < 7 || p + size > archive.len() {
             break;
         }
-        let mut data = 0usize;
-        if archive[p + 2] == 0x74 {
-            // `host_os` is byte 15 of a RAR4 file header, `attr` the word at
-            // 28 (RAR 2.x uses the same layout), and the header checksum over
-            // both opens the block.
-            spans.push((p, 2));
-            spans.push((p + 15, 1));
-            spans.push((p + 28, 4));
-            data = usize::try_from(le32(archive, p + 7).unwrap_or(0)).unwrap_or(0);
-        }
+        let head_type = archive[p + 2];
+        f(p, head_type, size);
+        let data = if head_type == 0x74 {
+            usize::try_from(le32(archive, p + 7).unwrap_or(0)).unwrap_or(0)
+        } else {
+            0
+        };
         p += size + data;
     }
-    spans
 }
 
-/// Zero the host-styled bytes, so the rest can be compared exactly. The spans
-/// come from the layout, not from the platform, so this is the same masking a
-/// Unix host does (see [`assert_bytes_identical_with`]).
-fn mask_host_styled(archive: &[u8]) -> Vec<u8> {
+/// Zero `spans` in a copy of `archive`. A run past the end is skipped, not
+/// clamped: the bytes after a short scan are still compared unmasked.
+fn mask(archive: &[u8], spans: &[Span]) -> Vec<u8> {
     let mut masked = archive.to_vec();
-    for (offset, len) in host_styled_spans(archive) {
+    for &(offset, len) in spans {
         if offset + len <= masked.len() {
             masked[offset..offset + len].fill(0);
         }
@@ -477,10 +525,43 @@ fn mask_host_styled(archive: &[u8]) -> Vec<u8> {
     masked
 }
 
+/// Zero the host-styled bytes, so the rest can be compared exactly. The spans
+/// come from the layout, not from the platform, so this is the same masking a
+/// Unix host does (see [`assert_bytes_identical_with`]).
+fn mask_host_styled(archive: &[u8]) -> Vec<u8> {
+    mask(archive, &host_styled_spans(archive))
+}
+
 /// Compare two archives byte for byte, allowing the host to differ where the
 /// format lets it ([`HOST_STYLED_FIELDS`]) and nowhere else.
 fn assert_bytes_identical(label: &str, ours: &[u8], theirs: &[u8]) {
     assert_bytes_identical_with(label, ours, theirs, host_styled(ours));
+}
+
+/// Each side's mask for a comparison that allows the host to differ.
+///
+/// Proves first that both sides put the blocks in the same place — the masked
+/// offsets only mean anything then — and hands back the runs to zero.
+fn host_mask_spans(label: &str, ours: &[u8], theirs: &[u8]) -> (Vec<Span>, Vec<Span>) {
+    let (styled, their_styled) = (host_styled_spans(ours), host_styled_spans(theirs));
+    assert_eq!(styled, their_styled, "{label}: RAR4 file-header offsets");
+    let (derived, their_derived) = (host_derived_spans(ours), host_derived_spans(theirs));
+    assert_eq!(
+        derived, their_derived,
+        "{label}: RAR4 end-of-archive offsets"
+    );
+    // Only once the host fields actually differ do the checksums computed over
+    // them differ with them; while they agree, those checksums stay in the
+    // comparison as ordinary bytes.
+    let host_differs = styled
+        .iter()
+        .any(|&(offset, len)| ours.get(offset..offset + len) != theirs.get(offset..offset + len));
+    let (mut mine, mut official) = (styled, their_styled);
+    if host_differs {
+        mine.extend(derived);
+        official.extend(their_derived);
+    }
+    (mine, official)
 }
 
 /// [`assert_bytes_identical`] with the host allowance spelled out: the decision
@@ -492,14 +573,8 @@ fn assert_bytes_identical_with(label: &str, ours: &[u8], theirs: &[u8], allow_ho
     if !allow_host {
         panic!("{label}: bytes differ\n  {}", difference(ours, theirs));
     }
-    // The masked offsets only mean anything if both sides put their file
-    // headers in the same place, so prove that before trusting the mask.
-    assert_eq!(
-        host_styled_spans(ours),
-        host_styled_spans(theirs),
-        "{label}: RAR4 file-header offsets"
-    );
-    let (mine, official) = (mask_host_styled(ours), mask_host_styled(theirs));
+    let (my_spans, their_spans) = host_mask_spans(label, ours, theirs);
+    let (mine, official) = (mask(ours, &my_spans), mask(theirs, &their_spans));
     if mine == official {
         return;
     }
@@ -699,28 +774,31 @@ fn store_archives_are_byte_identical_to_official_rar() {
     assert!(checked > 0, "no cached tool available for any STORE case");
 }
 
-/// Rewrite a RAR4 file header the way official rar does on a Unix host:
-/// `host_os 3`, the raw `st_mode` as the attribute word, and the header
-/// checksum that covers both.
+/// Rewrite a RAR4 archive the way official rar does on a Unix host: `host_os 3`,
+/// the raw `st_mode` as the attribute word, and the header checksum that covers
+/// both. A volume ends with the 20-byte ENDARC, whose prefix CRC-32 covers those
+/// rewritten headers, so that field and its own checksum follow.
 fn as_unix_written(archive: &[u8]) -> Vec<u8> {
     let mut out = archive.to_vec();
-    let file = walk(archive)
-        .unwrap()
-        .into_iter()
-        .find(|b| b.kind == "file")
-        .expect("the case has a member");
-    out[file.start + 15] = 3;
-    out[file.start + 28..file.start + 32].copy_from_slice(&0o100644u32.to_le_bytes());
-    let head_size: usize = file
-        .fields
-        .iter()
-        .find(|f| f.name == "head_size")
-        .unwrap()
-        .value
-        .parse()
-        .unwrap();
-    let crc = crc32(&out[file.start + 2..file.start + head_size]) as u16;
-    out[file.start..file.start + 2].copy_from_slice(&crc.to_le_bytes());
+    let (mut files, mut endarc) = (Vec::new(), None);
+    rar4_blocks(&out, |start, head_type, size| match head_type {
+        0x74 => files.push((start, size)),
+        0x7b if size >= ENDARC_VOLUME_HEADER_SIZE => endarc = Some(start),
+        _ => {}
+    });
+    assert!(!files.is_empty(), "the archive has a member");
+    for (start, size) in files {
+        out[start + 15] = 3;
+        out[start + 28..start + 32].copy_from_slice(&0o100644u32.to_le_bytes());
+        let crc = crc32(&out[start + 2..start + size]) as u16;
+        out[start..start + 2].copy_from_slice(&crc.to_le_bytes());
+    }
+    if let Some(start) = endarc {
+        let prefix = crc32(&out[..start]);
+        out[start + 7..start + 11].copy_from_slice(&prefix.to_le_bytes());
+        let crc = crc32(&out[start + 2..start + ENDARC_VOLUME_HEADER_SIZE]) as u16;
+        out[start..start + 2].copy_from_slice(&crc.to_le_bytes());
+    }
     out
 }
 
@@ -781,6 +859,44 @@ fn only_the_host_fields_may_follow_the_platform() {
     padded_mine.extend_from_slice(&[0; 16]);
     padded_unix.extend_from_slice(&[0; 16]);
     assert_bytes_identical_with("rar4 store, padded tail", &padded_mine, &padded_unix, true);
+}
+
+/// A volume set repeats the host fields twice: once in the file header and once
+/// more through the ENDARC's prefix CRC-32, which covers that header. Rewritten
+/// into the Unix shape here, on every platform, for the same reason as the test
+/// above — the real cross-host comparison only ever runs on the Unix CI, and
+/// this is the case that first failed there.
+#[test]
+fn volume_endarc_follows_the_host_fields_it_covers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mine = our_volume_set(dir.path(), "big.bin", ArchiveVersion::V29, false);
+    assert!(mine.len() > 1, "the payload must span volumes");
+    for (name, ours) in &mine {
+        let unix = as_unix_written(ours);
+        assert_ne!(ours, &unix, "{name}: the rewritten volume has to differ");
+        // The host fields alone are not the whole difference: the ENDARC's
+        // prefix CRC-32 echoes them, so the tighter mask is not enough.
+        assert_ne!(
+            mask_host_styled(ours),
+            mask_host_styled(&unix),
+            "{name}: the ENDARC echoes the host fields"
+        );
+        assert_bytes_identical_with(&format!("volume {name} on Unix"), ours, &unix, true);
+        // The wider mask is still tight: the ENDARC's volume index sits between
+        // the two masked runs and a change to it has to surface.
+        let endarc = host_derived_spans(ours)
+            .first()
+            .expect("a volume ends with the 20-byte ENDARC")
+            .0;
+        let mut stray = unix.clone();
+        stray[endarc + 11] ^= 0x01;
+        let (a, b) = host_mask_spans("stray", ours, &stray);
+        assert_ne!(
+            mask(ours, &a),
+            mask(&stray, &b),
+            "{name}: a difference beside the masked field must survive"
+        );
+    }
 }
 
 /// Compressed members: the encoder picks its own matches, so the packed bytes
