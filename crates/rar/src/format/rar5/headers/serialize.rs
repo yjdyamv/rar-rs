@@ -5,8 +5,7 @@
 use crate::format::rar5::EXTRA_FILE_OWNER;
 use crate::format::rar5::headers::{ArchiveHeader, EndOfArchiveHeader, FileHeader};
 use crate::format::rar5::{
-    ARCHIVE_FLAG_VOLUME, ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA,
-    BLOCK_FLAG_DATA_CONTINUE_TO, BLOCK_FLAG_DATA_CONTINUES, BLOCK_FLAG_EXTRA_DATA,
+    ARCHIVE_FLAG_VOLUME, ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA,
     BLOCK_FLAG_SKIP_IF_UNKNOWN, BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_END_ARCHIVE,
     BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER, COMP_INFO_DICT_SHIFT,
     COMP_INFO_METHOD_SHIFT, COMP_INFO_SOLID_BIT, EXTRA_FILE_HASH, EXTRA_FILE_TIME,
@@ -56,6 +55,45 @@ pub(crate) fn vint_at_least(value: u64, min: usize) -> Vec<u8> {
 /// same archive's file headers use the two-byte minimum, not this estimate.
 fn stream_size_field_width(unpacked_size: u64) -> usize {
     vint::encoded_size(unpacked_size.saturating_mul(1 << 12)).max(2)
+}
+
+/// The width WinRAR reserves for a member header's `data_size` and
+/// `unpacked_size`, as a function of the member's total unpacked size.
+///
+/// Above ~1 MiB WinRAR stops writing the minimal width and reserves extra room,
+/// in single-volume archives as well as in every volume of a split member (it
+/// emits the header before the member's packed size is known). Measured against
+/// WinRAR 7.23: the table below holds for every split size tried (1 KiB ..
+/// 64 MiB) and for unsplit members, and it follows the member's *unpacked* size
+/// rather than its packed size (an 8 MiB member packed to 4 MiB still reserves
+/// six bytes).
+///
+/// | member total           | width                            |
+/// |------------------------|----------------------------------|
+/// | < 1 048 064            | minimal, with the two-byte floor |
+/// | 1 048 064 .. 1 048 575 | 4                                |
+/// | 1 048 576 .. 8 388 607 | 5                                |
+/// | >= 8 388 608           | 6 (still six at 256 MiB)         |
+///
+/// The first threshold is exactly `2^20 - 512` and the last step sits at
+/// `2^23`, so the widths are *not* a re-scaling of the value (four bytes cover a
+/// 512-byte window only). Tabulated, not derived. Service blocks (QO/RR/CMT)
+/// keep the plain two-byte floor; the stream block has its own rule in
+/// [`stream_size_field_width`].
+fn member_size_field_width(total_unpacked: u64) -> usize {
+    const FOUR_BYTES: u64 = (1 << 20) - 512;
+    const FIVE_BYTES: u64 = 1 << 20;
+    const SIX_BYTES: u64 = 1 << 23;
+    let tier = if total_unpacked >= SIX_BYTES {
+        6
+    } else if total_unpacked >= FIVE_BYTES {
+        5
+    } else if total_unpacked >= FOUR_BYTES {
+        4
+    } else {
+        0
+    };
+    vint::encoded_size(total_unpacked).max(2).max(tier)
 }
 
 impl ArchiveHeader {
@@ -121,16 +159,16 @@ impl FileHeader {
         if !self.extra_data.is_empty() {
             body.extend(vint::encode(self.extra_data.len() as u64));
         }
-        let unp_field = vint_at_least(self.unpacked_size, 2);
+        // Both size fields share one width, keyed on the member's TOTAL
+        // unpacked size: every volume of a split member repeats that total in
+        // `unpacked_size`, and `data_size` keeps the same width even though it
+        // only holds this volume's chunk (measured against 7.23: a 200 000-byte
+        // member split into 32 KiB volumes writes the 3 793-byte last chunk in
+        // three bytes; a 1 MiB member reserves a fourth, unsplit or not).
+        let size_width = member_size_field_width(self.unpacked_size);
+        let unp_field = vint_at_least(self.unpacked_size, size_width);
         if eff_block_flags & BLOCK_FLAG_DATA_AREA != 0 {
-            // Every volume of a split member carries the member's TOTAL
-            // unpacked size, and WinRAR gives `data_size` the same field width
-            // as that total, not the width this volume's chunk would need
-            // (measured against 7.23: a 200 000-byte member split into 32 KiB
-            // volumes writes the 3 793-byte last chunk in three bytes).
-            let split = self.flags & (BLOCK_FLAG_DATA_CONTINUES | BLOCK_FLAG_DATA_CONTINUE_TO) != 0;
-            let width = if split { unp_field.len() } else { 2 };
-            body.extend(vint_at_least(self.packed_size, width));
+            body.extend(vint_at_least(self.packed_size, size_width));
         }
 
         body.extend(vint::encode(eff_file_flags));
@@ -625,11 +663,14 @@ mod tests {
         assert_eq!((ds, ds_n), (3_793, us_n));
         assert_eq!(ds_n, 3, "3 793 fits in two bytes; the total forces three");
 
-        // The same member in one volume keeps the two-byte minimum.
+        // The same member stored whole keeps the same width: the field follows
+        // the total, not the value it holds (measured against 7.23, a
+        // 200 000-byte member compressed to 63 bytes still writes `data_size`
+        // in three bytes).
         let whole = FileHeader {
             name: "big.bin".into(),
             unpacked_size: 200_000,
-            packed_size: 3_793,
+            packed_size: 63,
             crc32_val: Some(0x1234_5678),
             ..Default::default()
         };
@@ -639,7 +680,49 @@ mod tests {
         let (_ty, _) = next(body, &mut off);
         let (_flags, _) = next(body, &mut off);
         let (ds, ds_n) = next(body, &mut off);
-        assert_eq!((ds, ds_n), (3_793, 2));
+        assert_eq!((ds, ds_n), (63, 3));
+    }
+
+    /// Above ~1 MiB the reservation jumps in tiers, still keyed on the member
+    /// total and still applied to both size fields.
+    #[test]
+    fn member_size_fields_use_the_reserved_width_tiers() {
+        assert_eq!(member_size_field_width(0), 2);
+        assert_eq!(member_size_field_width(16_383), 2);
+        assert_eq!(member_size_field_width(200_000), 3);
+        assert_eq!(member_size_field_width(1_048_063), 3);
+        assert_eq!(member_size_field_width(1_048_064), 4);
+        assert_eq!(member_size_field_width(1_048_575), 4);
+        assert_eq!(member_size_field_width(1_048_576), 5);
+        assert_eq!(member_size_field_width(2_097_152), 5);
+        assert_eq!(member_size_field_width(8_388_607), 5);
+        assert_eq!(member_size_field_width(8_388_608), 6);
+        assert_eq!(member_size_field_width(256 << 20), 6);
+        // Absurd sizes keep widening instead of wrapping.
+        assert_eq!(member_size_field_width(u64::MAX), 10);
+
+        let member = FileHeader {
+            name: "huge.bin".into(),
+            unpacked_size: 1_200_000,
+            packed_size: 32_758,
+            crc32_val: Some(0x1234_5678),
+            flags: crate::format::rar5::BLOCK_FLAG_DATA_CONTINUES,
+            ..Default::default()
+        };
+        let raw = crate::format::rar5::headers::parse_block_bytes(&member.to_bytes()).unwrap();
+        let body = &raw.header_data;
+        let mut off = 0usize;
+        let (_ty, _) = next(body, &mut off);
+        let (_flags, _) = next(body, &mut off);
+        let (ds, ds_n) = next(body, &mut off);
+        let (_ff, _) = next(body, &mut off);
+        let (us, us_n) = next(body, &mut off);
+        assert_eq!((ds, ds_n), (32_758, 5));
+        assert_eq!((us, us_n), (1_200_000, 5));
+        // ...and the padded header still parses back to the same values.
+        let parsed = FileHeader::from_raw(&raw, raw.data_offset).unwrap();
+        assert_eq!(parsed.packed_size, 32_758);
+        assert_eq!(parsed.unpacked_size, 1_200_000);
     }
 
     #[test]

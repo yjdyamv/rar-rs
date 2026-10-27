@@ -27,8 +27,9 @@ mod parallel_store_bound {
     }
 
     /// Overwrite the declared unpacked size of `name`'s file header in place
-    /// (same-width vint) and repair the block header CRC. `new_size` must have
-    /// the same vint width as the stored value.
+    /// (same-width vint) and repair the block header CRC. `new_size` must fit
+    /// the stored field, which WinRAR reserves wider than minimal on big
+    /// members, so the value is padded back to the width already on disk.
     fn set_unpacked_size(bytes: &mut [u8], name: &str, new_size: u64) {
         let mut cursor = std::io::Cursor::new(&bytes[..]);
         cursor.set_position(8);
@@ -51,7 +52,16 @@ mod parallel_store_bound {
                 let (_, n) = support::read_vint(&header, off); // file flags
                 off = n;
                 let (_, after) = support::read_vint(&header, off); // unpacked size
-                let encoded = rar_rs::wire::vint::encode(new_size);
+                let mut encoded = rar_rs::wire::vint::encode(new_size);
+                // Re-pad to the reserved width: setting the top bit of the last
+                // byte and appending a zero continuation byte adds high zero
+                // bits, so the value is unchanged.
+                while encoded.len() < after - off {
+                    if let Some(last) = encoded.last_mut() {
+                        *last |= 0x80;
+                    }
+                    encoded.push(0);
+                }
                 assert_eq!(encoded.len(), after - off, "patch must keep the vint width");
                 header[off..after].copy_from_slice(&encoded);
                 let crc = crc32fast::hash(&header[4..]);
@@ -78,7 +88,7 @@ mod parallel_store_bound {
         writer.finish().unwrap();
 
         let mut bytes = std::fs::read(path).unwrap();
-        // 8 MiB encodes in the same 4 vint bytes as the stored 16 MiB.
+        // 8 MiB fits the six reserved bytes the stored 16 MiB member carries.
         set_unpacked_size(&mut bytes, "member2.bin", 8 * 1024 * 1024);
         std::fs::write(path, &bytes).unwrap();
     }

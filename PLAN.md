@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-10-20 @ working tree；实现细节以源码为准。
+> 最后核对：2026-10-27 @ working tree；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -60,17 +60,18 @@
 
 ## 下一步
 
-### 发布收口（唯一阻塞项）
+### 发布（暂缓：用户决定先不发 crates.io）
 
-- [ ] **发布 `rar-rs` 0.13.0**：`cargo package` 已通过校验，三个 crate 的
-      `readme` / `keywords` / `documentation` / `categories`
-      元数据已补齐。`rar-cli` 与 `rar-rs-napi` 依赖 workspace 内的
-      `rar-rs`，**必须先发布 `rar-rs`** 才能发布另外两个。
-- [ ] **给发布建一张检查单**（本文件的「发布清单」段已列出五处版本一致性、两个
-      `Cargo.lock`、tag
-      校验、下游发布顺序与文档锚点刷新）。清单化之后每一步都可勾选，
-      不再依赖记忆。
-- [ ] **发布后做一遍下游实测**：从 crates.io 干净拉取 `rar-cli` 的一个临时工程，
+版本面已经收口：五处版本一致（三个 crate 的 `[package] version`、
+`crates/rar-napi/package.json`、根 `Cargo.toml` 的 workspace 依赖）、两个
+`Cargo.lock` 已刷新、`cargo package` 校验通过、三个 crate 的
+`readme` / `keywords` / `documentation` / `categories` 元数据已补齐、tag
+`v0.13.0` 已在。**发布本身按用户要求先不做**，恢复时只剩执行：
+
+- [ ] **`cargo publish` 按顺序**：`rar-rs` → `rar-cli` / `rar-rs-napi`
+      （后两者依赖 workspace 内的 `rar-rs`，必须先有前者）。
+- [ ] **照「发布清单」逐项过**（本文件末段；清单之外没有隐藏步骤）。
+- [ ] **发布后做一遍下游实测**：从 crates.io 干净拉取 `rar-cli` 的临时工程，
       `cargo install rar-cli` 能跑；`rar-rs-napi` 的 `.node` 与 wasm 产物照 CI
       release job 的路径复核一次。
 
@@ -189,11 +190,9 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 - **RAR5 主头 locator 的偏移宽度**：官方按写主头时对最终大小的内部估计预留（实测
   3–6+ 字节，阈值 2^9/2^16/2^23），那套估计无法由我们自身的头字节推出，**CLI
   不自动填**；库侧给了 `WriterOptions::estimated_size(bytes)`，给出预计大小即
-  按官方分档预留。已对拍：`-m0 -qo+` 的单成员归档在 4 字节档（1 KiB 成员）与 5
-  字节档（100 KiB 成员）与官方**逐字节相同**
-  （`locator_width_follows_official_size_tiers`）；6 字节档只比 locator 宽度，
-  官方在那个量级还把成员尺寸字段留得更宽（见
-  [`docs/PITFALLS.md`](docs/PITFALLS.md)「分卷成员头的 `data_size` 宽度」）。
+  按官方分档预留。已对拍：`-m0 -qo+` 的单成员归档在 4 / 5 / 6 字节档（1 KiB、
+  100 KiB、8 MiB 成员）都与官方**逐字节相同**
+  （`locator_width_follows_official_size_tiers`）。
   不给 `estimated_size` 则沿用历史定长 5 字节，比官方 +2 字节（最小档）到 −1
   字节（≥256 MiB 档）。
 - **官方 QO 的默认阈值**：官方默认只给「相对大的文件」拷头（手册原文，阈值随
@@ -237,10 +236,9 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 - **`-ts` 的「字母+数字」组合**、**`-rr<N>%` 取整**、**`rar rr` 恒 3%**、
   **`rar r` 不写 `fixed.<name>`**、**无控制台时的覆盖询问**：口径与理由见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
-- **RAR5 元数据仍差三处**（字节外观，双向读写一致）：locator
-  偏移字段宽度的**默认值**（给了 `estimated_size` 即对齐）、「官方 QO 默认
-  阈值」、成员总大小 ≥ 1 MiB 时分卷头的 `data_size` 预留宽度，见上面「暂缓」与
-  [`docs/PITFALLS.md`](docs/PITFALLS.md)「分卷成员头的 `data_size` 宽度」。
+- **RAR5 元数据仍差两处**（字节外观，双向读写一致）：locator
+  偏移字段宽度的**默认值**（给了 `estimated_size` 即对齐）与「官方 QO 默认
+  阈值」，见上面「暂缓」段。
 - **Windows 联接点的 redirect 目标字符串**：见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 

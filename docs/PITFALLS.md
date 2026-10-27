@@ -15,19 +15,21 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 ## 字节对齐（与官方逐字节/逐字段对拍）
 
 - **RAR5 尺寸字段最小 2 字节**：成员头与服务块（QO/RR/CMT）的
-  `data_size`/`unpacked_size`/`comp_info` 一律 ≥2 字节；STM 服务块按
-  `vint_size(unpacked_size << 12)` 预留（官方先写头后回填，故更宽）。契约
-  `member_size_fields_use_a_two_byte_minimum` /
+  `data_size`/`unpacked_size`/`comp_info` 一律 ≥2 字节（成员头在大成员上还会额外
+  分档预留，见下一条）；STM 服务块按 `vint_size(unpacked_size << 12)` 预留（官方
+  先写头后回填，故更宽）。契约 `member_size_fields_use_a_two_byte_minimum` /
   `stream_block_size_fields_use_the_reserved_width`。
-- **分卷成员头的 `data_size` 宽度跟着成员总大小走**：分卷里每个卷的
-  `unpacked_size` 都是成员**总**大小，官方给 `data_size` 用的是同一个字段宽度，
-  而不是本卷数据块自己的宽度（实测 7.23：200 000 字节成员按 32 KiB 分卷，末卷 3
-  793 字节的数据块仍写在 3 字节里）。按本卷大小写最小宽度会让末卷头短 1 字节。
-  契约 `multivolume_sets_are_byte_identical_to_official_rar`。
-  已知差异：成员总大小 ≥ 1 048 064 时官方会**额外预留**宽度（实测 1 048 064– 1
-  048 575 → 4 字节、1 048 576–8 388 607 → 5 字节、≥8 388 608 → 6 字节，
-  与分卷大小无关，阈值按值大小跳档，规律未探明），我们只写最小宽度，交错读取
-  不受影响。
+- **成员头的 `data_size`/`unpacked_size` 宽度按成员总大小分档预留**：
+  成员总大小超过阈值后官方不再写最小宽度，而是**预留**（实测 7.23：
+  < 1 048 064 → 最小宽度（下限 2 字节）、1 048 064–1 048 575 → 4 字节、
+  1 048 576–8 388 607 → 5 字节、≥8 388 608 → 6 字节，256 MiB 仍是 6）。
+  规律按成员 **unpacked** 总大小跳档（8 MiB 成员压到 4 MiB 仍预留 6 字节），
+  且**单卷成员同样预留**；分卷时每个卷都重复成员总大小，两个尺寸字段共用这一个
+  宽度（而不是本卷数据块自己的宽度：200 000 字节成员按 32 KiB 分卷，末卷 3 793
+  字节的数据块仍写在 3 字节里），按本卷大小写最小宽度会让头短 1 字节。契约
+  `member_size_fields_use_the_reserved_width_tiers` /
+  `rar5_size_fields_follow_the_official_reservation_tiers` /
+  `multivolume_sets_are_byte_identical_to_official_rar`。
 - **主头 locator 只在有指向对象时写**：有 QO 记录或 `-rr` 记录才写 locator （块
   flags 含 `SKIP_IF_UNKNOWN`），否则官方 7.23 连记录都不写（主头只剩
   type/flags/归档 flags）；写了 locator 时 QO 标志先置、偏移写 0 占位，关闭时

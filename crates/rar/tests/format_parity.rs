@@ -1660,15 +1660,14 @@ fn locator_qo_width(archive: &[u8]) -> usize {
 /// therefore the whole main header, matches byte for byte.
 #[test]
 fn locator_width_follows_official_size_tiers() {
-    // From 2^20 bytes up, official also reserves wider `data_size`/`unp_size`
-    // fields than the value needs (5 bytes from 2^20, 6 bytes from 2^23), so
-    // the 8 MiB tier can only be compared on the locator width; the two
-    // smaller tiers are boxed into sizes where official writes the natural
-    // width and the whole archive is byte-identical.
+    // The member's size fields follow their own reservation (see
+    // [`rar5_size_fields_follow_the_official_reservation_tiers`]), so these
+    // archives have to come out byte-identical end to end, not just in the
+    // locator.
     for (label, member, identical) in [
         ("4-byte tier", "tier_1k.bin", true),
         ("5-byte tier", "tier_100k.bin", true),
-        ("6-byte tier", "tier_8m.bin", false),
+        ("6-byte tier", "tier_8m.bin", true),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let size = generate::payload(member).len();
@@ -1783,117 +1782,80 @@ fn rar5_size_widths(archive: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-/// Official RAR does not write the smallest possible size vint in a split
-/// member header: it reserves room for the size to grow, and the reserved
-/// width steps with the member total (`3` below 2^20-512, `4` up to 2^20,
-/// `5` up to 2^23, `6` above). We write the minimal width instead, which is
-/// legal and strictly smaller.
-///
-/// That extra width makes official's *header* longer, so its chunks are
-/// shorter and every volume drifts by a few bytes — the per-volume CRCs move
-/// with the chunk boundaries, so a set this big cannot be compared byte by
-/// byte. What must still hold: the same volume count and names, the same total
-/// payload, and our fields being minimal.
+/// Official RAR does not write the smallest possible size vint in a member
+/// header: it reserves room for the size to grow, and the reserved width steps
+/// with the member total (`3` below 2^20-512, `4` up to 2^20, `5` up to 2^23,
+/// `6` above). The reservation keys on the member total rather than on this
+/// volume's chunk, applies to both size fields, and shows up on single-volume
+/// members too — so reproducing it makes the whole set byte-identical, wide
+/// headers included.
 #[test]
-fn rar5_split_size_fields_are_reserved_wider_by_official() {
-    let dir = tempfile::tempdir().unwrap();
-    let member = "huge.bin";
-    let total = generate::payload(member).len() as u64;
-    assert!(total >= 1 << 20, "the payload must cross the first step");
-
-    let mine = our_volume_set_with(dir.path(), member, ArchiveVersion::V50, false, 512 * 1024);
-    let Some(made) = generate::archive_with(
-        generate::TOOL_RAR50,
-        &["-ma5", "-m0", "-qo-", "-v512k"],
-        &[member],
-        &[],
-    ) else {
-        return;
-    };
-    let theirs: Vec<(String, Vec<u8>)> = made
-        .volumes()
-        .into_iter()
-        .map(|(name, bytes)| (name.trim_start_matches("arc").to_string(), bytes))
-        .collect();
-
-    assert_eq!(
-        mine.iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>(),
-        theirs
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>(),
-        "volume naming"
-    );
-    assert!(mine.len() > 1, "the payload must span volumes");
-
-    let (our_data_w, our_unp_w) = rar5_size_widths(&mine[0].1).expect("our size fields");
-    let (their_data_w, their_unp_w) = rar5_size_widths(&theirs[0].1).expect("their size fields");
-    assert_eq!(our_data_w, our_unp_w, "ours share one width");
-    assert_eq!(their_data_w, their_unp_w, "theirs share one width");
-    assert_eq!(
-        our_data_w,
-        minimal_vint_width(total),
-        "we write the minimal width for the member total"
-    );
-    assert!(
-        their_data_w > our_data_w,
-        "official reserves room ({their_data_w}) beyond the minimal {our_data_w}"
-    );
-
-    for ((name, ours), (_, official)) in mine.iter().zip(&theirs) {
-        // Each wider header pushes 4 more bytes of payload into the next
-        // volume, so the drift accumulates and the last volume absorbs it.
-        let drift = ours.len().abs_diff(official.len());
-        let bound = 8 * mine.len();
+fn rar5_size_fields_follow_the_official_reservation_tiers() {
+    for (label, member, volume_size, switches, width) in [
+        (
+            "1.5 MiB member, 512 KiB volumes",
+            "huge.bin",
+            512 * 1024,
+            &["-ma5", "-m0", "-qo-", "-v512k"][..],
+            5,
+        ),
+        (
+            "8 MiB member, 2 MiB volumes",
+            "tier_8m.bin",
+            2 * 1024 * 1024,
+            &["-ma5", "-m0", "-qo-", "-v2m"][..],
+            6,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let total = generate::payload(member).len() as u64;
         assert!(
-            drift <= bound,
-            "{name}: only the reserved width may shift the chunk ({drift} > {bound})"
+            total >= 1 << 20,
+            "{label}: the payload must cross the first step"
         );
-        // The header is where the reservation lives; the payload behind it is
-        // the same bytes, just cut at a slightly different point.
-        let (our_fields, their_fields) = (walk(ours).unwrap(), walk(official).unwrap());
-        for (x, y) in our_fields.iter().zip(&their_fields) {
-            assert_eq!(x.kind, y.kind, "{name}: block kind");
-            for f in &x.fields {
-                if matches!(
-                    f.name,
-                    "header_crc32" | "head_size" | "data_size" | "unp_size"
-                ) {
-                    continue;
-                }
-                let other = y.fields.iter().find(|g| g.name == f.name);
-                if f.name == "file_crc32" {
-                    // The CRC in a non-final volume covers the data up to the
-                    // end of that volume, so it moves with the boundary.
-                    assert!(other.is_some(), "{name}: official also stores a CRC");
-                    continue;
-                }
-                assert_eq!(
-                    other.map(|g| g.value.as_str()),
-                    Some(f.value.as_str()),
-                    "{name}: {}",
-                    f.name
-                );
-            }
-        }
-    }
 
-    // Both sides reassemble to the same payload: ours through our own reader,
-    // official's verdict through its `UnRAR`.
-    let first = dir.path().join("ours.part1.rar");
-    let mut reader = rar_rs::ArchiveReader::open(&first).unwrap();
-    let ids: Vec<_> = reader.entries().map(|entry| entry.id()).collect();
-    let mut rebuilt = Vec::new();
-    for id in ids {
-        rebuilt.extend(reader.read_entry(id).unwrap());
-    }
-    assert_eq!(rebuilt.len() as u64, total, "our set reassembles");
-    assert_eq!(rebuilt, generate::payload(member), "same payload bytes");
-    let verdict = generate::unrar_test(generate::TOOL_RAR50, &first);
-    if let Some(verdict) = verdict {
-        verdict.unwrap_or_else(|e| panic!("official unrar rejects our split set: {e}"));
+        let mine = our_volume_set_with(dir.path(), member, ArchiveVersion::V50, false, volume_size);
+        let Some(made) = generate::archive_with(generate::TOOL_RAR50, switches, &[member], &[])
+        else {
+            return;
+        };
+        let theirs: Vec<(String, Vec<u8>)> = made
+            .volumes()
+            .into_iter()
+            .map(|(name, bytes)| (name.trim_start_matches("arc").to_string(), bytes))
+            .collect();
+
+        let (our_data_w, our_unp_w) = rar5_size_widths(&mine[0].1).expect("our size fields");
+        assert_eq!(
+            (our_data_w, our_unp_w),
+            (width, width),
+            "{label}: both size fields carry the reserved width"
+        );
+        assert!(
+            our_data_w > minimal_vint_width(total),
+            "{label}: reserved ({our_data_w}) must exceed the minimal {}",
+            minimal_vint_width(total)
+        );
+        assert_volume_sets_identical(label, &mine, &theirs);
+
+        // Wide fields carry redundant continuation bytes; our reader has to
+        // take them as part of the format, not as corruption.
+        let first = dir.path().join("ours.part1.rar");
+        let mut reader = rar_rs::ArchiveReader::open(&first).unwrap();
+        let ids: Vec<_> = reader.entries().map(|entry| entry.id()).collect();
+        let mut rebuilt = Vec::new();
+        for id in ids {
+            rebuilt.extend(reader.read_entry(id).unwrap());
+        }
+        assert_eq!(
+            rebuilt,
+            generate::payload(member),
+            "{label}: sets reassemble"
+        );
+        let verdict = generate::unrar_test(generate::TOOL_RAR50, &first);
+        if let Some(verdict) = verdict {
+            verdict.unwrap_or_else(|e| panic!("{label}: official unrar rejects our set: {e}"));
+        }
     }
 }
 
