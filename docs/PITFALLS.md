@@ -214,6 +214,11 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   重加密，多卷重写首卷补发明文 ENCR 头；注释块只返回头 frame、payload
   单独写（`-hp` 下加密 data area 是 bug）。`-hp`
   与内联恢复记录**可以共存**（记录重建，`.rev` 可选），`-k`（锁定档）仍拒绝。
+  创建时每卷的文件头密文按 16 字节对齐，而头部本身又按成员大小分档预留宽度，
+  两个开销都要进卷预算（`header_encrypted_volumes_roundtrip_a_member_wider_than_a_size_tier`
+  用 1.5 MB 成员 + 256 KiB 卷钔住「每卷不超过请求尺寸」，
+  `official_unrar_validates_header_encrypted_volumes_with_wide_headers`
+  让官方 UnRAR 解一遍）。
 - **RAR4 `-hp` 编辑**：改名/注释/锁定逐卷重写，`-hp`
   档在同样加密下编辑（需要口令）；已有的逐卷 NEWSUB
   记录在重写时**按原强度重建**（丢弃旧记录再在末块前重发，否则 `rar r` 会用错

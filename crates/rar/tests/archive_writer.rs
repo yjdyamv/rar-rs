@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rar_rs::{
     AppendOptions, ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, DictionarySize,
-    EntryWriteOptions, RarError, ThreadCount, WriteEntry, WriterOptions,
+    EntryWriteOptions, OpenOptions, RarError, ThreadCount, WriteEntry, WriterOptions,
 };
 
 fn stored() -> EntryWriteOptions {
@@ -800,6 +800,47 @@ fn split_member_first_chunk_after_a_volume_boundary_keeps_its_member() {
             "second member corrupt at extra={extra}"
         );
     }
+}
+
+#[test]
+fn header_encrypted_volumes_roundtrip_a_member_wider_than_a_size_tier() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hp-volumes.rar");
+    // 1.5 MB crosses the 1 MiB size-field tier, so every volume's file header
+    // reserves five-byte `data_size`/`unpacked_size` fields — three bytes more
+    // than the values need. Header encryption then pads those headers to 16
+    // bytes, so the per-volume budget has to count both effects; a budget that
+    // assumed minimal fields would overflow the requested volume size.
+    let payload: Vec<u8> = (0..1_500_000u32).map(|i| (i % 251) as u8).collect();
+    let volume_size = 256 * 1024u64;
+    {
+        let mut writer = ArchiveWriter::create_with(
+            &path,
+            WriterOptions::new()
+                .password("pw")
+                .encrypt_headers(true)
+                .volume_size(volume_size),
+        )
+        .unwrap();
+        writer.add_bytes("wide.bin", &payload, stored()).unwrap();
+        let report = writer.finish().unwrap();
+        assert!(
+            report.volume_paths().len() > 3,
+            "the member must span several volumes"
+        );
+        for volume in report.volume_paths() {
+            let size = std::fs::metadata(volume).unwrap().len();
+            assert!(
+                size <= volume_size,
+                "{}: {size} bytes exceeds the requested volume size",
+                volume.display()
+            );
+        }
+    }
+
+    let mut reader = ArchiveReader::open_with(&path, OpenOptions::new().password("pw")).unwrap();
+    let entry = reader.unique_entry("wide.bin").unwrap();
+    assert_eq!(reader.read_entry(entry).unwrap(), payload);
 }
 
 /// Part number parsed out of a `....partN.rar` staging name.

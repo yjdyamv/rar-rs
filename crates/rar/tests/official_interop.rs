@@ -250,6 +250,72 @@ fn official_unrar_validates_streamed_rar13_large_member() {
     );
 }
 
+/// Header encryption puts an encrypted, 16-byte-padded copy of the file header
+/// in front of every chunk, and a member past the 1 MiB size-field tier makes
+/// that header three bytes wider: the volume budget has to count both. Official
+/// UnRAR has to accept the set and reassemble the member.
+#[test]
+fn official_unrar_validates_header_encrypted_volumes_with_wide_headers() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(), // skipped unless the interop script sets it
+    };
+    let dir = make_temp_dir();
+    let content: Vec<u8> = (0..1_500_000u32).map(|i| (i % 251) as u8).collect();
+    let src = dir.path().join("wide.bin");
+    std::fs::write(&src, &content).unwrap();
+
+    let path = dir.path().join("hp-vols.rar");
+    let mut writer = rar_rs::ArchiveWriter::create_with(
+        &path,
+        rar_rs::WriterOptions::default()
+            .password("hppw")
+            .encrypt_headers(true)
+            .volume_size(256 * 1024),
+    )
+    .unwrap();
+    writer
+        .add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::STORE),
+        )
+        .unwrap();
+    let report = writer.finish().unwrap();
+    assert!(
+        report.volume_paths().len() > 3,
+        "expected a volume set, got {}",
+        report.volume_paths().len()
+    );
+    let first = report.volume_paths()[0].as_os_str().to_owned();
+
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg("-idq")
+        .arg("-phppw")
+        .arg(&first)
+        .status()
+        .expect("spawn unrar");
+    assert!(status.success(), "unrar t rejected the -hp volume set");
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(&unrar)
+        .arg("x")
+        .arg("-idq")
+        .arg("-o+")
+        .arg("-phppw")
+        .arg(&first)
+        .arg(out.as_os_str())
+        .status()
+        .expect("spawn unrar");
+    assert!(status.success(), "unrar x failed on the -hp volume set");
+    assert_eq!(
+        std::fs::read(out.join("wide.bin")).unwrap(),
+        content,
+        "UnRAR must reassemble the -hp volume set byte-identically"
+    );
+}
+
 /// A solid RAR4 m5 archive whose members are all coded PPMd carries one model
 /// across the chain: after the first member the encoder emits 0x87 continuing
 /// headers instead of fresh 0xA7 models. Official UnRAR has to rebuild the
