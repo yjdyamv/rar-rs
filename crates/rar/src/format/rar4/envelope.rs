@@ -70,10 +70,17 @@ pub(crate) struct EnvelopePolicy {
     /// Check the 16-bit `HEAD_CRC`. Callers whose headers were already
     /// validated (the edit layout scan) or may legitimately be damaged (the
     /// recovery scanner looking for the record to repair) pass `false`.
+    /// Encrypted headers are checked regardless of this flag unless the scan
+    /// is [`damage_tolerant`](Self::damage_tolerant), because there the CRC is
+    /// the only password check value there is (see [`read_encrypted_block`]).
     pub(crate) verify_crc: bool,
     /// Keep the exact on-disk header bytes in `raw_header`; byte-exact
     /// rewriters need them, everyone else skips the copy.
     pub(crate) retain_raw: bool,
+    /// The scan exists to look at headers that may be damaged, so an envelope
+    /// that fails to parse must be skipped as garbage instead of blamed on the
+    /// password. Only the legacy recovery scanner sets this.
+    pub(crate) damage_tolerant: bool,
 }
 
 impl EnvelopePolicy {
@@ -81,12 +88,14 @@ impl EnvelopePolicy {
     pub(crate) const SCAN: Self = Self {
         verify_crc: true,
         retain_raw: false,
+        damage_tolerant: false,
     };
     /// A byte-exact rewrite: the open scan already validated the headers, so
     /// the CRC is not re-checked, and the raw bytes are kept.
     pub(crate) const EDIT: Self = Self {
         verify_crc: false,
         retain_raw: true,
+        damage_tolerant: false,
     };
     /// A walk of an archive whose headers a previous pass already validated
     /// and whose raw bytes nobody needs (layout planning, comment lookup):
@@ -94,11 +103,13 @@ impl EnvelopePolicy {
     pub(crate) const PLAN: Self = Self {
         verify_crc: false,
         retain_raw: false,
+        damage_tolerant: false,
     };
     /// A damaged-archive scan: no CRC check, no raw copy.
     pub(crate) const REPAIR: Self = Self {
         verify_crc: false,
         retain_raw: false,
+        damage_tolerant: true,
     };
 }
 
@@ -234,17 +245,43 @@ fn read_encrypted_block<R: Read + Seek>(
     // parse/CRC failure deterministically instead of leaking whichever error
     // the garbage bytes happened to hit — otherwise the same wrong password
     // reports `Crc` or `Format` depending on the random salt.
-    let mut block = match read_envelope(start, header, on_disk_header, policy.verify_crc) {
+    //
+    // That attribution only works when the CRC is actually checked: a garbage
+    // `head_size` that happens to fall inside the stream is otherwise a valid
+    // envelope, and a wrong password would walk noise to the end of the
+    // archive and look like a clean layout. The 16-bit `HEAD_CRC` is the only
+    // thing separating the two, so it is always checked here — and without the
+    // plaintext leniencies (MARK, AV/SIGN, the `0xFFFF` "no CRC" sentinel):
+    // those describe RAR 1.5-era blocks that predate header encryption, so
+    // inside a ciphertext block they can only launder garbage into a plausible
+    // envelope. `damage_tolerant` (the recovery scanner) is the one caller
+    // that must keep reading a broken envelope instead of blaming the
+    // password.
+    if (policy.verify_crc || !policy.damage_tolerant)
+        && let Err(error) = check_header_crc(&header)
+    {
+        return Err(blame_the_password(error));
+    }
+    let mut block = match read_envelope(start, header, on_disk_header, false) {
         Ok(block) => block,
-        Err(RarError::Crc { .. } | RarError::Format(_)) => {
-            return Err(RarError::WrongPassword);
-        }
-        Err(other) => return Err(other),
+        Err(error) => return Err(blame_the_password(error)),
     };
     if policy.retain_raw {
         block.raw_header = Some(raw);
     }
     Ok(Some(block))
+}
+
+/// Attribute a decrypted-header failure to the password: RAR4 header
+/// encryption carries no MAC and no password check value, so a header that
+/// does not parse cannot be told apart from a header encrypted under another
+/// password. Keeping the attribution in one place is what makes the reported
+/// error independent of the random salt the garbage happened to hit.
+fn blame_the_password(error: RarError) -> RarError {
+    match error {
+        RarError::Crc { .. } | RarError::Format(_) => RarError::WrongPassword,
+        other => other,
+    }
 }
 
 /// Plaintext header, exact on-disk header bytes and on-disk header length.
@@ -340,16 +377,8 @@ pub(crate) fn read_envelope(
     // the 0xFFFF sentinel (RAR 1.5.4-era "no CRC" marker).
     if verify_crc {
         let should_check = !matches!(head_type, MARK_HEAD | 0x76 | 0x79) && head_crc != 0xFFFF;
-        let crc_end = header_crc_end(&header, head_type, flags);
         if should_check {
-            let actual = (crc32(&header[2..crc_end]) & 0xffff) as u16;
-            if actual != head_crc {
-                return Err(RarError::crc(
-                    head_crc as u32,
-                    actual as u32,
-                    format!("RAR4 block type {head_type:#x} header"),
-                ));
-            }
+            check_header_crc(&header)?;
         }
     }
 
@@ -388,6 +417,25 @@ fn header_crc_end(header: &[u8], head_type: u8, flags: u16) -> usize {
         COMM_HEAD => 13.min(header.len()),
         _ => header.len(),
     }
+}
+
+/// Verify the 16-bit `HEAD_CRC` of a full header, with no leniency for the
+/// block types or sentinel values that plaintext RAR 1.5-era archives use
+/// (the callers decide whether to apply those exemptions).
+fn check_header_crc(header: &[u8]) -> RarResult<()> {
+    let head_crc = u16::from_le_bytes([header[0], header[1]]);
+    let head_type = header[2];
+    let flags = u16::from_le_bytes([header[3], header[4]]);
+    let crc_end = header_crc_end(header, head_type, flags);
+    let actual = (crc32(&header[2..crc_end]) & 0xffff) as u16;
+    if actual != head_crc {
+        return Err(RarError::crc(
+            head_crc as u32,
+            actual as u32,
+            format!("RAR4 block type {head_type:#x} header"),
+        ));
+    }
+    Ok(())
 }
 
 fn read_some(stream: &mut impl Read, buf: &mut [u8]) -> RarResult<usize> {
@@ -513,6 +561,42 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_headers_get_no_crc_exemptions() {
+        // 0x76/AV-style blocks, MARK and the 0xFFFF sentinel skip the CRC on
+        // plaintext RAR 1.5-era archives. Inside a ciphertext block nothing
+        // predates encryption, so those exemptions can only launder garbage
+        // from a wrong password into a plausible envelope — the hole that made
+        // `hp_edits_require_the_archive_password` fail roughly one run in fifty
+        // on CI depending on the random salt.
+        let mut header = vec![0u8; 16];
+        header[2] = 0x76;
+        header[5..7].copy_from_slice(&16u16.to_le_bytes());
+
+        // Plaintext: still exempt, as RAR 1.5-era archives require.
+        let block = read_block(
+            &mut std::io::Cursor::new(header.clone()),
+            false,
+            None,
+            EnvelopePolicy::SCAN,
+        )
+        .unwrap()
+        .expect("plaintext 0x76 block");
+        assert_eq!(block.head_type, 0x76);
+
+        // Encrypted: the same bytes are a password error, not a header.
+        let (encrypted, _) =
+            crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
+        let err = read_block(
+            &mut std::io::Cursor::new(encrypted),
+            true,
+            Some(b"pw"),
+            EnvelopePolicy::SCAN,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RarError::WrongPassword), "got {err:?}");
+    }
+
+    #[test]
     fn encrypted_block_with_a_bad_header_crc_is_a_wrong_password() {
         // A wrong RAR4 password yields a plausible-looking head size often
         // enough that the parser reaches the header CRC. That path must
@@ -564,6 +648,10 @@ mod tests {
         header[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
         header[5..7].copy_from_slice(&32u16.to_le_bytes());
         header[7..11].copy_from_slice(&4u32.to_le_bytes());
+        // Encrypted headers are CRC-checked on every path (the CRC is the only
+        // password check value), so the synthetic header has to be valid.
+        let crc = (crc32(&header[2..]) & 0xffff) as u16;
+        header[..2].copy_from_slice(&crc.to_le_bytes());
         let (encrypted, on_disk) =
             crate::format::rar4::write::encrypt_block_header(&header, "pw").unwrap();
 
@@ -579,5 +667,16 @@ mod tests {
         assert_eq!(block.raw_header(), &encrypted[..]);
         assert_eq!(block.on_disk_header(), on_disk);
         assert_eq!(block.add_size, 4);
+
+        // The same block under the wrong password is a password error on the
+        // edit path too, never a silently garbage header to copy verbatim.
+        let err = read_block(
+            &mut std::io::Cursor::new(encrypted),
+            true,
+            Some(b"nope"),
+            EnvelopePolicy::EDIT,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RarError::WrongPassword), "got {err:?}");
     }
 }

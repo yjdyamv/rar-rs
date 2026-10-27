@@ -297,8 +297,11 @@ fn parse_protect_record(view: &Rar4Block) -> RarResult<Option<ProtectRecord>> {
 /// Walk the block stream of a RAR4 archive from `stream` with bounded
 /// buffers, decrypting the headers of a `-hp` archive with `password`
 /// (ignored for plaintext ones). The archive must already be validated (the
-/// editor only reaches here after a successful open scan), so headers are
-/// not CRC-checked again; only the envelope bounds are.
+/// editor only reaches here after a successful open scan), so plaintext
+/// headers are not CRC-checked again; only the envelope bounds are. Encrypted
+/// headers are, because there the 16-bit CRC is the only password check value
+/// — a wrong password otherwise decrypts into a plausible-looking layout built
+/// from noise (see `EnvelopePolicy::damage_tolerant`).
 pub(super) fn scan_layout_stream(
     stream: &mut (impl Read + Seek),
     sfx_offset: usize,

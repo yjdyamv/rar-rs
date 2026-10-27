@@ -400,7 +400,8 @@ fn hp_edits_require_the_archive_password() {
         scan_layout(&bytes, 0, None),
         Err(RarError::Encrypted(_))
     ));
-    // A wrong password decrypts to garbage (head_size sanity check).
+    // A wrong password decrypts to garbage: the 16-bit header CRC (the only
+    // password check value RAR4 header encryption has) is what rejects it.
     assert!(scan_layout(&bytes, 0, Some("wrong")).is_err());
     // The right one parses.
     assert!(scan_layout(&bytes, 0, Some(HP)).is_ok());
