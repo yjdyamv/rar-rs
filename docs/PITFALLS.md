@@ -104,6 +104,10 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **`-rr` 配 `-v` 时每卷各带一份内联记录**，每卷只保护自己的前缀；卷预算按
   `recovery_volume_reserve(prefix_len)`
   的几何长度做**候选前缀二分**（直接按最大记录收窄每卷会白扔约 2 KB）。
+  预算里还得算上成员头**按大小分档预留的尺寸字段**：跨 1 MiB 档的成员每卷多 3
+  字节头，漏算就溢出一卷（`recovery_volume_budgets_count_the_reserved_size_fields`
+  用 1.5 MB 成员 + 256 KiB 卷钉住「非末卷恰好填满请求的尺寸」与 `data_width =
+  5`）。
 - **`rc` 重建卷沿用数据卷自己的零填充宽度**（`.rev`
   的宽度是恢复卷号，两者位数可不同），没有现存数据卷时才用 `layout.width` 兜底。
 - **加密块 padding 是 zero-fill，不是 PKCS7**（7-Zip 会校验 padding 区全零）。

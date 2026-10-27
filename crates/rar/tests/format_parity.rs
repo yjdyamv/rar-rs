@@ -1432,6 +1432,10 @@ struct VolBlock {
     /// record on a service block).
     extra: Vec<u8>,
     data_size: u64,
+    /// Width of the `data_size` vint as written, i.e. how much room the
+    /// header reserved for it (a member whose size crosses a tier carries
+    /// more bytes than the value needs).
+    data_width: usize,
 }
 
 /// Scan the blocks of one volume and report how many zero bytes follow the
@@ -1463,15 +1467,18 @@ fn volume_blocks(volume: &[u8]) -> (Vec<VolBlock>, usize) {
             q += n;
         }
         let mut data_size = 0u64;
+        let mut data_width = 0usize;
         if flags & R5_BLOCK_DATA != 0 {
-            let (value, _) = vint(body, q).expect("data size");
+            let (value, width) = vint(body, q).expect("data size");
             data_size = value;
+            data_width = width;
         }
         let extra_start = head_end - usize::try_from(extra_size).expect("extra size");
         blocks.push(VolBlock {
             kind,
             extra: body[extra_start..head_end].to_vec(),
             data_size,
+            data_width,
         });
         p = head_end + usize::try_from(data_size).expect("data size");
         if kind == 5 {
@@ -1491,12 +1498,15 @@ fn volume_blocks(volume: &[u8]) -> (Vec<VolBlock>, usize) {
 /// `RR` service block per volume, and official pads each non-final volume
 /// with zeros, so the sets cannot be byte-identical. Everything around that
 /// padding still has to agree: same names, same block sequence, the same
-/// percent record, and the split arithmetic that turns the padding into a
-/// smaller data chunk.
-#[test]
-fn recovery_records_repeat_in_every_volume() {
+/// percent record, the same size-field widths, and the split arithmetic that
+/// turns the padding into a smaller data chunk.
+fn check_recovery_volumes(
+    member: &str,
+    volume_size: u64,
+    switches: &[&str],
+    expected_width: usize,
+) {
     let dir = tempfile::tempdir().unwrap();
-    let member = "big.bin";
     let total = generate::payload(member).len() as u64;
     let src = sample(dir.path(), member);
     let path = dir.path().join("ours.rar");
@@ -1504,7 +1514,7 @@ fn recovery_records_repeat_in_every_volume() {
         &path,
         WriterOptions::new()
             .compression(ArchiveVersion::V50)
-            .volume_size(32 * 1024)
+            .volume_size(volume_size)
             .recovery_percent(5),
     )
     .unwrap();
@@ -1518,12 +1528,7 @@ fn recovery_records_repeat_in_every_volume() {
     writer.finish().unwrap();
     let mine = volume_set(dir.path(), "ours");
 
-    let Some(made) = generate::archive_with(
-        generate::TOOL_RAR50,
-        &["-ma5", "-m0", "-qo-", "-v32k", "-rr5%"],
-        &[member],
-        &[],
-    ) else {
+    let Some(made) = generate::archive_with(generate::TOOL_RAR50, switches, &[member], &[]) else {
         return;
     };
     let theirs: Vec<(String, Vec<u8>)> = made
@@ -1543,6 +1548,15 @@ fn recovery_records_repeat_in_every_volume() {
         "volume naming"
     );
     assert!(mine.len() > 3, "the payload must span several volumes");
+    // The reserved size fields are part of the per-volume budget: a volume
+    // that ignored the extra bytes would overflow the requested size.
+    for (name, bytes) in &mine[..mine.len() - 1] {
+        assert_eq!(
+            bytes.len() as u64,
+            volume_size,
+            "{name}: a non-final volume must fill the requested size exactly"
+        );
+    }
 
     let mut our_payload = 0u64;
     let mut their_payload = 0u64;
@@ -1581,6 +1595,14 @@ fn recovery_records_repeat_in_every_volume() {
             .iter()
             .find(|b| b.kind == 2)
             .expect("file block");
+        assert_eq!(
+            our_data.data_width, expected_width,
+            "{name}: the member header keeps the reserved width"
+        );
+        assert_eq!(
+            their_data.data_width, expected_width,
+            "{name}: official reserves the same width"
+        );
         our_payload += our_data.data_size;
         their_payload += their_data.data_size;
 
@@ -1614,6 +1636,32 @@ fn recovery_records_repeat_in_every_volume() {
     if let Some(verdict) = generate::unrar_test(generate::TOOL_RAR50, &first) {
         verdict.unwrap_or_else(|error| panic!("official UnRAR rejected our set: {error}"));
     }
+}
+
+#[test]
+fn recovery_records_repeat_in_every_volume() {
+    // A 200 000-byte member stays under the first reservation tier, so every
+    // volume carries the width its value needs (three bytes, above the
+    // two-byte floor) rather than a reserved tier.
+    check_recovery_volumes(
+        "big.bin",
+        32 * 1024,
+        &["-ma5", "-m0", "-qo-", "-v32k", "-rr5%"],
+        3,
+    );
+}
+
+#[test]
+fn recovery_volume_budgets_count_the_reserved_size_fields() {
+    // A 1.5 MB member crosses the 1 MiB tier, so each volume carries
+    // five-byte size fields — three bytes wider than the values need. The
+    // per-volume budget has to count them, or the volume overflows.
+    check_recovery_volumes(
+        "huge.bin",
+        256 * 1024,
+        &["-ma5", "-m0", "-qo-", "-v256k", "-rr5%"],
+        5,
+    );
 }
 
 /// Width of the locator's quick-open offset field, i.e. how much room the
