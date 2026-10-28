@@ -434,23 +434,65 @@ pub struct MatchFinder<'a> {
 const HASH_BITS: usize = 20;
 const HASH_SIZE: usize = 1 << HASH_BITS;
 
+/// Hint the cache for the byte the chain walk is about to compare.
+#[inline]
+fn prefetch(data: *const u8, offset: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: `_mm_prefetch` has no memory-safety requirements; reading a
+        // byte through the pointer only needs it to be derived from a live
+        // slice, which the caller guarantees, and a prefetch never faults.
+        unsafe {
+            std::arch::x86_64::_mm_prefetch(
+                data.add(offset).cast(),
+                std::arch::x86_64::_MM_HINT_T0,
+            );
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (data, offset);
+    }
+}
+
 /// Extend a match at `data[cand + start..]` vs `data[pos + start..]`,
 /// capped at `limit`, using 64-bit word compares with a scalar tail.
 /// Returns the total matched length (from `start`).
+///
+/// This is the innermost loop of every parse: a long PPMd trial walks tens of
+/// thousands of candidates per position, so the word loads are unaligned raw
+/// reads instead of slice indexing — the bounds checks on both sides cost more
+/// than the compare itself, and the `try_into().unwrap()` pair on each
+/// 8-byte slice reliably fails to fold away.
 #[inline]
 fn match_length(data: &[u8], cand: usize, pos: usize, start: usize, limit: usize) -> usize {
+    // Callers already cap `limit` to both sides' remaining bytes; clamping
+    // again here is one min per call and makes the loads below unconditionally
+    // sound for every caller.
+    let limit = limit
+        .min(data.len().saturating_sub(cand))
+        .min(data.len().saturating_sub(pos));
     let mut length = start;
-    while length + 8 <= limit {
-        let a = u64::from_le_bytes(data[cand + length..cand + length + 8].try_into().unwrap());
-        let b = u64::from_le_bytes(data[pos + length..pos + length + 8].try_into().unwrap());
-        if a != b {
-            length += ((a ^ b).trailing_zeros() / 8) as usize;
-            return length;
+    // SAFETY: the loop condition keeps `length + 8 <= limit`, and
+    // `limit <= data.len() - {cand, pos}`, so `{cand, pos} + length + 8` never
+    // passes the end of `data`.
+    unsafe {
+        let a = data.as_ptr().add(cand);
+        let b = data.as_ptr().add(pos);
+        while length + 8 <= limit {
+            let word_a = u64::from_le(std::ptr::read_unaligned(a.add(length).cast::<u64>()));
+            let word_b = u64::from_le(std::ptr::read_unaligned(b.add(length).cast::<u64>()));
+            let diff = word_a ^ word_b;
+            if diff != 0 {
+                // Little-endian: the lowest differing byte is the first
+                // mismatch, so its index is the trailing zero byte count.
+                return length + (diff.trailing_zeros() as usize / 8);
+            }
+            length += 8;
         }
-        length += 8;
-    }
-    while length < limit && data[cand + length] == data[pos + length] {
-        length += 1;
+        while length < limit && *a.add(length) == *b.add(length) {
+            length += 1;
+        }
     }
     length
 }
@@ -540,13 +582,21 @@ impl<'a> MatchFinder<'a> {
         (self.head, self.prev)
     }
 
+    /// Read the 4 bytes at `pos` as a little-endian word.
+    ///
+    /// # Safety
+    /// `pos + 4 <= data.len()`. Both callers (`insert`, `find_match`) return
+    /// early while fewer than 4 bytes remain.
+    #[inline]
+    unsafe fn word_at(&self, pos: usize) -> u32 {
+        // SAFETY: the caller guarantees four readable bytes at `pos`.
+        u32::from_le(unsafe { std::ptr::read_unaligned(self.data.as_ptr().add(pos).cast::<u32>()) })
+    }
+
     #[inline]
     fn hash4(&self, pos: usize) -> usize {
-        let d = self.data;
-        let h = (d[pos] as u32)
-            | ((d[pos + 1] as u32) << 8)
-            | ((d[pos + 2] as u32) << 16)
-            | ((d[pos + 3] as u32) << 24);
+        // SAFETY: both callers only reach here with 4 bytes left.
+        let h = unsafe { self.word_at(pos) };
         ((h.wrapping_mul(0x9E3779B1)) >> 14) as usize & self.hash_mask
     }
 
@@ -579,6 +629,19 @@ impl<'a> MatchFinder<'a> {
         let max_len = self.max_match.min(self.size - pos);
         let mut chain_count = self.chain_len;
 
+        // The chain walk is the hottest loop in the crate — a PPMd trial
+        // visits hundreds of candidates per position — so it indexes raw
+        // bytes instead of slices.
+        //
+        // SAFETY: `pos + 4 <= size` is guaranteed above, and every candidate
+        // satisfies `cand < pos`, hence `cand + best_len < pos + max_len <=
+        // size`; the low two bytes are read through one 4-byte load because
+        // `cand + 4 <= cand + best_len` is not guaranteed for a 2-byte
+        // `min_match`. `prev` is addressed through its own power-of-two mask,
+        // which keeps the index inside the ring.
+        let bytes = data.as_ptr();
+        let pos_word =
+            unsafe { u32::from_le(std::ptr::read_unaligned(bytes.add(pos).cast::<u32>())) };
         let mut candidate = self.prev[pos & self.prev_mask];
         while candidate >= 0 && chain_count > 0 {
             let cand = candidate as usize;
@@ -587,10 +650,27 @@ impl<'a> MatchFinder<'a> {
                 break;
             }
 
-            if data[cand + best_len] == data[pos + best_len]
-                && data[cand] == data[pos]
-                && data[cand + 1] == data[pos + 1]
-            {
+            // Load the next link before the compare: it is a dependent random
+            // access into the ring, and issuing it first lets the load latency
+            // overlap with the match extension below instead of stalling after
+            // it. `prev[cand]` cannot change during this walk.
+            let next = unsafe { *self.prev.get_unchecked(cand & self.prev_mask) };
+            // Pull the next candidate's compare byte into cache while this
+            // candidate is still being tested: the walk is a pointer chase
+            // through a multi-MiB ring, so the load latency dominates and one
+            // iteration of lookahead is the difference between stalling and
+            // hiding it. `best_len` may still grow this iteration; a stale
+            // (shorter) offset is fine for a prefetch hint.
+            if next >= 0 {
+                prefetch(bytes, next as usize + best_len.min(max_len));
+            }
+            let same_head = unsafe {
+                let cand_word =
+                    u32::from_le(std::ptr::read_unaligned(bytes.add(cand).cast::<u32>()));
+                *bytes.add(cand + best_len) == *bytes.add(pos + best_len)
+                    && (cand_word & 0xffff) == (pos_word & 0xffff)
+            };
+            if same_head {
                 let limit = max_len.min(self.size - cand);
                 let length = match_length(data, cand, pos, 0, limit);
                 if length > best_len || (length == best_len && dist < best_dist) {
@@ -602,7 +682,7 @@ impl<'a> MatchFinder<'a> {
                 }
             }
 
-            candidate = self.prev[cand & self.prev_mask];
+            candidate = next;
             chain_count -= 1;
         }
 

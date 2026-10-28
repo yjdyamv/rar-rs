@@ -192,7 +192,7 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   尺寸也只差几个百分点）。别把“和官方不一样”当 bug 去砍 PPMd——读取侧
   6.23/7.23 都能解，这是 RAR4 唯一能拿到 PPMd 比率的路径
   （见 `docs/rar4-creation-spec.md`）。代价是 PPMd 试压比 LZ 慢约 4 倍
-  （30 MB：22.8 s vs 5.9 s）。
+  （30 MB 文本、`-mt1`、匹配查找器优化后：18.9 s vs 5.0 s）。
 - **RAR4 solid 链中不落 STORE**：官方在 `-s` 链里即使载荷不可压也照写正常
   method（`0x33`），我们保留“压不小就 STORE”的短路。STORE 成员合法地中断链
   （其后成员不再带 `FHD_SOLID`，读取器会重置表），但比官方少一段 ratio。 对拍

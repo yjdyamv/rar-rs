@@ -164,7 +164,9 @@
 已落地（别再重新论证）：01 matchless-block DP 快路径（字节相同）、02 collector
 fast-mode 门（`longest==0`，阈值 256）、03 delta 候选通道 + 采样预门、05
 流式路径 auto delta/x86、08 持久树跨 chunk 增长的损坏修复、11 BT4 首步
-value-carry（−3.6%）、 12 MT 近窗对齐（已被 13 取代）。
+value-carry（−3.6%）、 12 MT 近窗对齐（已被 13 取代）、 16 哈希链走查预取
+（`match_finder.rs`：提前载入下一候选并 `prefetch` 比较字节，字节相同，
+RAR4 `-m5` −26%、RAR5 `-m5` −18%，solid 持平——候选已并行、带宽吃满）。
 
 **剩余公开差距**：DLL 单线程解析约 6–8 s vs WinRAR 1.8 s（其中 mt8 7.5×，见
 issue 09）；xml m2/m3 +1.5%（解析差距，非块开销）；text64 MT 片间分歧（6554 vs
