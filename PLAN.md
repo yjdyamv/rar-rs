@@ -134,7 +134,7 @@
       5.9x，瓶颈是 BT4
       下降步数（结构锁定：`HASH_BITS`、dict-log、提交阈值、近/远带宽四个旋钮已验证弹回）。
 - [ ] **issue 15 — 价格驱动解析提速**（2026-09-18
-      立项）：目标是**压缩速度**——给解析器补中间档，把每位置代价从更深的搜索换成更省的价格计算。四个杠杆、上游事实与验收判据见
+      立项）：目标是**压缩速度**——给解析器补中间档，把每位置代价从更深的搜索换成更省的价格计算。杠杆 3 的「DP 块顺延价格表」已落地（第 17 项，MT 比率白送 0.1–0.8pp）；剩下的断崖是 seq 的 `-m1`/`-m2` 之间。四个杠杆、上游事实与验收判据见
       [`docs/issues/compression-perf/15-fl2-zstd-parser-tiers.md`](docs/issues/compression-perf/15-fl2-zstd-parser-tiers.md)。
 - [ ] **issue 04 — MT 随机数据窗口级不可压缩跳过**：成员级 STORE
       兜底已让随机数据领先 WinRAR 10–80x；窗口级跳过有把边界成员从压缩翻成 STORE
@@ -166,7 +166,10 @@ fast-mode 门（`longest==0`，阈值 256）、03 delta 候选通道 + 采样预
 流式路径 auto delta/x86、08 持久树跨 chunk 增长的损坏修复、11 BT4 首步
 value-carry（−3.6%）、 12 MT 近窗对齐（已被 13 取代）、 16 哈希链走查预取
 （`match_finder.rs`：提前载入下一候选并 `prefetch` 比较字节，字节相同，
-RAR4 `-m5` −26%、RAR5 `-m5` −18%，solid 持平——候选已并行、带宽吃满）。
+RAR4 `-m5` −26%、RAR5 `-m5` −18%，solid 持平——候选已并行、带宽吃满）、
+17 MT 的 DP 块顺延价格表（`windowed_priced_parse` 把上一块的码长表交给下一块首次
+定价，替代「多跑一遍重定价」，text l3 −0.51pp / 30 MB 文本 −0.6~0.8pp，耗时持平；
+MT 本来就是已接受的字节分歧，packed 只变小）。
 
 **剩余公开差距**：DLL 单线程解析约 6–8 s vs WinRAR 1.8 s（其中 mt8 7.5×，见
 issue 09）；xml m2/m3 +1.5%（解析差距，非块开销）；text64 MT 片间分歧（6554 vs

@@ -90,6 +90,8 @@ pub(super) use block::{EMITTED_BLOCK_SIZE, find_block_end_adaptive};
 pub(super) use collect::COLLECT_MISS_THRESHOLD;
 #[cfg(test)]
 pub(crate) use collect::set_fast_path_enabled;
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) use optimal::set_price_carry_enabled;
 #[cfg(feature = "parallel")]
 pub(super) use optimal::{
     MT_DP_BLOCK_SIZE, RowIndex, find_matches_in_range, windowed_priced_parse,

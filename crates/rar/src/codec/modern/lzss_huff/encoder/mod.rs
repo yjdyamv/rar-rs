@@ -39,6 +39,8 @@ pub(crate) use filter::{
 };
 #[cfg(test)]
 pub(crate) use parse::set_fast_path_enabled;
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) use parse::set_price_carry_enabled;
 
 /// How many times the matchless fast path returned literals without running
 /// the pricing passes. Test seam: a byte-identity check whose corpus never

@@ -427,13 +427,15 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // The row index's candidate depth is the MT tier's level dial (see
     // [`MT_ROW_INDEX_DEPTH`]); the chain budget above is the fallback tier's.
     let row_depth = MT_ROW_INDEX_DEPTH[level];
-    // MT parse is the low-step tier by design: workers slice with the cheap
-    // hash-chain greedy+lazy search instead of the optimal (BT4) parse,
-    // cutting the per-position step count well below the tree's. It accepts
-    // MT output divergence from the sequential path (already a documented,
-    // accepted divergence) and is the MT fastest measured configuration
-    // (tsc x86 2.1x, repeated text 5.2x at ~+0.6..2.9pp ratio on the A/B
-    // corpus); seq is never affected.
+    // MT parse is the low-step tier by design: workers price a bounded
+    // candidate set from the shared row index instead of descending the BT4
+    // tree at every position, which cuts the per-position step count well
+    // below the tree's. It accepts MT output divergence from the sequential
+    // path (already a documented, accepted divergence) and is the MT fastest
+    // measured configuration (tsc x86 2.1x, repeated text 5.2x on the A/B
+    // corpus); seq is never affected. The parse now carries each DP block's
+    // price table into the next block (`windowed_priced_parse`), which
+    // recovered a further 0.4-0.8pp on text without extra work.
     // Adaptive slice size: with a fixed 4 MiB slice a 13 MB member gives
     // only 4 slices and the pool sits mostly idle. Target ~2x the thread
     // count slices (floor 2 MiB) so medium members parallelize properly;

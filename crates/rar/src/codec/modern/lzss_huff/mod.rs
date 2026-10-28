@@ -23,6 +23,8 @@ pub(crate) use encode::encode_chunked_mt_with_progress;
 pub(crate) use encode::encode_chunked_raw_with_lead;
 #[cfg(test)]
 pub(crate) use encode::set_fast_path_enabled;
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) use encode::set_price_carry_enabled;
 pub use encode::{
     DEFAULT_CHUNK_SIZE, EncodeOptions, EncoderState, FilterSpec, MAX_FILTER_BLOCK_LENGTH, encode,
     encode_chunked, encode_chunked_mt, encode_chunked_raw, encode_raw,
@@ -651,6 +653,87 @@ mod mt_tests {
                 sizes[0]
             );
         }
+    }
+
+    /// Deterministic word-salad text: the shape where a block's statistics
+    /// predict the next block's, which is what the carried price table feeds
+    /// on.
+    fn text_data(len: usize) -> Vec<u8> {
+        const WORDS: [&str; 12] = [
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+            "lambda", "mu",
+        ];
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut data = Vec::with_capacity(len + 96);
+        while data.len() < len {
+            for _ in 0..12 {
+                data.extend_from_slice(WORDS[(next() % 12) as usize].as_bytes());
+                data.push(b' ');
+            }
+            data.push(b'\n');
+        }
+        data
+    }
+
+    /// The windowed parse prices every DP block with the previous block's
+    /// table instead of the flat first-pass estimate. That hand-off is worth
+    /// what a second repricing pass buys (measured 18.19% -> 17.68% on the
+    /// reference text corpus at level 3) and costs no second DP, so pin it:
+    /// dropping the table must make the output measurably larger, and both
+    /// arms must still roundtrip.
+    ///
+    /// The corpus is text so consecutive blocks share a distribution, which
+    /// is the shape the hand-off is for. The gain is tiny in absolute terms
+    /// (a few thousand bytes at this size), hence the size comparison rather
+    /// than a ratio threshold: the windowed parse sits a few percent behind
+    /// the sequential one on structure alone (issue 15), which a threshold
+    /// would have to swallow.
+    #[test]
+    fn carried_prices_beat_starting_from_the_flat_estimate() {
+        let _serial = super::fast_path_lock().lock().expect("price carry lock");
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                set_price_carry_enabled(true);
+            }
+        }
+        let _g = Guard;
+
+        let data = text_data(1_500_000);
+        let encode = || {
+            encode_chunked_mt(
+                &data,
+                3,
+                6,
+                DEFAULT_CHUNK_SIZE,
+                &mut EncoderState::default(),
+                4,
+                true,
+                ArchiveVersion::V50,
+            )
+        };
+        set_price_carry_enabled(true);
+        let carried = encode();
+        set_price_carry_enabled(false);
+        let flat = encode();
+
+        for (name, packed) in [("carried", &carried), ("flat", &flat)] {
+            let out = decode_standalone(packed, data.len() as u64, 6, None, ArchiveVersion::V50)
+                .expect("decode");
+            assert_eq!(out, data, "{name} roundtrip");
+        }
+        assert!(
+            carried.len() < flat.len(),
+            "handing the price table to the next block bought nothing: {} vs {} bytes",
+            carried.len(),
+            flat.len()
+        );
     }
 
     #[test]

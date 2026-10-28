@@ -7,6 +7,8 @@
 
 use super::super::*;
 
+#[cfg(feature = "parallel")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use super::super::super::{
@@ -143,6 +145,16 @@ where
     let mut state = EncoderMatchState::new(*dist_cache, *last_length);
     let probe_cache = *dist_cache;
     let block_size = super::super::chunked::MT_ROW_INDEX_DP_BLOCK;
+    // The previous block's code-length table, carried into this block's first
+    // pass. A worker's blocks run in order inside one slice, so the table it
+    // hands forward is the one the parse would have rebuilt itself: pricing
+    // against a real distribution instead of the flat first-pass estimate is
+    // worth roughly what a second repricing pass buys (0.4-0.8pp on text) and
+    // costs no second DP. The first block of a slice has no predecessor and
+    // keeps the estimate; that keeps slices independent, which is what makes
+    // them parallel at all.
+    let carry = !PRICE_CARRY_DISABLED.load(Ordering::Relaxed);
+    let mut carried: Option<TokenPrices> = None;
     let mut block_start = start;
     while block_start < end {
         let block_end = (block_start + block_size).min(end);
@@ -198,17 +210,21 @@ where
                 combined,
                 block_start..block_end,
                 limits,
-                None,
+                carried.as_ref(),
                 &matches,
                 state,
             );
-            let (block_symbols, _) = convert_tokens(
+            let (block_symbols, (nc, dc, ldc, rc)) = convert_tokens(
                 &tokens,
                 combined,
                 block_start..block_end,
                 &mut state,
                 variant,
             );
+            if carry {
+                let (nc_l, dc_l, ldc_l, rc_l) = prices_from_frequencies(&nc, &dc, &ldc, &rc);
+                carried = Some(TokenPrices::new(&nc_l, &dc_l, &ldc_l, &rc_l));
+            }
             symbols.extend(block_symbols);
         }
         block_start = block_end;
@@ -216,6 +232,17 @@ where
     *dist_cache = state.reps;
     *last_length = state.last_length;
     symbols
+}
+
+/// Test seam: stop a DP block from handing its price table to the next one,
+/// so a test can measure what the hand-off buys.
+#[cfg(feature = "parallel")]
+pub(super) static PRICE_CARRY_DISABLED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(test, feature = "parallel"))]
+#[allow(dead_code)]
+pub(crate) fn set_price_carry_enabled(enabled: bool) {
+    PRICE_CARRY_DISABLED.store(!enabled, Ordering::Relaxed);
 }
 
 /// Buckets in [`RowIndex`]: a 4-byte hash, like the sequential finders' key
