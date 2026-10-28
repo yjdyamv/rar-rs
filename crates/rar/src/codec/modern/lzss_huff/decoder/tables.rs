@@ -127,16 +127,14 @@ fn read_code_lengths(
 
 // ── Length/Distance Decoding ───────────────────────────────────────────────
 
-pub(super) fn decode_length(slot: usize, reader: &mut BitReader) -> RarResult<u32> {
+pub(super) fn decode_length(slot: usize, reader: &mut BitReader) -> Result<u32, &'static str> {
     if slot < 8 {
         Ok(2 + slot as u32)
     } else {
         let lbits = (slot / 4 - 1) as u8;
         let base = 2 + ((4 | (slot & 3)) << lbits) as u32;
         if lbits > 0 {
-            let extra = reader
-                .read_bits(lbits)
-                .map_err(|e| RarError::Format(e.to_string()))?;
+            let extra = reader.read_bits(lbits)?;
             Ok(base + extra)
         } else {
             Ok(base)
@@ -148,7 +146,7 @@ pub(super) fn decode_distance(
     dist_slot: usize,
     reader: &mut BitReader,
     table_ldc: &DecodeTable,
-) -> RarResult<u64> {
+) -> Result<u64, &'static str> {
     // RAR7's extended table (80 codes) reaches dist slots up to 79, i.e.
     // DBits up to 38 and distances beyond 4 GB — hence u64 arithmetic.
     if dist_slot < 4 {
@@ -165,20 +163,16 @@ pub(super) fn decode_distance(
                     // would silently drop the high bits.
                     let extra_bits = dbits - 4;
                     let upper = if extra_bits > 32 {
-                        reader.read_bits_u64(extra_bits)
+                        reader.read_bits_u64(extra_bits)?
                     } else {
-                        reader.read_bits(extra_bits).map(u64::from)
-                    }
-                    .map_err(|e| RarError::Format(e.to_string()))?;
+                        u64::from(reader.read_bits(extra_bits)?)
+                    };
                     dist = dist.wrapping_add(upper << 4);
                 }
-                let low_dist = decode_symbol(table_ldc, reader)
-                    .map_err(|e| RarError::Format(e.to_string()))?;
+                let low_dist = decode_symbol(table_ldc, reader)?;
                 dist = dist.wrapping_add(low_dist as u64);
             } else {
-                let extra = reader
-                    .read_bits(dbits)
-                    .map_err(|e| RarError::Format(e.to_string()))?;
+                let extra = reader.read_bits(dbits)?;
                 dist = dist.wrapping_add(extra as u64);
             }
         }

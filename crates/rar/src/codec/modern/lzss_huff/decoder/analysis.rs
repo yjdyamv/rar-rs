@@ -67,7 +67,7 @@ pub fn analyze_stream(
     let mut in_block = false;
     let mut produced = 0u64;
 
-    while let Some(symbol) = reader.next()? {
+    while let Some(symbol) = reader.next() {
         match symbol {
             Symbol::BlockStart(info) => {
                 if in_block {
@@ -116,6 +116,9 @@ pub fn analyze_stream(
                 }
             }
         }
+    }
+    if let Some(err) = reader.take_error() {
+        return Err(err);
     }
     if in_block {
         out.blocks.push(block);
@@ -203,7 +206,7 @@ pub fn trace_stream(
     let mut out = Vec::new();
     let mut pos = 0u64;
 
-    while let Some(symbol) = reader.next()? {
+    while let Some(symbol) = reader.next() {
         match symbol {
             Symbol::BlockStart(_) | Symbol::Filter(_) => {}
             Symbol::Literal(_) => {
@@ -236,6 +239,9 @@ pub fn trace_stream(
                 }
             }
         }
+    }
+    if let Some(err) = reader.take_error() {
+        return Err(err);
     }
     Ok(out)
 }

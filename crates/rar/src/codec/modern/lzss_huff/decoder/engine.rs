@@ -159,7 +159,7 @@ fn run_engine(
     let mut sink = OutputSink::new(writer, output_start);
     let mut copied_abs = output_start;
 
-    while let Some(symbol) = symbols.next()? {
+    while let Some(symbol) = symbols.next() {
         match symbol {
             Symbol::Literal(byte) => window.put_byte(byte),
             Symbol::Match { dist, len, .. } => {
@@ -194,6 +194,10 @@ fn run_engine(
             sink.apply_complete_filters(&mut pending_filters)?;
             sink.drain_up_to(window.total_written(), &pending_filters)?;
         }
+    }
+
+    if let Some(err) = symbols.take_error() {
+        return Err(err);
     }
 
     let written = window.total_written();

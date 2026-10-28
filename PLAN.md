@@ -182,9 +182,19 @@ RAR4 `-m5` −26%、RAR5 `-m5` −18%，solid 持平——候选已并行、带�
 定价，替代「多跑一遍重定价」，text l3 −0.51pp / 30 MB 文本 −0.6~0.8pp，耗时持平；
 MT 本来就是已接受的字节分歧，packed 只变小）、18 RAR5 解码热路径
 （`BitReader` 移位寄存器、`DecodeTable::quick` 单装载、`copy_match` 分块 memmove、
-`append_output_into` 免中转；`ntoskrnl` m5 提取 47 → 60 MB/s，字节不变）。
+`append_output_into` 免中转；`ntoskrnl` m5 提取 47 → 60 MB/s，字节不变）、
+19 符号流的两笔结构账（`SymbolReader::next` 改返回两字宽的 `Option<Symbol>`，错误走
+`take_error()`；热路径六个函数强制 `#[inline(always)]`、`decode_non_literal` 强制外联；
+`consumed_bits()` 替掉每符号的除余。同机交替 A/B：`decode_bench` 总体 +9%，
+`ntoskrnl` 无过滤 m5 −17%、text 13 MiB −15%，字节不变）。
 
-**当前基线**（2026-10-27，`ntoskrnl.exe` 12.5 MiB、`-ma5`、本机 16 核、release，
+**解压基线**（`cargo run --release --example decode_bench`，自建语料，packed 比例
+29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74 MB/s，
+总体约 81 MB/s。同一批归档交给官方 `UnRAR.exe` 并扣掉其 0.10 s 进程启动：
+150 / 340 / 165 MB/s——即**纯解码**我们落后 1.9–3.7×。端到端的 `x`/`t` 对比没有意义
+（官方那 0.10 s 常数比 8 MiB 的解码时间还长），看进度只能看这个进程内基线。
+
+**当前基线**（2026-10-29，`ntoskrnl.exe` 12.5 MiB、`-ma5`、本机 16 核、release，
 每档两次取最快；「MT」= 默认线程、「seq」= `-mt1`）
 
 | `-m` | 我们 MT      | 我们 seq     | 官方 7.23    | MT 相对官方 |

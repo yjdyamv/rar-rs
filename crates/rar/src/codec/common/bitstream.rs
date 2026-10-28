@@ -28,7 +28,7 @@ impl<'a> BitReader<'a> {
     /// Top the buffer up to at least 56 bits while the stream has whole bytes
     /// left. Eight bytes are loaded at once and shifted into place, which is
     /// one unaligned load per eight symbols instead of one per peek.
-    #[inline]
+    #[inline(always)]
     fn fill(&mut self) {
         while self.bits < 56 {
             if self.pos + 8 <= self.data.len() {
@@ -58,6 +58,18 @@ impl<'a> BitReader<'a> {
     #[inline]
     pub fn bits_remaining(&self) -> usize {
         self.bits as usize + (self.data.len() - self.pos) * 8
+    }
+
+    /// Bits consumed so far, exact for every buffered state.
+    ///
+    /// `byte_position * 8 + bit_position` computes the same value, but it costs
+    /// a divide and a remainder per call; the decode loop asks once per symbol,
+    /// so it reads the two fields directly instead.
+    #[inline(always)]
+    pub fn consumed_bits(&self) -> u64 {
+        // `bits` only reaches 64 after eight bytes were pulled in, so
+        // `pos * 8 >= bits` always holds.
+        (self.pos as u64) * 8 - self.bits as u64
     }
 
     /// Byte offset of the next unconsumed bit.
@@ -93,6 +105,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Peek at `n` bits without consuming them; `n <= 32`.
+    #[inline(always)]
     pub fn peek_bits(&mut self, n: u8) -> Result<u32, &'static str> {
         if n == 0 {
             return Ok(0);
@@ -126,7 +139,7 @@ impl<'a> BitReader<'a> {
     /// Skipping past the end simply empties the buffer; a following peek then
     /// reports the end of data, which is how the decoder stops exactly where a
     /// member ends.
-    #[inline]
+    #[inline(always)]
     pub fn skip_bits(&mut self, n: u32) {
         if n == 0 {
             return;

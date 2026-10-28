@@ -102,7 +102,7 @@ impl DecodeTable {
 /// table answers with one load, one test and one shift; only the tail of the
 /// stream (fewer than `QUICK_BITS` bits left) and longer codes reach the
 /// length table.
-#[inline]
+#[inline(always)]
 pub fn decode_symbol(table: &DecodeTable, reader: &mut BitReader) -> Result<usize, &'static str> {
     if let Ok(prefix) = reader.peek_bits(QUICK_BITS as u8) {
         let entry = table.quick[prefix as usize];

@@ -94,6 +94,11 @@ pub(super) struct SymbolReader<'d, 's> {
     /// End of the furthest filter region seen; must not pass [`Self::end`].
     max_filter_end: u64,
     block: Option<ActiveBlock>,
+    /// The first malformed-stream error. Held here rather than in the return
+    /// type: `RarError` is 88 bytes, so threading it through `Result` at every
+    /// symbol pushed that whole struct through the stack ~6 million times per
+    /// member and dominated decode time.
+    error: Option<RarError>,
 }
 
 impl<'d, 's> SymbolReader<'d, 's> {
@@ -112,6 +117,7 @@ impl<'d, 's> SymbolReader<'d, 's> {
             end: start_pos.saturating_add(unpacked_size),
             max_filter_end: start_pos,
             block: None,
+            error: None,
         }
     }
 
@@ -122,49 +128,74 @@ impl<'d, 's> SymbolReader<'d, 's> {
     }
 
     /// Yield the next symbol, or `None` when the member's declared output
-    /// size has been produced or the last block ended. A filter region that
-    /// outlives the member is malformed and rejected before `None`.
-    pub(super) fn next(&mut self) -> RarResult<Option<Symbol>> {
-        match self.next_symbol()? {
-            Some(symbol) => Ok(Some(symbol)),
+    /// size has been produced, the last block ended, or the stream is
+    /// malformed.
+    ///
+    /// Malformed streams are reported through [`Self::take_error`] rather than
+    /// a `Result`, which keeps the per-symbol boundary two words wide: a
+    /// `Result<Option<Symbol>, RarError>` is 88 bytes wide because `RarError`
+    /// is, and returning it per symbol dominated decode time.
+    #[inline(always)]
+    pub(super) fn next(&mut self) -> Option<Symbol> {
+        match self.next_symbol() {
+            Some(symbol) => Some(symbol),
             None => {
-                if self.max_filter_end > self.end {
-                    return Err(RarError::format("unapplied RAR5 filter at end of stream"));
+                if self.error.is_none() && self.max_filter_end > self.end {
+                    return self.fail(RarError::format("unapplied RAR5 filter at end of stream"));
                 }
-                Ok(None)
+                None
             }
         }
     }
 
-    fn next_symbol(&mut self) -> RarResult<Option<Symbol>> {
+    /// The malformed-stream error that stopped [`Self::next`], if any.
+    pub(super) fn take_error(&mut self) -> Option<RarError> {
+        self.error.take()
+    }
+
+    /// Record `err` and stop the stream. Kept out of line on purpose: it runs
+    /// at most once per member, so it must not be inlined into the loop.
+    #[cold]
+    #[inline(never)]
+    fn fail(&mut self, err: RarError) -> Option<Symbol> {
+        self.error = Some(err);
+        None
+    }
+
+    #[inline]
+    fn next_symbol(&mut self) -> Option<Symbol> {
         loop {
             if self.pos >= self.end {
-                return Ok(None);
+                return None;
             }
             if let Some(block) = self.block.as_ref() {
-                let start_bits = block.start_bits;
-                let bits = block.bits;
+                let end_bits = block.start_bits + block.bits;
                 let is_last = block.is_last;
-                let cur_bits =
-                    self.reader.byte_position() as u64 * 8 + self.reader.bit_position() as u64;
-                if cur_bits - start_bits < bits {
-                    if let Some(symbol) = self.decode_symbol()? {
-                        return Ok(Some(symbol));
+                if self.reader.consumed_bits() < end_bits {
+                    if let Some(symbol) = self.decode_symbol() {
+                        return Some(symbol);
                     }
+                    if self.error.is_some() {
+                        return None;
+                    }
+                    // A repeat with nothing to repeat yields no output.
                     continue;
                 }
                 // Position the reader at the exact end of the block.
-                let end_bits = start_bits + bits;
                 self.reader
                     .set_position((end_bits / 8) as usize, (end_bits % 8) as u8);
                 self.block = None;
                 if is_last {
-                    return Ok(None);
+                    return None;
                 }
                 continue;
             }
-            let info = self.read_block_header()?;
-            return Ok(Some(Symbol::BlockStart(info)));
+            // A block header is read a handful of times per member, so the
+            // rich `RarResult` there costs nothing.
+            return match self.read_block_header() {
+                Ok(info) => Some(Symbol::BlockStart(info)),
+                Err(err) => self.fail(err),
+            };
         }
     }
 
@@ -238,82 +269,98 @@ impl<'d, 's> SymbolReader<'d, 's> {
     /// table lookup and a counter bump. Everything else — filters, repeats,
     /// cache moves, distance codes — stays out of line so the literal case
     /// keeps its branch predictor warm and its code in cache.
-    #[inline]
-    fn decode_symbol(&mut self) -> RarResult<Option<Symbol>> {
-        let table = match self.state.table_nc.as_ref() {
-            Some(table) => table,
-            None => return Err(no_huffman_tables()),
+    #[inline(always)]
+    fn decode_symbol(&mut self) -> Option<Symbol> {
+        let Some(table) = self.state.table_nc.as_ref() else {
+            return self.fail(no_huffman_tables());
         };
-        let sym = decode_symbol(table, &mut self.reader).map_err(format_err)?;
+        let sym = match decode_symbol(table, &mut self.reader) {
+            Ok(sym) => sym,
+            Err(msg) => return self.fail(format_err(msg)),
+        };
         if sym < 256 {
             self.pos += 1;
-            return Ok(Some(Symbol::Literal(sym as u8)));
+            return Some(Symbol::Literal(sym as u8));
         }
         self.decode_non_literal(sym)
     }
 
     /// The rare half of [`Self::decode_symbol`].
-    #[inline]
-    fn decode_non_literal(&mut self, sym: usize) -> RarResult<Option<Symbol>> {
+    #[inline(never)]
+    fn decode_non_literal(&mut self, sym: usize) -> Option<Symbol> {
         if sym == SYM_FILTER {
-            let filter = parse_filter(&mut self.reader, self.pos)?;
+            let filter = match parse_filter(&mut self.reader, self.pos) {
+                Ok(filter) => filter,
+                Err(err) => return self.fail(err),
+            };
             self.max_filter_end = self
                 .max_filter_end
                 .max(filter.block_start.saturating_add(filter.block_length));
-            return Ok(Some(Symbol::Filter(filter)));
+            return Some(Symbol::Filter(filter));
         }
         if sym == SYM_REPEAT {
             let dist = self.state.dist_cache[0];
             let len = self.state.last_length;
             if len > 0 && dist > 0 {
                 self.pos += len as u64;
-                return Ok(Some(Symbol::Match {
+                return Some(Symbol::Match {
                     dist,
                     len,
                     kind: MatchKind::Repeat,
-                }));
+                });
             }
-            return Ok(None);
+            return None;
         }
         if (SYM_CACHE_BASE..=SYM_CACHE_BASE + 3).contains(&sym) {
             let dist = dist_cache_touch(&mut self.state.dist_cache, sym - SYM_CACHE_BASE);
-            let len_slot = {
-                let table = self.state.table_rc.as_ref().ok_or_else(no_huffman_tables)?;
-                decode_symbol(table, &mut self.reader).map_err(format_err)?
+            let Some(table) = self.state.table_rc.as_ref() else {
+                return self.fail(no_huffman_tables());
             };
-            let length = decode_length(len_slot, &mut self.reader)?;
+            let len_slot = match decode_symbol(table, &mut self.reader) {
+                Ok(slot) => slot,
+                Err(msg) => return self.fail(format_err(msg)),
+            };
+            let length = match decode_length(len_slot, &mut self.reader) {
+                Ok(length) => length,
+                Err(msg) => return self.fail(format_err(msg)),
+            };
             self.state.last_length = length;
             self.pos += length as u64;
-            return Ok(Some(Symbol::Match {
+            return Some(Symbol::Match {
                 dist,
                 len: length,
                 kind: MatchKind::Cache,
-            }));
+            });
         }
 
         let len_slot = sym - SYM_MATCH_BASE;
-        let mut length = decode_length(len_slot, &mut self.reader)?;
-        let dist_slot = {
-            let table = self.state.table_dc.as_ref().ok_or_else(no_huffman_tables)?;
-            decode_symbol(table, &mut self.reader).map_err(format_err)?
+        let mut length = match decode_length(len_slot, &mut self.reader) {
+            Ok(length) => length,
+            Err(msg) => return self.fail(format_err(msg)),
         };
-        let dist = {
-            let table = self
-                .state
-                .table_ldc
-                .as_ref()
-                .ok_or_else(no_huffman_tables)?;
-            decode_distance(dist_slot, &mut self.reader, table)?
+        let Some(table) = self.state.table_dc.as_ref() else {
+            return self.fail(no_huffman_tables());
+        };
+        let dist_slot = match decode_symbol(table, &mut self.reader) {
+            Ok(slot) => slot,
+            Err(msg) => return self.fail(format_err(msg)),
+        };
+        let Some(table) = self.state.table_ldc.as_ref() else {
+            return self.fail(no_huffman_tables());
+        };
+        let dist = match decode_distance(dist_slot, &mut self.reader, table) {
+            Ok(dist) => dist,
+            Err(msg) => return self.fail(format_err(msg)),
         };
         length = apply_length_bonus_u64(length, dist);
         self.state.last_length = length;
         dist_cache_push(&mut self.state.dist_cache, dist);
         self.pos += length as u64;
-        Ok(Some(Symbol::Match {
+        Some(Symbol::Match {
             dist,
             len: length,
             kind: MatchKind::Match,
-        }))
+        })
     }
 }
 
