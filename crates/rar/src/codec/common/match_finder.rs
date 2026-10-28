@@ -834,14 +834,6 @@ pub struct TreeMatchFinder {
     /// first, then the greater-or-equal one, in LZMA's layout.
     son: Vec<u32>,
     mask: usize,
-    /// Lever-4 probe: a descent seals and returns early after spending
-    /// `far_cut` steps on candidates farther than `far_start` bytes from
-    /// the query position, exactly as if the budget were exhausted (the
-    /// far-band tail of the candidate window is dropped, the near band
-    /// keeps full precision). `far_cut == 0` disables the probe. Present
-    /// for the speed experiment; default off, removed or promoted later.
-    far_start: usize,
-    far_cut: usize,
 }
 
 impl TreeMatchFinder {
@@ -860,16 +852,7 @@ impl TreeMatchFinder {
             // pages.
             son: vec![0; window * 2],
             mask: window - 1,
-            far_start: 0,
-            far_cut: 0,
         }
-    }
-
-    /// Configure the far-band descent budget probe (see the field docs).
-    /// `cut == 0` disables it.
-    pub fn with_far_band(&mut self, start: usize, cut: usize) {
-        self.far_start = start;
-        self.far_cut = cut;
     }
 
     /// Grow the window in place, keeping every existing link (positions
@@ -1129,7 +1112,6 @@ impl TreeMatchFinder {
         let mut len1 = 0usize;
         let mut longest = Self::MIN_MATCH - 1;
         let mut budget = cut;
-        let mut far_steps = 0usize;
         let mut floor = pos;
         loop {
             // A candidate that does not step back is a reused slot or the
@@ -1138,18 +1120,10 @@ impl TreeMatchFinder {
             // so no stale link survives below them. A spent budget ends it
             // the same way, dropping whatever subtree the budget could not
             // reach.
-            let far = self.far_cut > 0 && pos - current > self.far_start;
-            if current >= floor
-                || pos - current > self.mask
-                || budget == 0
-                || (far && far_steps >= self.far_cut)
-            {
+            if current >= floor || pos - current > self.mask || budget == 0 {
                 self.son[ptr0] = NO_LINK;
                 self.son[ptr1] = NO_LINK;
                 return;
-            }
-            if far {
-                far_steps += 1;
             }
             budget -= 1;
             floor = current;

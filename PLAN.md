@@ -159,7 +159,7 @@
 | 14 | 两制近存（近带 L3 驻留 + 远树重插） | 实测为负（seq −75%、mt8 −98%），废弃                                       |
 | 06 | 成员级 solid MT                     | 结构不可行（无法跨成员并行共享窗口）；chunk 级 MT 已落地                   |
 | 09 | BT4 字节级流水                      | 已到顶（首步 value-carry −3.6% 即全量）；再降步数只剩显式取舍项            |
-| 13 | 远带候选预算 `RAR_RS_FAR_BAND`      | 仅 seq opt-in 有效（−9% @ +0.22pp），非 mt8 解药；现休眠                   |
+| 13 | 远带候选预算（原 `RAR_RS_FAR_BAND`） | 仅 seq opt-in 有效（−9% @ +0.22pp），非 mt8 解药；已删除，不留开关         |
 
 已落地（别再重新论证）：01 matchless-block DP 快路径（字节相同）、02 collector
 fast-mode 门（`longest==0`，阈值 256）、03 delta 候选通道 + 采样预门、05

@@ -1279,16 +1279,6 @@ pub(crate) fn find_matches_optimal(
         match_finder::TreeMatchFinder::new(tree_window)
     });
     tree_finder.grow_to(tree_window);
-    // Lever-4 probe: `RAR_RS_FAR_BAND=start,cut` caps how many descent
-    // steps may be spent on candidates farther than `start` bytes back, per
-    // the probe on TreeMatchFinder. Experimental speed-vs-ratio switch,
-    // off by default; removed once the experiment settles.
-    if let Ok(v) = std::env::var("RAR_RS_FAR_BAND") {
-        let mut parts = v.split(',').map(|s| s.trim().parse::<usize>());
-        if let (Some(Ok(start)), Some(Ok(cut))) = (parts.next(), parts.next()) {
-            tree_finder.with_far_band(start, cut);
-        }
-    }
     let keep = window.min(NEAR_WINDOW_MAX).min(combined.len());
     // `combined_len == 0` marks a fresh frame: the first chunk of a member
     // (the multi-threaded workers no longer reach here — they run the
