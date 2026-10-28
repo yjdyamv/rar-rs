@@ -76,10 +76,30 @@ impl SlidingWindow {
     }
 
     /// Copy `length` bytes from `dist` bytes back.
-    /// Handles overlapping copies correctly.
+    ///
+    /// Handles overlapping copies correctly: an LZ match may refer forward into
+    /// the bytes it is producing (`dist < length`), which is why this cannot be
+    /// one `copy_within`. The common case — source and destination both inside
+    /// the ring, source behind the destination — copies in chunks of at most
+    /// `dist` bytes with a memmove each; a source that wraps past the end of the
+    /// ring (at most once per lap) takes the plain byte loop.
     pub fn copy_match(&mut self, dist: usize, length: usize) {
-        let mut src = (self.pos.wrapping_sub(dist)) & self.mask;
-        let mut dst = self.pos;
+        let size = self.buf.len();
+        let src = self.pos.wrapping_sub(dist) & self.mask;
+        let dst = self.pos;
+        if src < dst && src + length <= size && dst + length <= size {
+            let mut done = 0;
+            while done < length {
+                let n = dist.min(length - done);
+                self.buf.copy_within(src + done..src + done + n, dst + done);
+                done += n;
+            }
+            self.pos = (dst + length) & self.mask;
+            self.total_written += length as u64;
+            return;
+        }
+        let mut src = src;
+        let mut dst = dst;
         for _ in 0..length {
             self.buf[dst] = self.buf[src];
             src = (src + 1) & self.mask;
@@ -91,18 +111,25 @@ impl SlidingWindow {
 
     /// Extract `length` bytes starting from a total-written offset.
     pub fn get_output(&self, start_total: u64, length: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(length);
+        self.append_output_into(start_total, length, &mut out);
+        out
+    }
+
+    /// Append `length` bytes starting from a total-written offset to `out`,
+    /// straight from the ring — no intermediate buffer, which matters because
+    /// the decoder pushes every output byte through here.
+    pub fn append_output_into(&self, start_total: u64, length: usize, out: &mut Vec<u8>) {
         let buf_size = self.buf.len();
         assert!(length <= buf_size, "requested output exceeds window size");
         let offset = (self.total_written - start_total) as usize;
         let start_pos = (self.pos.wrapping_sub(offset)) & self.mask;
         if start_pos + length <= buf_size {
-            self.buf[start_pos..start_pos + length].to_vec()
+            out.extend_from_slice(&self.buf[start_pos..start_pos + length]);
         } else {
             let first = buf_size - start_pos;
-            let mut out = Vec::with_capacity(length);
             out.extend_from_slice(&self.buf[start_pos..]);
             out.extend_from_slice(&self.buf[..length - first]);
-            out
         }
     }
 }

@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-10-28 @ working tree；实现细节以源码为准。
+> 最后核对：2026-10-29 @ working tree；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -180,7 +180,9 @@ value-carry（−3.6%）、 12 MT 近窗对齐（已被 13 取代）、 16 哈�
 RAR4 `-m5` −26%、RAR5 `-m5` −18%，solid 持平——候选已并行、带宽吃满）、
 17 MT 的 DP 块顺延价格表（`windowed_priced_parse` 把上一块的码长表交给下一块首次
 定价，替代「多跑一遍重定价」，text l3 −0.51pp / 30 MB 文本 −0.6~0.8pp，耗时持平；
-MT 本来就是已接受的字节分歧，packed 只变小）。
+MT 本来就是已接受的字节分歧，packed 只变小）、18 RAR5 解码热路径
+（`BitReader` 移位寄存器、`DecodeTable::quick` 单装载、`copy_match` 分块 memmove、
+`append_output_into` 免中转；`ntoskrnl` m5 提取 47 → 60 MB/s，字节不变）。
 
 **当前基线**（2026-10-27，`ntoskrnl.exe` 12.5 MiB、`-ma5`、本机 16 核、release，
 每档两次取最快；「MT」= 默认线程、「seq」= `-mt1`）

@@ -252,14 +252,14 @@ impl<'a> OutputSink<'a> {
         if to <= from {
             return Ok(());
         }
-        let bytes = window.get_output(from, (to - from) as usize);
-        if self.staging_len() + bytes.len() > MAX_STREAMING_FILTER_BUFFER as usize {
+        let length = (to - from) as usize;
+        if self.staging_len() + length > MAX_STREAMING_FILTER_BUFFER as usize {
             return Err(RarError::format(format!(
                 "filtered output region exceeds streaming buffer limit {}",
                 MAX_STREAMING_FILTER_BUFFER
             )));
         }
-        self.staging.extend_from_slice(&bytes);
+        window.append_output_into(from, length, &mut self.staging);
         Ok(())
     }
 

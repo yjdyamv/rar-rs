@@ -430,6 +430,7 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   options 值的两轮各自从 0 走到自己的 `total`。同理，`bytes_total`
   是**本轮将写的成员**之和：按 id 抽取 时是被选中的那些，否则过滤抽取永远走不到
   100%。
+- **RAR5 解码热路径的四个不变量**：解码速度靠四处结构，改动前先想清楚谁在付钱——①`BitReader` 是**移位寄存器**（`u64` 里高位是未消费比特，一次 8 字节大端装载能填进 7 个字节），所以 `peek_bits` 是一次移位、`skip_bits` 又是一次，别退回逐字节 `copy_from_slice`：那是每次 peek 拷 8 字节，实测约占总解码时间的四成；②`DecodeTable::quick` 把**码长和符号压进一个 `u32`**（高 16 位码长、低 16 位符号），一个 `QUICK_BITS` 前缀一次装载，拆回两个并行数组会让每个字面量多一次内存访问；③`SlidingWindow::copy_match` 在**源不跨环尾且不自我重叠**时按 `dist` 分块走 memmove（`dist >= len` 就是一次 `copy_within`），只有源跨环尾（每绕一圈最多一次）才退逐字节——逐字节版每字节一次掩码，是仅次子 ① 的开销；④`get_output` 只留给原地调用，流式路径用 `append_output_into` **直接追加到 staging**，少一次中间 `Vec` 和它的分配。契约：库内 580 个单元测试中的往返类（`mt_tests::*`、`member_larger_than_shared_window_decodes`、`split_filter_records_decode_across_staging_boundaries`）覆盖正确性；性能对比必须用 `--release` 且**交替跑两个二进制取最小值**，同机上单次运行抖动可达 ±30%。
 - **RAR4 solid 成员搜索可以并行，胜负必须串行裁决**：没开 `parallel` 时的
   `search_solid_member_serial` 是**参照序**，并行版只改“何时算”不改“谁赢”——每个
   候选（plain LZ、逐个 `-mc` 过滤候选、PPMd 试压）都只读进入该成员之前的链状态

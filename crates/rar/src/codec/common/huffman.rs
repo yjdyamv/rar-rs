@@ -20,8 +20,10 @@ pub struct DecodeTable {
     /// decode_count[i]` in `decode_num` are zero-initialized and would
     /// otherwise alias symbol 0.
     decode_count: [u32; MAX_CODE_LENGTH + 2],
-    quick_len: Vec<u8>,
-    quick_num: Vec<u16>,
+    /// Quick lookup, one entry per `QUICK_BITS` prefix: code length in the
+    /// high 16 bits, symbol in the low 16. One load per symbol beats two
+    /// parallel arrays, and the hot loop runs this for every literal.
+    quick: Vec<u32>,
 }
 
 impl DecodeTable {
@@ -63,8 +65,7 @@ impl DecodeTable {
         }
 
         // Build quick lookup table
-        let mut quick_len = vec![0u8; QUICK_SIZE];
-        let mut quick_num = vec![0u16; QUICK_SIZE];
+        let mut quick = vec![0u32; QUICK_SIZE];
 
         let mut code: u32 = 0;
         for cl in 1..=QUICK_BITS {
@@ -76,8 +77,7 @@ impl DecodeTable {
                 for k in 0..fill {
                     let entry = (prefix + k) as usize;
                     if entry < QUICK_SIZE {
-                        quick_len[entry] = cl as u8;
-                        quick_num[entry] = sym;
+                        quick[entry] = ((cl as u32) << 16) | sym as u32;
                     }
                 }
                 code += 1;
@@ -91,34 +91,39 @@ impl DecodeTable {
             decode_pos,
             decode_num,
             decode_count: len_count,
-            quick_len,
-            quick_num,
+            quick,
         }
     }
 }
 
 /// Decode one Huffman symbol from the bitstream.
+///
+/// The common case is a code no longer than [`QUICK_BITS`], which the quick
+/// table answers with one load, one test and one shift; only the tail of the
+/// stream (fewer than `QUICK_BITS` bits left) and longer codes reach the
+/// length table.
+#[inline]
 pub fn decode_symbol(table: &DecodeTable, reader: &mut BitReader) -> Result<usize, &'static str> {
-    let bits_avail = reader.bits_remaining();
-    if bits_avail == 0 {
+    if let Ok(prefix) = reader.peek_bits(QUICK_BITS as u8) {
+        let entry = table.quick[prefix as usize];
+        let cl = entry >> 16;
+        if cl != 0 {
+            reader.skip_bits(cl);
+            return Ok((entry & 0xffff) as usize);
+        }
+    }
+    decode_symbol_slow(table, reader)
+}
+
+/// Decode a symbol whose code is longer than [`QUICK_BITS`], or whose bits sit
+/// in the padded tail of the stream.
+#[cold]
+fn decode_symbol_slow(table: &DecodeTable, reader: &mut BitReader) -> Result<usize, &'static str> {
+    let available = reader.bits_remaining();
+    if available == 0 {
         return Err("Huffman decode: no bits remaining");
     }
-
-    // Try quick lookup
-    let peek_count = (QUICK_BITS).min(bits_avail) as u8;
-    let mut prefix = reader.peek_bits(peek_count)?;
-    if (peek_count as usize) < QUICK_BITS {
-        prefix <<= QUICK_BITS as u32 - peek_count as u32;
-    }
-
-    let cl = table.quick_len[prefix as usize];
-    if cl > 0 && cl <= peek_count {
-        reader.skip_bits(cl as u32);
-        return Ok(table.quick_num[prefix as usize] as usize);
-    }
-
-    // Slow path
-    let peek_count = (MAX_CODE_LENGTH).min(bits_avail) as u8;
+    let peek_count = (MAX_CODE_LENGTH).min(available) as u8;
     let mut bits = reader.peek_bits(peek_count)?;
     if (peek_count as usize) < MAX_CODE_LENGTH {
         bits <<= MAX_CODE_LENGTH as u32 - peek_count as u32;

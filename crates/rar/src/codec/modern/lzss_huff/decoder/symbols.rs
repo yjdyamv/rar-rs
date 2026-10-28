@@ -171,23 +171,17 @@ impl<'d, 's> SymbolReader<'d, 's> {
     /// Read a block header, verify its checksum, refresh the Huffman tables
     /// when the block carries them, and start the block.
     fn read_block_header(&mut self) -> RarResult<BlockInfo> {
-        let block_flags_byte = self
-            .reader
-            .read_byte()
-            .map_err(|e| RarError::Format(e.to_string()))?;
+        let block_flags_byte = self.reader.read_byte().map_err(format_err)?;
         let table_present = (block_flags_byte >> 7) & 1 != 0;
         let is_last = (block_flags_byte >> 6) & 1 != 0;
         let byte_count = ((block_flags_byte >> 3) & 3) + 1;
         let bit_size = block_flags_byte & 7;
 
-        let checksum_byte = self
-            .reader
-            .read_byte()
-            .map_err(|e| RarError::Format(e.to_string()))?;
+        let checksum_byte = self.reader.read_byte().map_err(format_err)?;
         let size_bytes = self
             .reader
             .read_bytes(byte_count as usize)
-            .map_err(|e| RarError::Format(e.to_string()))?;
+            .map_err(format_err)?;
         let mut block_size: u32 = 0;
         for (i, &b) in size_bytes.iter().enumerate() {
             block_size |= (b as u32) << (i * 8);
@@ -239,16 +233,28 @@ impl<'d, 's> SymbolReader<'d, 's> {
 
     /// Decode one symbol. `Ok(None)` means the symbol produced no output
     /// (an invalid repeat) and the caller should keep reading.
+    ///
+    /// The literal path is the hot one: a symbol below 256 costs one quick
+    /// table lookup and a counter bump. Everything else — filters, repeats,
+    /// cache moves, distance codes — stays out of line so the literal case
+    /// keeps its branch predictor warm and its code in cache.
+    #[inline]
     fn decode_symbol(&mut self) -> RarResult<Option<Symbol>> {
-        let sym = {
-            let table = self.state.table_nc.as_ref().ok_or_else(no_huffman_tables)?;
-            decode_symbol(table, &mut self.reader).map_err(|e| RarError::Format(e.to_string()))?
+        let table = match self.state.table_nc.as_ref() {
+            Some(table) => table,
+            None => return Err(no_huffman_tables()),
         };
-
+        let sym = decode_symbol(table, &mut self.reader).map_err(format_err)?;
         if sym < 256 {
             self.pos += 1;
             return Ok(Some(Symbol::Literal(sym as u8)));
         }
+        self.decode_non_literal(sym)
+    }
+
+    /// The rare half of [`Self::decode_symbol`].
+    #[inline]
+    fn decode_non_literal(&mut self, sym: usize) -> RarResult<Option<Symbol>> {
         if sym == SYM_FILTER {
             let filter = parse_filter(&mut self.reader, self.pos)?;
             self.max_filter_end = self
@@ -273,8 +279,7 @@ impl<'d, 's> SymbolReader<'d, 's> {
             let dist = dist_cache_touch(&mut self.state.dist_cache, sym - SYM_CACHE_BASE);
             let len_slot = {
                 let table = self.state.table_rc.as_ref().ok_or_else(no_huffman_tables)?;
-                decode_symbol(table, &mut self.reader)
-                    .map_err(|e| RarError::Format(e.to_string()))?
+                decode_symbol(table, &mut self.reader).map_err(format_err)?
             };
             let length = decode_length(len_slot, &mut self.reader)?;
             self.state.last_length = length;
@@ -290,7 +295,7 @@ impl<'d, 's> SymbolReader<'d, 's> {
         let mut length = decode_length(len_slot, &mut self.reader)?;
         let dist_slot = {
             let table = self.state.table_dc.as_ref().ok_or_else(no_huffman_tables)?;
-            decode_symbol(table, &mut self.reader).map_err(|e| RarError::Format(e.to_string()))?
+            decode_symbol(table, &mut self.reader).map_err(format_err)?
         };
         let dist = {
             let table = self
@@ -314,4 +319,10 @@ impl<'d, 's> SymbolReader<'d, 's> {
 
 fn no_huffman_tables() -> RarError {
     RarError::format("no Huffman tables defined")
+}
+
+/// Bitstream failures carry a static message; only the error path allocates.
+#[cold]
+fn format_err(e: &'static str) -> RarError {
+    RarError::Format(e.to_string())
 }
