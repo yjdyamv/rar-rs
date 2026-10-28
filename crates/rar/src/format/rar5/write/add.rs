@@ -747,8 +747,13 @@ pub(crate) fn write_rar5_dir_entry(
 
     let (mtime, file_flags) =
         rar5_time_fields(cx, mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY, false);
+    // WinRAR stores a RAR5 directory name with no trailing separator — only
+    // the FILE_FLAG_DIRECTORY bit marks it (RAR4 behaves the same way, with
+    // the 0x10 attribute bit instead). Callers may pass the name either way,
+    // so the separator is dropped here rather than at every call site.
+    let name = name.trim_end_matches('/');
     let fh = FileHeader {
-        name: format!("{name}/"),
+        name: name.to_string(),
         attributes: attrs,
         mtime,
         host_os: crate::platform::host_os(),

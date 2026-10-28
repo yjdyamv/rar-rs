@@ -201,6 +201,21 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   6.23/7.23 都能解，这是 RAR4 唯一能拿到 PPMd 比率的路径
   （见 `docs/rar4-creation-spec.md`）。代价是 PPMd 试压比 LZ 慢约 4 倍
   （30 MB 文本、`-mt1`、匹配查找器优化后：18.9 s vs 5.0 s）。
+- **solid 成员的顺序是官方的分组规则，不是参数顺序**：`-s` 且压缩时（`-m0`
+  与 `-ds` 除外），官方先把成员按**扩展名**分组（大小写不敏感、无扩展名在前、
+  `a.` 这类尾点算无扩展名、`a.tar.gz` 取 `gz`），组内按**基本名**（不含目录
+  前缀）升序、同基本名再按**大小**升序、最后按全名；目录条目全部排在文件之后，
+  且**按深度降序**（`a/b/c` 在 `a/b` 之前，同深度仍按上面的键）。`update`/
+  `freshen` 追加的成员同样按扩展名键排序（`-m0`、非 solid 也一样），但**不看
+  `rarfiles.lst`**（实测）。契约：`cli_solid_members_follow_winrars_group_order`、
+  `cli_stored_and_no_sort_keep_the_input_order`、`cli_update_appends_members_in_winrars_order`。
+  已知残余差异：同一文件既作为显式参数、又落在目录参数里时，官方按 `-o+` 的
+  覆盖语义把它**移到末尾**，我们保留原位。
+- **目录成员不带尾分隔符**：RAR5 用 `FILE_FLAG_DIRECTORY`、RAR4 用 `0x10`
+  属性位标记目录，名字本身就是 `sub`（不是 `sub/`）。我们旧版 RAR5 写入器补了
+  `/`，`lb` 会打出 `sub\`；2026-10-27 修正，`rename_entries` 对源名字带斜杠的
+  外来归档保持原样（不强行归一）。契约：
+  `cli_directory_members_carry_no_trailing_separator`。
 - **RAR4 solid 链中不落 STORE**：官方在 `-s` 链里即使载荷不可压也照写正常
   method（`0x33`），我们保留“压不小就 STORE”的短路。STORE 成员合法地中断链
   （其后成员不再带 `FHD_SOLID`，读取器会重置表），但比官方少一段 ratio。 对拍

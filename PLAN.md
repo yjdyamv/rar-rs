@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-10-27 @ working tree；实现细节以源码为准。
+> 最后核对：2026-10-28 @ working tree；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -29,6 +29,11 @@
   repack； `-hp` 与分卷（`rn`/`ch`/`k`/注释）均已支持。
 - **命令面**：官方 `rar` 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt`
   列表变体）；官方 7.30 新增的 `la`/`va`/`lba`/`vba` 与服务块列表已接。
+- **成员顺序与目录形状对齐官方**：solid 归档按官方的分组规则排序（扩展名 →
+  基本名 → 大小 → 全名，目录条目排最后且深度降序），`update`/`freshen` 追加的
+  成员同样排序（`-m0`/`-ds` 保持收集顺序），目录成员不带尾分隔符（RAR5
+  `FILE_FLAG_DIRECTORY`、RAR4 `0x10`），`rarfiles.lst` 的优先级与子集规则照抄。
+  契约见 [`docs/PITFALLS.md`](docs/PITFALLS.md)「solid 成员的顺序」。
 - **对外两组 API**：Rust 库是角色门面（`ArchiveReader` / `ArchiveWriter` /
   `ArchiveEditor`）；Node 绑定（`crates/rar-napi`）**手写入口 `rar-rs.js` +
   `rar-rs.d.ts`**，生成物只叫 `binding.*`，`tsc --noEmit` 在 CI
@@ -261,14 +266,11 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 
 ## 已知小差异（记录，互操作无碍）
 
-- **RAR4 solid 归档的成员排序**：solid
-  时官方按名字/扩展名启发式排序，我们按参数顺序；顺序一致时头字段（`MHD_SOLID`、
-  `FHD_SOLID`、窗口位）已与官方逐字段对齐，载荷与链字典仍按各自实现。非 solid 的
-  头字段与 `-m0` 已逐字节对齐。
 - **`lb` 分片成员**：官方 `Rar.exe lb` 对跨卷成员不打印该成员名，官方
   `UnRAR.exe lb` 与我们一致；我们随 UnRAR。
-- **目录条目名带尾斜杠**；**RAR4 solid 且无 `rarfiles.lst`**
-  时的排序同上面第一条。
+- **同一次 `a` 里的重复成员**：同一个文件既当显式参数、又落在目录参数里时，
+  官方按 `-o+` 的覆盖语义把它挪到末尾，我们保留原位（其余排序规则已对齐，
+  见 [`docs/PITFALLS.md`](docs/PITFALLS.md)「solid 成员的顺序」）。
 - **`-ts` 的「字母+数字」组合**、**`-rr<N>%` 取整**、**`rar rr` 恒 3%**、
   **`rar r` 不写 `fixed.<name>`**、**无控制台时的覆盖询问**：口径与理由见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。

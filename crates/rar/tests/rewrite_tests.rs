@@ -1050,16 +1050,16 @@ fn rename_directory_renames_descendants() {
         ed.entries()
             .map(|e| e.name().to_string())
             .collect::<Vec<_>>(),
-        ["old/", "old/sub/f.txt"]
+        ["old", "old/sub/f.txt"]
     );
-    let id = ed.unique_entry("old/").unwrap();
+    let id = ed.unique_entry("old").unwrap();
     let n = ed.rename_entries(&[(id, "new".to_string())]).unwrap();
     assert_eq!(n, 1);
     assert_eq!(
         ed.entries()
             .map(|e| e.name().to_string())
             .collect::<Vec<_>>(),
-        ["new/", "new/sub/f.txt"],
+        ["new", "new/sub/f.txt"],
         "descendant prefix renamed"
     );
     let mut rar = ArchiveReader::open(&path).unwrap();

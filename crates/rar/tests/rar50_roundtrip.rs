@@ -642,11 +642,11 @@ fn add_as_uses_custom_archive_name() {
         "missing renamed entry: {names:?}"
     );
     assert!(
-        names.iter().any(|n| n == "root/"),
+        names.iter().any(|n| n == "root"),
         "missing dir entry: {names:?}"
     );
     assert!(
-        names.iter().any(|n| n == "root/sub/"),
+        names.iter().any(|n| n == "root/sub"),
         "missing nested dir entry: {names:?}"
     );
     assert_eq!(
@@ -676,7 +676,7 @@ fn add_directory_only_writes_dir_entries_without_children() {
 
     let mut rar = ArchiveReader::open(&path).expect("open");
     let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
-    assert!(names.iter().any(|n| n == "tree/"), "missing dir: {names:?}");
+    assert!(names.iter().any(|n| n == "tree"), "missing dir: {names:?}");
     assert!(
         !names.iter().any(|n| n.contains("ignored.txt")),
         "child leaked in: {names:?}"
@@ -703,7 +703,7 @@ fn add_directory_only_writes_dir_entries_without_children() {
     let rar = ArchiveReader::open(&path2).expect("open");
     let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
     assert!(
-        names.iter().any(|n| n == "tree/empty/"),
+        names.iter().any(|n| n == "tree/empty"),
         "explicit empty dir missing: {names:?}"
     );
 }

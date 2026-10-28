@@ -16,6 +16,7 @@ mod formats;
 mod input;
 mod legacy;
 mod operations;
+mod ordering;
 mod parity;
 mod parity2;
 mod recovery;

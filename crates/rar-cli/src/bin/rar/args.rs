@@ -335,6 +335,9 @@ pub(crate) struct FilesArgs {
     /// when a move creates the archive)
     #[arg(short = 's', long, overrides_with = "solid")]
     pub(crate) solid: bool,
+    /// Disable name sorting for the appended members (like `-ds`)
+    #[arg(long = "no-sort")]
+    pub(crate) no_sort: bool,
     /// Dictionary size for compression (like `-md<size>`)
     #[arg(long = "dict-size", value_name = "SIZE")]
     pub(crate) dict_size: Option<String>,
@@ -874,6 +877,7 @@ pub(crate) fn as_files_args(args: &CreateArgs) -> FilesArgs {
         files: args.files.clone(),
         level: args.level,
         solid: args.solid,
+        no_sort: args.no_sort,
         dict_size: args.dict_size.clone(),
         archive_format: args.archive_format.clone(),
         dict_extract: args.dict_extract.clone(),

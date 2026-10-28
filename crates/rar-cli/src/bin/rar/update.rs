@@ -174,6 +174,19 @@ fn cmd_update_freshen(
             .collect()
     };
 
+    // WinRAR sorts the members it appends to an existing archive by
+    // extension and name, exactly like a fresh solid archive does, with the
+    // directory entries last. Unlike creation this happens for stored (`-m0`)
+    // and non-solid updates too, and it never consults `rarfiles.lst`
+    // (measured against `rar u`; `-ds` turns it off).
+    if !args.no_sort {
+        let (files, mut dirs): (Vec<_>, Vec<_>) = to_add.into_iter().partition(|c| !c.is_dir);
+        to_add = files;
+        crate::list::sort_solid_by_extension(&mut to_add);
+        crate::list::sort_directories_deepest_first(&mut dirs);
+        to_add.extend(dirs);
+    }
+
     let updated_count = to_add.len();
     // -tsp: snapshot source access times before the update reads them.
     #[cfg(unix)]

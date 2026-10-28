@@ -20,16 +20,24 @@ pub(crate) fn build_rename_map(
         if *idx >= entries.len() {
             return Err(RarError::StaleEntryId);
         }
-        let old_norm = map
+        let old_name = map
             .get(idx)
-            .map(|n| n.as_str())
-            .unwrap_or(entries[*idx].name())
-            .trim_end_matches('/')
-            .to_string();
+            .cloned()
+            .unwrap_or_else(|| entries[*idx].name().to_string());
+        let old_norm = old_name.trim_end_matches('/').to_string();
+        // Members written by WinRAR carry no trailing separator (the
+        // directory flag marks them); a foreign member that does keep one is
+        // renamed in kind instead of being normalized.
+        let keeps_separator = old_norm.len() != old_name.len();
         let is_dir = entries[*idx].is_dir();
         let new_norm = new.trim_end_matches('/').to_string();
         if is_dir {
-            map.insert(*idx, format!("{new_norm}/"));
+            let renamed = if keeps_separator {
+                format!("{new_norm}/")
+            } else {
+                new_norm.clone()
+            };
+            map.insert(*idx, renamed);
             let prefix = format!("{old_norm}/");
             for (i, e) in entries.iter().enumerate() {
                 if i == *idx || map.contains_key(&i) {

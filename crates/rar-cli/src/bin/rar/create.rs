@@ -470,7 +470,8 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 .map_err(|e| CliError::from(e).context("create"))?,
         )
     };
-    // Directory entries always come after the files, like WinRAR.
+    // Directory entries always come after the files, like WinRAR, deepest
+    // first (see `sort_directories_deepest_first`).
     let (file_entries, dir_entries): (Vec<_>, Vec<_>) =
         collected.into_iter().partition(|c| !c.is_dir);
     let mut collected: Vec<_> = file_entries;
@@ -482,13 +483,28 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // with optional `$default`); matched files are grouped by the
     // highest-priority mask, where a mask whose matches are a subset of
     // another mask's wins regardless of position (WinRAR semantics).
-    // `-ds` disables the sorting (like WinRAR).
-    if (args.solid || args.solid_params.is_some() || misc.solid_reset != "off") && !args.no_sort {
+    // Without a list, WinRAR groups the members by extension and sorts each
+    // group by name (`sort_solid_by_extension`). Both are skipped for stored
+    // archives (`-m0`), which WinRAR leaves in collection order, and for
+    // `-ds`.
+    let sorted_solid = (args.solid || args.solid_params.is_some() || misc.solid_reset != "off")
+        && !args.no_sort
+        && args.level > 0;
+    if sorted_solid {
         let masks = input::read_rarfiles_lst();
-        if !masks.is_empty() {
+        if masks.is_empty() {
+            crate::list::sort_solid_by_extension(&mut collected);
+        } else {
             apply_rarfiles_order(&mut collected, &masks);
         }
     }
+    // Directory entries follow the same group order when it applies, then
+    // go deepest first.
+    let mut dir_entries = dir_entries;
+    if sorted_solid {
+        crate::list::sort_solid_by_extension(&mut dir_entries);
+    }
+    crate::list::sort_directories_deepest_first(&mut dir_entries);
     collected.extend(dir_entries);
     // -tsp: snapshot source access times before reading the files.
     #[cfg(unix)]

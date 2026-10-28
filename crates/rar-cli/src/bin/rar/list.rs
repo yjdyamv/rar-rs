@@ -260,13 +260,82 @@ pub(crate) fn cmd_info(args: &ArchiveArgs) -> CliResult<()> {
     Ok(())
 }
 
+/// Split an archive name into its Windows-style base name and the extension
+/// WinRAR sorts by. The extension is the text after the *last* dot of the
+/// base name, so `.hidden` has the extension `hidden` and a trailing dot
+/// (`c.`) has none — both measured against `rar a -s`.
+pub(crate) fn name_extension(name: &str) -> (&str, &str) {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    match base.rsplit_once('.') {
+        Some((stem, ext)) => (stem, ext),
+        None => (base, ""),
+    }
+}
+
+/// WinRAR's in-group member order: base name first (case-insensitively),
+/// then the member's size, then the whole name so members with the same base
+/// name in different directories stay in a fixed order. Measured against
+/// `rar a -s`: `zzz\a.log` sorts before `b.log`, which sorts before
+/// `aaa\c.log` (the directory prefix does not participate), and two members
+/// with the same base name are ordered by size, smaller first, with the
+/// whole name deciding equal sizes.
+fn solid_name_key(name: &str, size: u64) -> (String, u64, String) {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    (base.to_lowercase(), size, name.to_lowercase())
+}
+
+/// Uncompressed size of a collected entry, or 0 when it cannot be read (a
+/// link, a vanished path): the tie-break only orders members that share a
+/// base name, so a wrong guess never reorders unrelated members.
+fn collected_size(c: &crate::name_policy::Collected) -> u64 {
+    std::fs::metadata(&c.path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Default solid member order (no `rarfiles.lst`): WinRAR groups members by
+/// extension, case-insensitively and with the empty extension first, and
+/// sorts each group by [`solid_name_key`]. Directory entries are not passed
+/// here — the caller appends them last, like WinRAR.
+pub(crate) fn sort_solid_by_extension(collected: &mut [crate::name_policy::Collected]) {
+    collected.sort_by_cached_key(|c| {
+        let (_, ext) = name_extension(&c.name);
+        let (base, size, full) = solid_name_key(&c.name, collected_size(c));
+        (ext.to_lowercase(), base, size, full)
+    });
+}
+
+/// Depth of an archive name in the directory tree (`sub/f.txt` is 1). Used to
+/// emit directory entries the way WinRAR does.
+fn name_depth(name: &str) -> usize {
+    name.bytes().filter(|b| *b == b'/' || *b == b'\\').count()
+}
+
+/// Directory entries, deepest first: WinRAR writes them level by level from
+/// the bottom of the tree, so `a/b/c` precedes `a/b`, which precedes `a`
+/// (measured against `rar a -s` with nested trees). Inside one level the
+/// caller's order is kept (`sort_solid_by_extension` when sorting is on, the
+/// collection order otherwise), so this is a stable sort by depth.
+pub(crate) fn sort_directories_deepest_first(collected: &mut [crate::name_policy::Collected]) {
+    collected.sort_by_key(|c| std::cmp::Reverse(name_depth(&c.name)));
+}
+
+/// Whether a rarfiles.lst mask selects a member. WinRAR matches the mask
+/// against the *base* name only: `f*.txt` selects `sub/f1.txt`, and a mask
+/// that carries a directory part (`sub/*.txt`) selects nothing. Masks count
+/// the same as with `-x`/`-n`, so `*` also crosses separators.
+fn rarfiles_mask_matches(mask: &str, name: &str) -> bool {
+    let name = name.trim_start_matches("./");
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    crate::name_policy::mask_match(mask, base)
+}
+
 /// Reorder `collected` according to a rarfiles.lst mask list (`None` =
 /// `$default` position). Each file is placed in the group of its
 /// highest-priority matching mask: the earliest mask wins, except that a
 /// mask whose match set is a subset of another's takes priority over it
 /// regardless of position (WinRAR rule). Files matching nothing go to
-/// `$default`, or to the end when there is no `$default`. The sort is
-/// stable, so files inside a group keep their collection order.
+/// `$default`, or to the end when there is no `$default`. Inside a group
+/// members follow [`solid_name_key`], like WinRAR (a subset group still moves
+/// ahead of its superset, so `f*.cpp` before `*.cpp`).
 pub(crate) fn apply_rarfiles_order(
     collected: &mut Vec<crate::name_policy::Collected>,
     masks: &[Option<String>],
@@ -283,11 +352,7 @@ pub(crate) fn apply_rarfiles_order(
             collected
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| {
-                    pat.is_some_and(|p| {
-                        crate::name_policy::mask_match(p, c.name.trim_start_matches("./"))
-                    })
-                })
+                .filter(|(_, c)| pat.is_some_and(|p| rarfiles_mask_matches(p, &c.name)))
                 .map(|(i, _)| i)
                 .collect()
         })
@@ -302,9 +367,8 @@ pub(crate) fn apply_rarfiles_order(
                 .iter()
                 .enumerate()
                 .filter(|(_, m)| {
-                    m.as_deref().is_some_and(|p| {
-                        crate::name_policy::mask_match(p, c.name.trim_start_matches("./"))
-                    })
+                    m.as_deref()
+                        .is_some_and(|p| rarfiles_mask_matches(p, &c.name))
                 })
                 .map(|(mi, _)| mi)
                 .collect();
@@ -327,7 +391,12 @@ pub(crate) fn apply_rarfiles_order(
         .collect();
 
     let mut order: Vec<usize> = (0..collected.len()).collect();
-    order.sort_by_key(|&i| best[i]);
+    order.sort_by_cached_key(|&i| {
+        let c = &collected[i];
+        let (_, ext) = name_extension(&c.name);
+        let (base, size, full) = solid_name_key(&c.name, collected_size(c));
+        (best[i], ext.to_lowercase(), base, size, full)
+    });
     let reordered: Vec<crate::name_policy::Collected> =
         order.into_iter().map(|i| collected[i].clone()).collect();
     *collected = reordered;

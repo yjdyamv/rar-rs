@@ -320,7 +320,7 @@ fn typed_batch_preserves_duplicates_and_order() {
         .entries()
         .map(|entry| entry.name().to_owned())
         .collect();
-    assert_eq!(names, ["same.txt", "middle.txt", "same.txt", "last/"]);
+    assert_eq!(names, ["same.txt", "middle.txt", "same.txt", "last"]);
     let duplicate_ids: Vec<_> = reader
         .entries_named("same.txt")
         .map(|entry| entry.id())

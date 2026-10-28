@@ -465,11 +465,11 @@ fn cli_extract_member_selection_never_hijacks_dest() {
     );
 }
 
-/// `-se` (reset the solid chain on a file-extension change) must preserve
-/// WinRAR's input order — it does NOT reorder members by extension. The solid
-/// statistics are simply reset as a new extension is encountered.
+/// `-se` (reset the solid chain on a file-extension change) still sorts the
+/// members like every other solid archive — WinRAR groups them by extension,
+/// which is exactly why the chain then resets only once per extension group.
 #[test]
-fn cli_se_preserves_input_order() {
+fn cli_se_sorts_members_by_extension() {
     let dir = make_temp_dir();
     let a = dir.path().join("a.txt");
     let b = dir.path().join("b.bin");
@@ -493,14 +493,16 @@ fn cli_se_preserves_input_order() {
         .unwrap();
     assert!(status.success());
 
-    // Input order a.txt, b.bin, c.txt, d.bin must be preserved exactly.
+    // WinRAR groups by extension (`.bin` before `.txt`) and sorts each group
+    // by name, so the input order does not survive — measured against
+    // `rar a -s -se`.
     let mut rar = rar_rs::ArchiveReader::open(&arc).unwrap();
     assert_eq!(
         rar.entries()
             .map(|e| e.name().to_string())
             .collect::<Vec<String>>(),
-        vec!["a.txt", "b.bin", "c.txt", "d.bin"],
-        "-se must not reorder members by extension"
+        vec!["b.bin", "d.bin", "a.txt", "c.txt"],
+        "-se must sort members by extension like WinRAR"
     );
     let a_id = rar.unique_entry("a.txt").unwrap();
     assert_eq!(rar.read_entry(a_id).unwrap(), std::fs::read(&a).unwrap());
@@ -511,9 +513,9 @@ fn cli_se_preserves_input_order() {
     let d_id = rar.unique_entry("d.bin").unwrap();
     assert_eq!(rar.read_entry(d_id).unwrap(), std::fs::read(&d).unwrap());
 
-    // The order-preserving -se archive must read back through our own
-    // `unrar t` (self-consistency check; cli_behavior is cross-platform and
-    // has no WinRAR dependency).
+    // The sorted -se archive must read back through our own `unrar t`
+    // (self-consistency check; cli_behavior is cross-platform and has no
+    // WinRAR dependency).
     let res = std::process::Command::new(UNRAR_CLI)
         .args(["t", "-idq"])
         .arg(&arc)

@@ -96,7 +96,7 @@ fn editor_catalog_is_duplicate_safe_and_edits_independently() {
     assert_eq!(reader.read_entry(survivors[0]).unwrap(), b"first");
     assert_eq!(
         sorted_names(&path),
-        ["d/", "d/x.txt", "other.txt", "same.txt"]
+        ["d", "d/x.txt", "other.txt", "same.txt"]
     );
 
     // Rename the remaining duplicate by its fresh ID.
@@ -107,7 +107,7 @@ fn editor_catalog_is_duplicate_safe_and_edits_independently() {
         .unwrap();
     assert_eq!(
         sorted_names(&path),
-        ["d/", "d/x.txt", "other.txt", "renamed.txt"]
+        ["d", "d/x.txt", "other.txt", "renamed.txt"]
     );
     let mut reader = ArchiveReader::open(&path).unwrap();
     let renamed = reader.unique_entry("renamed.txt").unwrap();
@@ -141,13 +141,13 @@ fn rename_entries_matches_legacy_output_bytes_with_dir_expansion() {
     let (src, twin) = fixture_pair(dir.path(), "ren");
 
     let mut legacy = ArchiveEditor::open(&src).unwrap();
-    let legacy_dir = legacy.unique_entry("d/").unwrap();
+    let legacy_dir = legacy.unique_entry("d").unwrap();
     legacy
         .rename_entries(&[(legacy_dir, "renamed".to_string())])
         .unwrap();
 
     let mut editor = ArchiveEditor::open(&twin).unwrap();
-    let dir_id = editor.unique_entry("d/").unwrap();
+    let dir_id = editor.unique_entry("d").unwrap();
     editor
         .rename_entries(&[(dir_id, "renamed".to_string())])
         .unwrap();
@@ -478,7 +478,7 @@ fn combined_edit_plan_applies_all_ops_in_one_rewrite() {
 
     let mut editor = ArchiveEditor::open(&path).unwrap();
     let other = editor.unique_entry("other.txt").unwrap();
-    let dir_member = editor.unique_entry("d/").unwrap();
+    let dir_member = editor.unique_entry("d").unwrap();
     let duplicate = editor.entries_named("same.txt").next().unwrap().id();
 
     let plan = EditPlan::new()
@@ -494,7 +494,7 @@ fn combined_edit_plan_applies_all_ops_in_one_rewrite() {
     // duplicate was renamed independently, and the deleted member is gone.
     assert_eq!(
         sorted_names(&path),
-        ["first.txt", "renamed/", "renamed/x.txt", "same.txt"]
+        ["first.txt", "renamed", "renamed/x.txt", "same.txt"]
     );
     let mut reader = ArchiveReader::open(&path).unwrap();
     let first = reader.unique_entry("first.txt").unwrap();
@@ -703,7 +703,7 @@ fn combined_plan_with_comment_and_recovery_applies_atomically() {
 
     let mut editor = ArchiveEditor::open(&path).unwrap();
     let other = editor.unique_entry("other.txt").unwrap();
-    let dir_member = editor.unique_entry("d/").unwrap();
+    let dir_member = editor.unique_entry("d").unwrap();
     let report = editor
         .apply(
             EditPlan::new()
@@ -718,7 +718,7 @@ fn combined_plan_with_comment_and_recovery_applies_atomically() {
     // Members, comment and recovery record all landed in the one rewrite.
     assert_eq!(
         sorted_names(&path),
-        ["renamed/", "renamed/x.txt", "same.txt", "same.txt"]
+        ["renamed", "renamed/x.txt", "same.txt", "same.txt"]
     );
     let mut archive = ArchiveReader::open(&path).unwrap();
     assert_eq!(archive.comment().unwrap(), Some(b"combined plan".to_vec()));
