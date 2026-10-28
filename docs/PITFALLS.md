@@ -442,6 +442,25 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `RAR29_PARALLEL_MEMBER_THRESHOLD` 时根本不进这条路（它自己的块级并行会把切片
   排到彼此后面）。契约：`solid_search_parallel_matches_serial`（同一链两种跑法逐
   字节相等，并覆盖 PPMd 胜、LZ 过滤胜、STORE 三条分支）。
+- **DP 解析的两笔账：价格表只算一次，收敛了就停**：`optimal_parse_tokens` 的每个
+  位置、每个长度槽都要问「这个长度的价格区间到哪结束」（`same_price_run_end`），
+  早先它每次都回头去扫 `state.reps` 找「该距离是否在缓存里」并重算
+  `length_bonus`——这两件事 `EncoderMatchState::plan` 在同一个位置已经算过一遍
+  （`plan.cache_index` 是否 `Some` 就是「在缓存里」，`plan.fresh.bonus` 就是那个
+  加成）。改成 `same_price_run_end(&plan, length, max_match)` 之后逐字节相同，同机
+  交替 A/B：`ntoskrnl` 12.5 MiB `-ma5 -m5 -mt1` 与 `-m3 -mt1`、30 MB 文本 `-m5`、
+  以及 `-mt16` 全部 **−4.5~−8.9%**（20 组归档 sha256 全等）。另一半是重定价的
+  不动点：`-m2..-m5` 会跑 `OPTIMAL_PARSE_PASSES` 次「按上一轮码长表重新定价」，
+  一旦某轮产出的 token 序列与上一轮完全相同，后面几轮必然产出同一个序列（价格只
+  由 token 序列决定），所以 `if repriced == tokens { break; }` 是白送的早退；实测只
+  在二进制数据上触发（`ntoskrnl` m5 601 次重定价里 39 次收敛、m3 201 次里 1 次，
+  4 MB 文本 0 次），文本类语料别指望它。**别试图把这两处再往前推**：按
+  (位置, 距离) 缓存重复距离探测结果（跨 pass 复用 `match_length_at`）实测无收益
+  （每位置多 16 字节流式流量比省下的远地址读更贵），预取未来位置的两个重复距离
+  同样无收益（±13% 的机器抖动就能吃掉全部信号），把 `OPT_BLOCK_SIZE` 从 64 KiB 降
+  到 16 KiB 只换来 3.7% 且改变字节——**DP 的 55% 是远地址探测的缓存缺失加每步定价
+  本身，不是数组足迹**。做这类对比必须交替跑两个二进制取最小值：同机抖动可达
+  ±30%，单跑一轮会得出反的结论。
 - **并行提取必须给逐成员语义让路**：开了进度回调、或策略不是 `Abort` 时，
   `extract_all_parallel` 一律返回 `None`
   退回串行——它先把所有成员解码完，"在第一个失败处停下"根本无法实现，与其猜不如让路。改这些条件前先想清楚顺序语义。

@@ -882,25 +882,22 @@ impl BlockSplitter {
 /// The longest match at `distance` that costs exactly what a match of
 /// `length` costs. Only the length slot varies with length, and a slot
 /// covers a run of consecutive lengths, so the end of that run is the last
-/// length worth pricing (rars `same_price_run_end`).
-fn same_price_run_end(
-    state: &EncoderMatchState,
-    length: u32,
-    distance: u32,
-    variant: ArchiveVersion,
-    max_match: usize,
-) -> u32 {
+/// length worth pricing (rars `same_price_run_end`). `plan` already carries
+/// what the distance side of the price depends on — whether it repeats the
+/// last match, whether it sits in the cache, and the length bonus a fresh
+/// distance costs — so the run is computed without looking at the encoder
+/// state again.
+fn same_price_run_end(plan: &MatchDistancePlan, length: u32, max_match: usize) -> u32 {
     // Repeating the last distance at the last length codes in a couple of
     // bits, so that one length must be priced on its own rather than
     // folded into the run around it.
-    let repeat_length = (distance == state.reps[0] && state.last_length != 0)
-        .then_some(state.last_length)
-        .filter(|&repeat_length| repeat_length >= length);
+    let repeat_length = (plan.repeat_length >= length).then_some(plan.repeat_length);
     if repeat_length == Some(length) {
         return length;
     }
-    let repeated = state.reps.iter().any(|&d| d == distance && d != 0);
-    let bonus = if repeated { 0 } else { length_bonus(distance) };
+    // Whether the distance is already in the cache is what [`EncoderMatchState::plan`]
+    // recorded, and a cached distance costs no length bonus at all.
+    let bonus = plan.fresh.map_or(0, |fresh| fresh.bonus);
     let Some(value) = length.checked_sub(2 + bonus) else {
         return length;
     };
@@ -913,7 +910,6 @@ fn same_price_run_end(
     if let Some(repeat_length) = repeat_length {
         end = end.min(repeat_length - 1);
     }
-    let _ = variant;
     end.max(length).min(max_match as u32)
 }
 
@@ -1057,8 +1053,7 @@ fn optimal_parse_tokens(
                     }
                     steps_left -= 1;
                 }
-                let reach =
-                    same_price_run_end(&state, length, distance, variant, max_match).min(run_end);
+                let reach = same_price_run_end(&plan, length, max_match).min(run_end);
                 let cost = match prices {
                     Some(prices) => prices.match_cost(&plan, reach),
                     None => estimated_match_cost(&plan, reach),
@@ -1526,7 +1521,7 @@ fn parse_one_block(
             convert_tokens(&tokens, combined, block.clone(), &mut screen, variant);
         let (nc_l, dc_l, ldc_l, rc_l) = prices_from_frequencies(&nc, &dc, &ldc, &rc);
         let prices = TokenPrices::new(&nc_l, &dc_l, &ldc_l, &rc_l);
-        tokens = optimal_parse_tokens(
+        let repriced = optimal_parse_tokens(
             combined,
             block.clone(),
             limits,
@@ -1534,6 +1529,11 @@ fn parse_one_block(
             &matches,
             initial,
         );
+        let settled = repriced == tokens;
+        tokens = repriced;
+        if settled {
+            break;
+        }
     }
     let (symbols, _) = convert_tokens(&tokens, combined, block.clone(), state, variant);
     symbols
