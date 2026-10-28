@@ -291,6 +291,8 @@ pub fn payload(name: &str) -> Vec<u8> {
         "big.bin" => noise(0x1234_5678, 200_000),
         // Sized to land inside each locator offset-width tier, so the
         // reserved field width can be compared against official's.
+        "tier_200.bin" => noise(0x2545_f491, 200),
+        "tier_8k.bin" => noise(0x2545_f491, 8_000),
         "tier_1k.bin" => noise(0x2545_f491, 1024),
         "tier_100k.bin" => noise(0x2545_f491, 100_000),
         "tier_8m.bin" => noise(0x2545_f491, 8 << 20),

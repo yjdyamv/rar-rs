@@ -168,6 +168,10 @@ fn write_streamed_payload(
     if cx.write_ctx().output.volume_size.is_none() {
         // ── Single-volume ──
         let hdr_bytes = fh_base.to_bytes();
+        // A STORE member writes its whole payload here, so the automatic
+        // quick-open rule keys on that run, exactly as it does on the
+        // compressed path.
+        cx.mark_quick_open_data(packed_size);
         cx.record_quick_open_entry(&hdr_bytes)?;
         cx.write_block_header(&hdr_bytes)?;
         let written = {

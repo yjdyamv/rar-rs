@@ -1864,7 +1864,7 @@ fn cli_listing_uses_the_quick_open_record() {
 
     let qo = dir.path().join("qo.rar");
     let plain = dir.path().join("plain.rar");
-    for (archive, extra) in [(&qo, Some("-qo")), (&plain, None)] {
+    for (archive, extra) in [(&qo, Some("-qo+")), (&plain, None)] {
         let mut command = std::process::Command::new(RAR_CLI);
         command.args(["a", "-m0", "-idq"]);
         if let Some(extra) = extra {

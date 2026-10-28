@@ -21,23 +21,36 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `stream_block_size_fields_use_the_reserved_width`。
 - **成员头的 `data_size`/`unpacked_size` 宽度按成员总大小分档预留**：
   成员总大小超过阈值后官方不再写最小宽度，而是**预留**（实测 7.23：
-  < 1 048 064 → 最小宽度（下限 2 字节）、1 048 064–1 048 575 → 4 字节、
-  1 048 576–8 388 607 → 5 字节、≥8 388 608 → 6 字节，256 MiB 仍是 6）。
-  规律按成员 **unpacked** 总大小跳档（8 MiB 成员压到 4 MiB 仍预留 6 字节），
+  < 7 680 → 最小宽度（下限 2 字节）、7 680–1 048 063 → 3 字节、
+  1 048 064–1 048 575 → 4 字节、1 048 576–8 388 607 → 5 字节、
+  ≥8 388 608 → 6 字节，256 MiB 仍是 6）。3 字节那一档最容易漏（阈值
+  `2^13 - 512`）：7.5 KiB 的成员头因此比按值算宽 2 字节，后面每个成员都偏移，
+  分卷归档会整体错位。规律按成员 **unpacked** 总大小跳档（8 MiB 成员压到
+  4 MiB 仍预留 6 字节），
   且**单卷成员同样预留**；分卷时每个卷都重复成员总大小，两个尺寸字段共用这一个
   宽度（而不是本卷数据块自己的宽度：200 000 字节成员按 32 KiB 分卷，末卷 3 793
   字节的数据块仍写在 3 字节里），按本卷大小写最小宽度会让头短 1 字节。契约
   `member_size_fields_use_the_reserved_width_tiers` /
   `rar5_size_fields_follow_the_official_reservation_tiers` /
   `multivolume_sets_are_byte_identical_to_official_rar`。
-- **主头 locator 只在有指向对象时写**：有 QO 记录或 `-rr` 记录才写 locator （块
-  flags 含 `SKIP_IF_UNKNOWN`），否则官方 7.23 连记录都不写（主头只剩
-  type/flags/归档 flags）；写了 locator 时 QO 标志先置、偏移写 0 占位，关闭时
+- **主头 locator：默认（automatic）模式总会预留，只有 `-qo-` 才整条不写**。
+  官方默认（不带 `-qo`）的主头**始终**带 `LOCATOR` 记录：没有 QO 记录时两个
+  偏移都写 0（3 字节字段，`05 01 01 80 80 00`），而 `-qo-` 的主头缩到
+  `type/flags/归档 flags` 三个字节。我们按「`quick_open`（含 automatic）或
+  `-rr` 才写 locator」实现。写了 locator 时 QO 标志先置、偏移写 0 占位，关闭时
   回填。**有 QO 与实际偏移无关的判断只看偏移非零，不看标志位**（只看标志会凭空
   重建 QO 记录、破坏前缀逐字节不变）。契约
   `locator_is_present_with_a_zero_qo_placeholder` /
   `no_locator_without_quick_open_or_recovery` /
   `locator_parity`（`tests/format_parity.rs`）。
+- **locator 偏移字段的宽度按「输入总大小」分档**：官方用 `locator_offset_width`
+  那张表（< 512 → 3、< 64 KiB → 4、< 8 MiB → 5、否则 6），但喂进去的估算值是
+  **成员原始大小之和**，不是压缩后的大小、也不是卷大小：600 字节输入压到 103
+  字节仍用 4 字节字段，100 000 字节输入压到 161 字节仍用 5 字节，200 000 字节
+  输入按 20 KiB 分卷仍是 5 字节（按卷大小算只会给 4）。CLI 在 `create` 时把
+  文件大小求和后交给 `WriterOptions::estimated_size`（压缩只会变小，故输入总量
+  是安全上界；每档宽度还留了约 32 倍余量，估小了也不会溢出，真放不下时
+  `patch_locator_fields` 会把偏移降级成 0＝「没有记录」）。
 - **QO 服务块没有 `SUBDATA` extra 记录**：官方 7.23 的 `QO` 块 flags 是
   `0x06`（`DATA_AREA|SKIP_IF_UNKNOWN`）、extra 区为空，载荷就是 data area；`RR`
   块相反，`0x07` + extra 里的百分比字节。多发一条空 `SUBDATA` 记录（`type`
@@ -59,9 +72,21 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   locator。契约 `edits_rebuild_the_quick_open_record` /
   `edits_do_not_invent_a_quick_open_record`。注意我们总是缓存**全部**成员头，
   而官方默认只缓存相对大的文件，故编辑官方归档后记录会变大（合法但有别）。
-- **`-qo` 默认只给大文件建条目**（阈值随版本变），`-qo-` 关、`-qo+`
-  强制全建。`WriterOptions::quick_open(true)` 对应 `-qo+`，与官方对拍时必须让
-  官方也带 `-qo+`，否则官方在几十 KB 的归档上根本不写 QO 记录。
+- **`-qo` 裸写法＝官方默认的自动规则**：成员数据块 > 4096 字节才写 QO 记录
+  （实测 4096 不写、4097 写），`-qo+` 强制每卷都写、`-qo-` 关掉。CLI 把裸
+  `-qo` 映射成 `--quick-open-auto`、`-qo+` 映射成 `--quick-open`；
+  `WriterOptions::quick_open(true)` 对应 `-qo+`，与官方对拍时必须让官方也带
+  `-qo+`，否则官方在几十 KB 的归档上根本不写 QO 记录。自动模式下主头仍预留
+  locator（偏移 0），所以「小归档没有记录但有 locator」是正常形态。
+  RAR4/RAR13 只能报错（`-ma4 -qo` 走 `quick_open || quick_open_auto` 的矩阵被
+  `validate_rar4_only` 拒掉）。
+- **自动规则要在每条发射路径上打点**：RAR5 有三处把成员数据写进当前卷，每处都
+  必须先调 `mark_quick_open_data`（`emit::write_file_entry` 的单卷分支、
+  `emit::write_split_member` 的每块预算之前、`stream::write_streamed_payload`
+  的 STORE 单卷分支），漏一处就出现「CLI 建出来有 QO 记录、库 API 建出来没有」
+  这种同参数不同字节的诡异现象（STORE 走的是 `stream` 而不是 `emit`，最容易漏）。
+  分卷路径要在 `volume_tail_reserve` 之前打点，否则挣来的记录没进卷预算、
+  写完才溢出。契约 `quick_open_automatic_matches_official`。
 - **`-qo` + 分卷：每卷各带一份目录**。官方 7.23 跑 `-ma5 -m0 -v32k -qo+`
   时**每卷各写一个 QO 服务块**（紧贴 ENDARC 之前，单成员时头 14 字节 +
   载荷 50 字节），并在**每卷主头**的 extra 区加一条 `LOCATOR`

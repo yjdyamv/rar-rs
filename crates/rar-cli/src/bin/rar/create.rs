@@ -168,6 +168,19 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         .compression(version)
         .solid_mode(solid_mode)
         .quick_open(args.quick_open && !args.no_quick_open)
+        // WinRAR's default is the automatic rule; `-qo+` forces the record and
+        // `-qo-` (or `-hp`, which cannot carry one) turns it off entirely. A
+        // bare `-qo` spells out the default, so it turns the automatic rule on
+        // where the format could express it — which also keeps
+        // `-ma4`/`-ma14` `-qo` rejected by the format's own validation.
+        .quick_open_automatic(
+            args.quick_open_auto
+                || (!args.no_quick_open
+                    && !args.quick_open
+                    && !header_encrypt
+                    && !version.is_legacy()
+                    && !version.is_rar13()),
+        )
         .blake2(args.blake2)
         .encrypt_headers(header_encrypt)
         .filters(match args.mc_params.as_deref() {
@@ -449,6 +462,24 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         info!("WARNING: No files");
         process::exit(10);
     }
+    // WinRAR sizes the main header's locator offset fields from an estimate of
+    // the input size. Measured against 6.23: a 600-byte input still gets
+    // 4-byte fields when it compresses to 103 bytes, a 100 000-byte input gets
+    // 5 when it compresses to 161, and a 200 000-byte input split into 20 KiB
+    // volumes still gets 5 — so the volume size plays no part and the input
+    // total is the whole rule. Compression only shrinks the archive, which
+    // makes the input total a safe upper bound for the fields.
+    let input_total: u64 = collected
+        .iter()
+        .filter(|c| !c.is_dir)
+        .filter_map(|c| std::fs::metadata(&c.path).ok())
+        .map(|m| m.len())
+        .sum();
+    let opts = if input_total > 0 && !version.is_legacy() && !version.is_rar13() {
+        opts.estimated_size(input_total)
+    } else {
+        opts
+    };
     // -log: capture the member names before the candidate list is reordered
     // for writing.
     let logs = crate::log::specs_from(misc)?;

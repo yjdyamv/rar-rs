@@ -115,6 +115,7 @@ pub struct WriterOptions {
     // The format-validated subset is read by `archive::create`'s
     // `WriteOptionFlags`, which is the single seam both write surfaces use.
     pub(super) quick_open: bool,
+    pub(super) quick_open_auto: bool,
     pub(super) estimated_size: Option<u64>,
     pub(super) blake2: bool,
     password: Option<String>,
@@ -142,6 +143,7 @@ impl Default for WriterOptions {
             compression: ArchiveVersion::V50,
             solid_mode: SolidMode::Disabled,
             quick_open: false,
+            quick_open_auto: false,
             estimated_size: None,
             blake2: false,
             password: None,
@@ -196,9 +198,28 @@ impl WriterOptions {
     }
 
     /// Enable or disable the RAR5 quick-open record.
+    ///
+    /// `true` writes the record for every volume. See
+    /// [`Self::quick_open_automatic`] for WinRAR's default, which writes it
+    /// only for volumes that carry a long data run.
     #[must_use]
     pub fn quick_open(mut self, enabled: bool) -> Self {
         self.quick_open = enabled;
+        self
+    }
+
+    /// Write the quick-open record only when the volume earns it — WinRAR's
+    /// default behaviour: a record appears iff one member's data run inside
+    /// the volume is longer than 4096 bytes.
+    ///
+    /// The main header reserves the locator either way, so a volume that
+    /// earns nothing keeps the zeroed quick-open offset WinRAR writes.
+    /// Automatic mode wins over [`Self::quick_open`] (it decides per volume),
+    /// so a caller that wants no record at all must leave both off or use
+    /// `-qo-`'s spelling, which clears this flag too.
+    #[must_use]
+    pub fn quick_open_automatic(mut self, enabled: bool) -> Self {
+        self.quick_open_auto = enabled;
         self
     }
 
@@ -390,7 +411,7 @@ impl WriterOptions {
         // `CreateOptions` struct rejects exactly the same set: a validated
         // typed option must never be silently dropped or clamped.
         crate::options::validate_combinations(crate::options::CombinationRules {
-            quick_open: self.quick_open,
+            quick_open: self.quick_open || self.quick_open_auto,
             encrypt_headers: self.encrypt_headers,
             password: self.password.as_deref(),
             recovery_percent: self.recovery_percent,
@@ -441,6 +462,7 @@ impl WriterOptions {
             solid,
             solid_reset,
             quick_open: self.quick_open,
+            quick_open_auto: self.quick_open_auto,
             estimated_size: self.estimated_size,
             blake2: self.blake2,
             password: self.password,
@@ -472,6 +494,7 @@ impl fmt::Debug for WriterOptions {
             .field("compression", &self.compression)
             .field("solid_mode", &self.solid_mode)
             .field("quick_open", &self.quick_open)
+            .field("quick_open_auto", &self.quick_open_auto)
             .field("blake2", &self.blake2)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("encrypt_headers", &self.encrypt_headers)

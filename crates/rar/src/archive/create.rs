@@ -24,6 +24,13 @@ use crate::fs::atomic::{
 };
 use crate::vint;
 
+/// Longest member data run a volume may hold without earning a quick-open
+/// record. WinRAR's default (no `-qo` switch) writes the "QO" record only for
+/// volumes that carry a longer run; the main header keeps reserving the
+/// locator either way. Measured against 7.23 and 6.23: 4096 bytes writes no
+/// record, 4097 does.
+pub(super) const QUICK_OPEN_AUTO_THRESHOLD: u64 = 4096;
+
 impl RarArchive {
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -166,7 +173,7 @@ impl RarArchive {
     /// prefix, its freshly patched main header included). The archive rewrite
     /// path reuses the same rules by simply setting `recovery_percent`.
     pub(super) fn finish_volume(&mut self, next_volume: bool) -> RarResult<()> {
-        let quick_open = self.write_ctx().locator.quick_open;
+        let quick_open = self.quick_open_record_wanted();
         let qo_offset = if quick_open {
             Some(self.write_quick_open_record()?)
         } else {
@@ -177,7 +184,10 @@ impl RarArchive {
         } else {
             None
         };
-        if rr_offset.is_some() || quick_open {
+        // The locator itself is written whenever quick-open is on at all — in
+        // automatic mode even for a volume that earns no record, where both
+        // fields stay zero, exactly like WinRAR's default output.
+        if rr_offset.is_some() || self.write_ctx().locator.quick_open {
             // The header of THIS volume (with its real QO/RR offsets) must be
             // in place before the parity is computed: the record protects the
             // raw volume bytes, its own main header included.
@@ -306,7 +316,7 @@ impl RarArchive {
     /// header, so the catalog never reaches across a volume boundary —
     /// `start_next_volume` empties it for exactly that reason.
     pub(super) fn quick_open_volume_reserve(&self, pending_header: Option<u64>) -> u64 {
-        if !self.write_ctx().locator.quick_open {
+        if !self.quick_open_record_wanted() {
             return 0;
         }
         let Some(volume_size) = self.write_ctx().output.volume_size else {
@@ -329,6 +339,30 @@ impl RarArchive {
             crate::format::rar5::BLOCK_FLAG_SKIP_IF_UNKNOWN,
         );
         self.on_disk_header_len(hdr.len() as u64) + payload
+    }
+
+    /// Whether this volume earns a quick-open record.
+    ///
+    /// `-qo+` always writes one and `-qo-` never does; WinRAR's default (and
+    /// ours) only writes one once a member's data run in the volume has grown
+    /// past [`QUICK_OPEN_AUTO_THRESHOLD`], which is why a small archive
+    /// carries no record even though its main header still reserves the
+    /// locator for one.
+    pub(super) fn quick_open_record_wanted(&self) -> bool {
+        let locator = &self.write_ctx().locator;
+        locator.quick_open && (!locator.quick_open_auto || locator.quick_open_hit)
+    }
+
+    /// Note that `packed_run` bytes of member data are about to be written to
+    /// the current volume, which is what the automatic quick-open rule keys
+    /// on. Measured against WinRAR 7.23: a 4096-byte run writes no record, a
+    /// 4097-byte run does, and the run is measured *packed* (a 100 KB member
+    /// that compresses to 61 bytes earns nothing).
+    pub(super) fn mark_quick_open_data(&mut self, packed_run: u64) {
+        let locator = &mut self.write_ctx_mut().locator;
+        if locator.quick_open_auto && packed_run > QUICK_OPEN_AUTO_THRESHOLD {
+            locator.quick_open_hit = true;
+        }
     }
 
     /// Move the staged write files over their final paths. Called on
@@ -1196,7 +1230,7 @@ impl WriteOptionFlags {
     /// From the typed facade options.
     pub(super) fn from_writer(options: &super::writer::WriterOptions) -> Self {
         Self {
-            quick_open: options.quick_open,
+            quick_open: options.quick_open || options.quick_open_auto,
             blake2: options.blake2,
             recovery_percent: options.recovery_percent,
             recovery_sectors: options.recovery_sectors,
@@ -1212,7 +1246,7 @@ impl WriteOptionFlags {
     /// From the plain options struct.
     pub(super) fn from_create(options: &crate::options::CreateOptions) -> Self {
         Self {
-            quick_open: options.quick_open,
+            quick_open: options.quick_open || options.quick_open_auto,
             blake2: options.blake2,
             recovery_percent: options.recovery_percent,
             recovery_sectors: options.recovery_sectors,

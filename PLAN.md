@@ -13,7 +13,8 @@
 
 - **RAR5 / RAR7**：创建与读取全功能对齐 WinRAR 7.23——压缩（m0–m5、DP
   最优解析）、 `-hp` 头加密、分卷、solid、内联恢复记录、`.rev`
-  恢复卷、quick-open、NTFS ADS、三时间戳、owner、`-mt` 多线程、长距离匹配、v70
+  恢复卷、quick-open（默认按官方的自动阀值写，`-qo` / `-qo-` / `-qo+` 三档）、
+  NTFS ADS、三时间戳、owner、`-mt` 多线程、长距离匹配、v70
   大字典。
 - **老容器族读取（RAR 1.3–4.x）**：三代解码器（RAR29/20/15）+ PPMd + 五大标准 VM
   过滤器 + 通用 RARVM 解释器，solid 链、分卷、`-hp`、各代数据解密。
@@ -56,6 +57,11 @@
   被删的中间卷（`rar5_recovery_volumes_match_winrar_byte_for_byte`）。
   恢复记录 + 分卷（`-rr` + `-v`）只能字段级对拍：官方每卷预留并把剩余空间补零，
   我方不补（`recovery_records_repeat_in_every_volume`）。
+- **主头 locator 与 QO 默认形态已对齐**：locator 偏移字段宽度按**输入总大小**
+  分档（CLI 把文件大小求和后交给 `WriterOptions::estimated_size`），默认 QO
+  按官方自动阀值（成员数据块 > 4096 字节）写，没挣到记录的卷仍预留 locator
+  （偏移 0），`-qo-` 才整条不写。契约 `locator_width_follows_official_size_tiers` /
+  `quick_open_automatic_matches_official`。
 - **测试归档零提交**：legacy 套件（RAR 1.3–4.x、`.rev`、VM 过滤器、恢复记录）
   全部由 `.cache/winrar/` 的官方 `Rar.exe`
   现场生成（`tests/support/generate.rs` + `corpus.rs`），RAR 1.3/1.4 与
@@ -228,18 +234,6 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 - **STORE 成员竞态**：单遍 STORE 先 `hash_file`
   再重读同一路径，同尺寸改写真可能写出旧 CRC/BLAKE2；回填头需要 patching（`-hp`
   还要重加密），已接受。
-- **RAR5 主头 locator 的偏移宽度**：官方按写主头时对最终大小的内部估计预留（实测
-  3–6+ 字节，阈值 2^9/2^16/2^23），那套估计无法由我们自身的头字节推出，**CLI
-  不自动填**；库侧给了 `WriterOptions::estimated_size(bytes)`，给出预计大小即
-  按官方分档预留。已对拍：`-m0 -qo+` 的单成员归档在 4 / 5 / 6 字节档（1 KiB、
-  100 KiB、8 MiB 成员）都与官方**逐字节相同**
-  （`locator_width_follows_official_size_tiers`）。
-  不给 `estimated_size` 则沿用历史定长 5 字节，比官方 +2 字节（最小档）到 −1
-  字节（≥256 MiB 档）。
-- **官方 QO 的默认阈值**：官方默认只给「相对大的文件」拷头（手册原文，阈值随
-  版本变），`-qo-` 关、`-qo+` 强制全拷；`WriterOptions::quick_open(true)` 的语义
-  等于 `-qo+`，所以对拍 QO 布局时官方必须也带 `-qo+`。只影响字节外观（官方多一条
-  QO 服务块），不影响读取——无 QO 时双方都回退全扫。
 
 ## 开放议题
 
@@ -274,9 +268,11 @@ seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 - **`-ts` 的「字母+数字」组合**、**`-rr<N>%` 取整**、**`rar rr` 恒 3%**、
   **`rar r` 不写 `fixed.<name>`**、**无控制台时的覆盖询问**：口径与理由见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
-- **RAR5 元数据仍差两处**（字节外观，双向读写一致）：locator
-  偏移字段宽度的**默认值**（给了 `estimated_size` 即对齐）与「官方 QO 默认
-  阈值」，见上面「暂缓」段。
+- **RAR5 元数据仍差一处**（字节外观，双向读写一致）：不传
+  `WriterOptions::estimated_size` 时主头 locator 偏移字段取最小宽度 3，官方按
+  **输入总大小**分档（3/4/5/6）。CLI 会把文件大小求和后传进去（压缩只会变小，
+  输入总量是安全上界），所以命令行建出来的归档已逐字节一致；只有库调用者不传
+  这个估算值时才看得到差异。
 - **Windows 联接点的 redirect 目标字符串**：见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 

@@ -210,6 +210,11 @@ pub(crate) trait VolumeOps {
     /// being settled for). `0` when quick-open is off or the archive is
     /// single-volume, so the family writers can add it unconditionally.
     fn quick_open_volume_reserve(&self, pending_header: Option<u64>) -> u64;
+    /// Note that `packed_run` bytes of member data are about to be written to
+    /// the current volume, so the automatic quick-open rule can decide whether
+    /// the volume earns its record. No-op unless quick-open is in automatic
+    /// mode and the volume has not already earned it.
+    fn mark_quick_open_data(&mut self, packed_run: u64);
     /// Account `bytes` written to the current volume.
     fn add_bytes_written(&mut self, bytes: u64);
     /// Zero-based index of the volume currently being written.

@@ -336,6 +336,16 @@ impl Default for MetadataSettings {
 pub(crate) struct LocatorState {
     /// Write a quick-open ("QO") service record at close time.
     pub quick_open: bool,
+    /// Only write that record when the volume earns it: WinRAR's default,
+    /// where a record is emitted iff some member's data run in the volume is
+    /// longer than 4096 bytes. The main header still reserves its locator,
+    /// exactly as WinRAR does when nothing is cached.
+    pub quick_open_auto: bool,
+    /// Whether the volume being written has already earned its record (the
+    /// auto rule above). Cleared for every new volume by
+    /// `start_next_volume`, since no entry of one volume is visible from the
+    /// next.
+    pub quick_open_hit: bool,
     /// Reserved width of the QO/RR offset fields, when the caller supplied a
     /// size estimate (WinRAR's byte layout); `None` uses the default.
     pub offset_width: Option<usize>,

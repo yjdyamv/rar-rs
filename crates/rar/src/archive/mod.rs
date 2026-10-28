@@ -776,7 +776,17 @@ impl RarArchive {
         // password, quick-open with volumes or header encryption, recovery
         // records or volumes with the wrong volume setting) were already
         // rejected by `validate` with the same wording as `WriterOptions`.
-        let quick_open = opts.quick_open;
+        // Automatic mode still reserves the locator, so it turns the "quick
+        // open is on" switch on too and only gates the record itself.
+        let quick_open = opts.quick_open || opts.quick_open_auto;
+        let quick_open_auto = opts.quick_open_auto;
+        // WinRAR sizes the locator's offset fields from an estimate of the
+        // archive's input size — the sum of the member sizes, measured against
+        // 6.23: a 600-byte input still gets 4-byte fields when it compresses to
+        // 103 bytes, a 100 000-byte input gets 5 when it compresses to 161, and
+        // a 200 000-byte input split into 20 KiB volumes still gets 5 (the
+        // volume size, which would say 4, plays no part). Callers hand the
+        // total over as [`CreateOptions::estimated_size`].
         let offset_width = opts
             .estimated_size
             .map(crate::format::rar5::headers::locator::locator_offset_width);
@@ -845,6 +855,8 @@ impl RarArchive {
                 },
                 locator: LocatorState {
                     quick_open,
+                    quick_open_auto,
+                    quick_open_hit: false,
                     offset_width,
                     quick_open_entries: Vec::new(),
                     qo_offset_field_pos: None,

@@ -792,6 +792,9 @@ pub fn normalize_switch(arg: &str) -> String {
     if let Some(rest) = arg.strip_prefix("-qo") {
         return match rest {
             "-" => "--no-quick-open".into(),
+            // A bare `-qo` spells out WinRAR's default (a record only where a
+            // long data run earns one); `-qo+` forces it everywhere.
+            "" => "--quick-open-auto".into(),
             _ => "--quick-open".into(),
         };
     }
@@ -1149,7 +1152,7 @@ mod tests {
             ("-p", "--password-prompt"),
             ("-p-", "--password="),
             ("-psecret", "--password=secret"),
-            ("-qo", "--quick-open"),
+            ("-qo", "--quick-open-auto"),
             ("-qo+", "--quick-open"),
             ("-qo-", "--no-quick-open"),
             ("-rr", "--recovery-percent=3"),

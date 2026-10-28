@@ -102,6 +102,9 @@ pub(crate) fn write_file_entry(
     if cx.write_ctx().output.volume_size.is_none() {
         // Single-volume
         let hdr_bytes = fh_base.to_bytes();
+        // The record this volume may need depends on the run it holds, so
+        // settle the automatic rule before anything is written.
+        cx.mark_quick_open_data(packed_data.len() as u64);
         cx.record_quick_open_entry(&hdr_bytes)?;
         cx.write_block_header(&hdr_bytes)?;
         let stream = cx.stream_mut()?;
@@ -133,6 +136,12 @@ pub(crate) fn write_file_entry(
     let hdr_bytes = fh_base.to_bytes();
     let hdr_on_disk = cx.on_disk_header_len(hdr_bytes.len() as u64);
     let used = cx.bytes_written();
+    let remaining = volume_size.saturating_sub(used);
+    // A member fits (or its first chunk is) at most what the volume has left,
+    // so that is the data run this volume may end up holding: settle the
+    // automatic quick-open rule on it before the reserve is computed, or the
+    // record it earns would never be budgeted.
+    cx.mark_quick_open_data(total_packed.min(remaining));
     // The recovery record protects this member too, so the tail reserve is
     // sized from the prefix the member would leave behind.
     let total_needed = hdr_on_disk
@@ -142,7 +151,6 @@ pub(crate) fn write_file_entry(
             used + hdr_on_disk + total_packed,
             Some(hdr_bytes.len() as u64),
         );
-    let remaining = volume_size.saturating_sub(used);
 
     if total_needed <= remaining {
         // Fits entirely
@@ -366,9 +374,12 @@ pub(super) fn write_split_member(
         // catalog lists every header written here — this chunk's included.
         let pending = Some(last_hdr_plain.len() as u64);
         let used = cx.bytes_written();
+        let remaining_member = total_packed - offset;
+        // The chunk this volume takes is at most what is left of it, which is
+        // the run the automatic quick-open rule keys on.
+        cx.mark_quick_open_data(remaining_member.min(remaining_vol));
         let bytes_for_data = data_budget(cx, used, hdr_size, remaining_vol, pending);
         let bytes_for_last = data_budget(cx, used, last_hdr_size, remaining_vol, pending);
-        let remaining_member = total_packed - offset;
 
         // Middle chunks keep the mid estimate's budget; a chunk that
         // would swallow the member tail only does so when it also fits

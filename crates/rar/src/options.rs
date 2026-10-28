@@ -187,6 +187,12 @@ pub(crate) struct CreateOptions {
     /// caching that volume's own copies of the headers), the way WinRAR
     /// does. Without header encryption only.
     pub quick_open: bool,
+    /// Write that record only when the volume earns it, WinRAR's default:
+    /// a record appears iff some member's data run in the volume is longer
+    /// than 4096 bytes. The main header still reserves the locator either
+    /// way, so a volume without a record keeps the zeroed offsets WinRAR
+    /// writes. `false` pairs with `quick_open` as "always write it".
+    pub quick_open_auto: bool,
     /// Expected final archive size, used to reserve the locator's QO/RR
     /// offset fields at the width WinRAR would use for an archive that size
     /// (see [`WriterOptions::estimated_size`](crate::WriterOptions::estimated_size)).
@@ -282,7 +288,7 @@ impl CreateOptions {
         validate_dictionary(self.dict_size_log, self.dict_size_bytes)?;
         validate_threads(self.threads)?;
         validate_combinations(CombinationRules {
-            quick_open: self.quick_open,
+            quick_open: self.quick_open || self.quick_open_auto,
             encrypt_headers: self.encrypt_headers,
             password: self.password.as_deref(),
             recovery_percent: self.recovery_percent,
@@ -465,6 +471,7 @@ impl Default for CreateOptions {
             solid: false,
             solid_reset: SolidReset::Continuous,
             quick_open: false,
+            quick_open_auto: false,
             estimated_size: None,
             blake2: false,
             password: None,

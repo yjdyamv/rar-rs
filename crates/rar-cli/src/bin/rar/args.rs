@@ -472,10 +472,15 @@ pub(crate) struct CreateArgs {
     /// BLAKE2sp hash records
     #[arg(long = "blake2")]
     pub(crate) blake2: bool,
-    /// Quick-open record
+    /// Quick-open record for every volume (`-qo+`). By default the record is
+    /// written only for a volume whose member data run exceeds 4096 bytes
     #[arg(long = "quick-open")]
     pub(crate) quick_open: bool,
-    /// Disable quick-open (`-qo-`; the default, kept for switch parity)
+    /// Quick-open record only where WinRAR would write one (bare `-qo`, the
+    /// default; kept for switch parity)
+    #[arg(long = "quick-open-auto", hide = true)]
+    pub(crate) quick_open_auto: bool,
+    /// Disable quick-open (`-qo-`)
     #[arg(long = "no-quick-open", hide = true)]
     pub(crate) no_quick_open: bool,
     /// Header encryption (optionally with a password as `-hp{pwd}` /

@@ -52,7 +52,8 @@ pub(crate) fn vint_at_least(value: u64, min: usize) -> Vec<u8> {
 /// is known and reserves room for `unpacked_size << 12`, never fewer than two
 /// bytes, then patches the real values in. (Measured against WinRAR 7.23: a
 /// 4-byte stream reserves three bytes, 512 bytes four, 64 KiB five.) The
-/// same archive's file headers use the two-byte minimum, not this estimate.
+/// same archive's file headers use [`member_size_field_width`], not this
+/// estimate.
 fn stream_size_field_width(unpacked_size: u64) -> usize {
     vint::encoded_size(unpacked_size.saturating_mul(1 << 12)).max(2)
 }
@@ -60,9 +61,9 @@ fn stream_size_field_width(unpacked_size: u64) -> usize {
 /// The width WinRAR reserves for a member header's `data_size` and
 /// `unpacked_size`, as a function of the member's total unpacked size.
 ///
-/// Above ~1 MiB WinRAR stops writing the minimal width and reserves extra room,
-/// in single-volume archives as well as in every volume of a split member (it
-/// emits the header before the member's packed size is known). Measured against
+/// Above ~7.5 KiB WinRAR stops writing the minimal width and reserves extra
+/// room, in single-volume archives as well as in every volume of a split member
+/// (it emits the header before the member's packed size is known). Measured against
 /// WinRAR 7.23: the table below holds for every split size tried (1 KiB ..
 /// 64 MiB) and for unsplit members, and it follows the member's *unpacked* size
 /// rather than its packed size (an 8 MiB member packed to 4 MiB still reserves
@@ -70,17 +71,23 @@ fn stream_size_field_width(unpacked_size: u64) -> usize {
 ///
 /// | member total           | width                            |
 /// |------------------------|----------------------------------|
-/// | < 1 048 064            | minimal, with the two-byte floor |
+/// | < 7 680                | minimal, with the two-byte floor |
+/// | 7 680 .. 1 048 063     | 3                                |
 /// | 1 048 064 .. 1 048 575 | 4                                |
 /// | 1 048 576 .. 8 388 607 | 5                                |
 /// | >= 8 388 608           | 6 (still six at 256 MiB)         |
 ///
-/// The first threshold is exactly `2^20 - 512` and the last step sits at
-/// `2^23`, so the widths are *not* a re-scaling of the value (four bytes cover a
-/// 512-byte window only). Tabulated, not derived. Service blocks (QO/RR/CMT)
-/// keep the plain two-byte floor; the stream block has its own rule in
-/// [`stream_size_field_width`].
+/// The three-byte step sits at `2^13 - 512` and the four-byte one at
+/// `2^20 - 512`, while the last two steps sit on `2^20` and `2^23`, so the
+/// widths are *not* a re-scaling of the value (four bytes cover a 512-byte
+/// window only). Tabulated, not derived. The three-byte step is easy to miss:
+/// it makes a 7.5 KiB member's header two bytes longer than the value alone
+/// would need, which moved every later member of a volume by two bytes (and so
+/// every quick-open offset with it) until it was pinned down. Service blocks
+/// (QO/RR/CMT) keep the plain two-byte floor; the stream block has its own rule
+/// in [`stream_size_field_width`].
 fn member_size_field_width(total_unpacked: u64) -> usize {
+    const THREE_BYTES: u64 = (1 << 13) - 512;
     const FOUR_BYTES: u64 = (1 << 20) - 512;
     const FIVE_BYTES: u64 = 1 << 20;
     const SIX_BYTES: u64 = 1 << 23;
@@ -90,6 +97,8 @@ fn member_size_field_width(total_unpacked: u64) -> usize {
         5
     } else if total_unpacked >= FOUR_BYTES {
         4
+    } else if total_unpacked >= THREE_BYTES {
+        3
     } else {
         0
     };
@@ -688,7 +697,9 @@ mod tests {
     #[test]
     fn member_size_fields_use_the_reserved_width_tiers() {
         assert_eq!(member_size_field_width(0), 2);
-        assert_eq!(member_size_field_width(16_383), 2);
+        assert_eq!(member_size_field_width(7_679), 2);
+        assert_eq!(member_size_field_width(7_680), 3);
+        assert_eq!(member_size_field_width(16_383), 3);
         assert_eq!(member_size_field_width(200_000), 3);
         assert_eq!(member_size_field_width(1_048_063), 3);
         assert_eq!(member_size_field_width(1_048_064), 4);

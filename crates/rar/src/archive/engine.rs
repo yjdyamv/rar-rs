@@ -107,8 +107,11 @@ impl RarArchive {
         self.finish_volume(true)?;
         // Each volume carries its own quick-open catalog, and every entry's
         // distance is measured back from *that* volume's record, so the
-        // catalog restarts empty here (WinRAR's `-qo` + `-v` layout).
+        // catalog restarts empty here (WinRAR's `-qo` + `-v` layout). The
+        // automatic rule restarts too: a volume earns its record on its own
+        // data, not on the previous volume's.
         self.write_ctx_mut().locator.quick_open_entries.clear();
+        self.write_ctx_mut().locator.quick_open_hit = false;
         // Close current volume
         self.stream = None;
         self.write_ctx_mut().output.current_volume += 1;

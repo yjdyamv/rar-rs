@@ -1712,10 +1712,12 @@ fn locator_width_follows_official_size_tiers() {
     // [`rar5_size_fields_follow_the_official_reservation_tiers`]), so these
     // archives have to come out byte-identical end to end, not just in the
     // locator.
-    for (label, member, identical) in [
-        ("4-byte tier", "tier_1k.bin", true),
-        ("5-byte tier", "tier_100k.bin", true),
-        ("6-byte tier", "tier_8m.bin", true),
+    for (label, member, width) in [
+        ("3-byte tier", "tier_200.bin", 3),
+        ("4-byte tier below 64 KiB", "tier_8k.bin", 4),
+        ("4-byte tier", "tier_1k.bin", 4),
+        ("5-byte tier", "tier_100k.bin", 5),
+        ("6-byte tier", "tier_8m.bin", 6),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let size = generate::payload(member).len();
@@ -1750,16 +1752,78 @@ fn locator_width_follows_official_size_tiers() {
         let theirs = made.read();
         let widths = (locator_qo_width(&mine), locator_qo_width(&theirs));
         assert_eq!(widths.0, widths.1, "{label}: reserved locator width");
+        assert_eq!(widths.0, width, "{label}: unexpected locator width");
+        if mine != theirs {
+            let at = mine
+                .iter()
+                .zip(&theirs)
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| mine.len().min(theirs.len()));
+            let lo = at.saturating_sub(16);
+            panic!(
+                "{label}: archive differs at byte {at} (ours {} bytes, official {} bytes)
+  ours    {}
+  official{}",
+                mine.len(),
+                theirs.len(),
+                hex(&mine[lo..mine.len().min(at + 32)]),
+                hex(&theirs[lo..theirs.len().min(at + 32)]),
+            );
+        }
+    }
+}
+
+/// WinRAR's default writes the quick-open record only for a volume that
+/// carries a long data run: a short member leaves the main header with a
+/// reserved locator pointing nowhere, a long one gets the record. Both shapes
+/// have to match byte for byte — the record, its absence, and the zeroed
+/// offsets are all part of the layout.
+#[test]
+fn quick_open_automatic_matches_official() {
+    for (label, member, earns) in [
+        ("a 200-byte member earns nothing", "tier_200.bin", false),
+        ("a 200 000-byte member earns a record", "big.bin", true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let size = generate::payload(member).len();
+        let src = sample(dir.path(), member);
+        let path = dir.path().join("ours.rar");
+        let mut writer = ArchiveWriter::create_with(
+            &path,
+            WriterOptions::new()
+                .compression(ArchiveVersion::V50)
+                .quick_open_automatic(true)
+                .estimated_size(size as u64),
+        )
+        .unwrap();
+        writer
+            .add_path_as(
+                &src,
+                member,
+                EntryWriteOptions::new().compression_level(CompressionLevel::STORE),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+        let mine = std::fs::read(&path).unwrap();
+
+        // No switch at all: bare `rar a` is the automatic rule.
+        let Some(made) =
+            generate::archive_with(generate::TOOL_RAR50, &["-ma5", "-m0"], &[member], &[])
+        else {
+            return;
+        };
+        let theirs = made.read();
         assert_eq!(
-            widths.0,
-            match label {
-                "4-byte tier" => 4,
-                "5-byte tier" => 5,
-                _ => 6,
-            },
-            "{label}: unexpected locator width"
+            qo_catalog(&mine).is_some(),
+            earns,
+            "{label}: our quick-open record"
         );
-        if identical && mine != theirs {
+        assert_eq!(
+            qo_catalog(&theirs).is_some(),
+            earns,
+            "{label}: official quick-open record"
+        );
+        if mine != theirs {
             let at = mine
                 .iter()
                 .zip(&theirs)
