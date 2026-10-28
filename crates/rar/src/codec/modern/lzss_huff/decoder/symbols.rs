@@ -162,7 +162,11 @@ impl<'d, 's> SymbolReader<'d, 's> {
         None
     }
 
-    #[inline]
+    /// The per-symbol entry point. Small enough to inline into the engine's
+    /// loop *because* the block-header path below stays out of line: inlining
+    /// the header reader here once grew this function past LLVM's budget and
+    /// every symbol paid an out-of-line call instead.
+    #[inline(always)]
     fn next_symbol(&mut self) -> Option<Symbol> {
         loop {
             if self.pos >= self.end {
@@ -201,6 +205,11 @@ impl<'d, 's> SymbolReader<'d, 's> {
 
     /// Read a block header, verify its checksum, refresh the Huffman tables
     /// when the block carries them, and start the block.
+    ///
+    /// Runs a handful of times per member, so it must stay out of
+    /// [`Self::next_symbol`]: its table building is hundreds of instructions
+    /// that would otherwise be copied into the hottest function in the crate.
+    #[inline(never)]
     fn read_block_header(&mut self) -> RarResult<BlockInfo> {
         let block_flags_byte = self.reader.read_byte().map_err(format_err)?;
         let table_present = (block_flags_byte >> 7) & 1 != 0;

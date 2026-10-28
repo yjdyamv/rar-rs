@@ -186,7 +186,10 @@ MT 本来就是已接受的字节分歧，packed 只变小）、18 RAR5 解码�
 19 符号流的两笔结构账（`SymbolReader::next` 改返回两字宽的 `Option<Symbol>`，错误走
 `take_error()`；热路径六个函数强制 `#[inline(always)]`、`decode_non_literal` 强制外联；
 `consumed_bits()` 替掉每符号的除余。同机交替 A/B：`decode_bench` 总体 +9%，
-`ntoskrnl` 无过滤 m5 −17%、text 13 MiB −15%，字节不变）。
+`ntoskrnl` 无过滤 m5 −17%、text 13 MiB −15%，字节不变）；另加一项 20「`next_symbol`
+不再外联」（`read_block_header` 改 `#[inline(never)]`，每符号一次的函数调用消失，
+`run_engine` 里的 `callq next_symbol` 归零；`decode_bench` 三语料中位数 +6~7%，
+真实 m5 归档 −1~2% 在噪声内——asm 判据与实测口径见 `docs/PITFALLS.md` 第 ⑧ 条）。
 
 **解压基线**（`cargo run --release --example decode_bench`，自建语料，packed 比例
 29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74 MB/s，
