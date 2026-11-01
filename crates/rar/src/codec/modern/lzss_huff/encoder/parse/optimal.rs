@@ -16,8 +16,8 @@ use super::super::super::{
     SYM_REPEAT,
 };
 use super::super::emit::{
-    apply_length_bonus, cache_find, cache_push, cache_touch, encode_distance_slot,
-    encode_length_slot, ensure_nonzero, remove_length_bonus,
+    apply_length_bonus, cache_find, cache_push, cache_touch, encode_distance_slot, encode_length_slot,
+    ensure_nonzero, remove_length_bonus,
 };
 use super::collect::{
     BlockMatches, DISABLE_MATCHLESS_FAST_PATH, FAST_RECOVER_INTERVAL, NICE_MATCH_LENGTH,
@@ -26,6 +26,7 @@ use super::collect::{
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
 use crate::codec::common::match_finder::MatchFinder;
 use crate::version::ArchiveVersion;
+
 /// Fresh-frame tail seeding shape from the MT worker path (issue 12): the
 /// newest `MT_NEAR_TIGHT_FRONTIER` tail bytes are seeded densely, and the
 /// older tail up to `NEAR_WINDOW_MAX` at `MT_FAR_SEED_STRIDE` with a shorter
@@ -673,8 +674,23 @@ struct FreshDistancePlan {
     dbits: usize,
 }
 
+impl FreshDistancePlan {
+    /// Bits a match at this distance spends on the distance itself beyond its
+    /// slot symbol: the extra value, plus v70's `ldc` symbol for the low
+    /// nibble of a slot that carries four or more bits.
+    fn distance_bits(self, prices: &TokenPrices) -> u32 {
+        if self.dbits >= 4 {
+            self.dbits as u32 - 4 + prices.ldc_cost[(self.dist_extra & 0xF) as usize]
+        } else {
+            self.dbits as u32
+        }
+    }
+}
+
 /// One length's worth of a [`MatchDistancePlan`], mirroring the three shapes
-/// the writer can emit.
+/// the writer can emit. Resolved one candidate at a time, and kept only as the
+/// reference [`SlotPricer`] is pinned against.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 enum MatchShape {
     Repeat,
@@ -693,6 +709,7 @@ impl MatchDistancePlan {
     /// encoded: a fresh distance's length bonus can exceed the raw length
     /// (the format's minimum match length is 2), and the optimal parser must
     /// not price a token the writer cannot emit.
+    #[cfg(test)]
     fn shape(self, length: u32) -> Option<MatchShape> {
         if self.repeat_length != 0 && length == self.repeat_length {
             return Some(MatchShape::Repeat);
@@ -722,12 +739,26 @@ fn length_bonus(distance: u32) -> u32 {
 
 /// Extra bits written after a length slot (0 for slots below 8). Depends on
 /// the slot alone, so a pass can tabulate it (see [`TokenPrices`]).
-fn slot_extra_bits(slot: usize) -> u32 {
+const fn slot_extra_bits(slot: usize) -> u32 {
     if slot < 8 { 0 } else { (slot / 4 - 1) as u32 }
 }
 
+/// [`slot_extra_bits`] as a table, so the first pass — which has no Huffman
+/// code lengths to price with yet — steps length slots through the same
+/// [`SlotPricer`] the repriced passes use.
+static SLOT_EXTRA_BITS: [u32; HUFF_RC] = {
+    let mut table = [0u32; HUFF_RC];
+    let mut slot = 0;
+    while slot < HUFF_RC {
+        table[slot] = slot_extra_bits(slot);
+        slot += 1;
+    }
+    table
+};
+
 /// Estimated bit cost of a match before any block has been priced (rars
 /// `estimated_match_cost`). `None` when the match cannot be encoded.
+#[cfg(test)]
 fn estimated_match_cost(plan: &MatchDistancePlan, length: u32) -> Option<u32> {
     Some(match plan.shape(length)? {
         MatchShape::Repeat => 2,
@@ -811,7 +842,11 @@ impl TokenPrices {
         self.nc_cost[byte as usize]
     }
 
-    /// Bits to code a match of `length` bytes at the plan's distance.
+    /// Bits to code a match of `length` bytes at the plan's distance. Resolves
+    /// the shape, the length slot and the distance side separately, for one
+    /// candidate at a time; [`SlotPricer::step`] is the fused form the parser
+    /// actually runs.
+    #[cfg(test)]
     fn match_cost(&self, plan: &MatchDistancePlan, length: u32) -> Option<u32> {
         Some(match plan.shape(length)? {
             MatchShape::Repeat => self.repeat_cost,
@@ -819,12 +854,9 @@ impl TokenPrices {
                 self.cache_cost[index] + self.cache_len_cost[len_slot]
             }
             MatchShape::New { len_slot, fresh } => {
-                let distance_bits = if fresh.dbits >= 4 {
-                    fresh.dbits as u32 - 4 + self.ldc_cost[(fresh.dist_extra & 0xF) as usize]
-                } else {
-                    fresh.dbits as u32
-                };
-                self.new_len_cost[len_slot] + self.dc_cost[fresh.dist_slot] + distance_bits
+                self.new_len_cost[len_slot]
+                    + self.dc_cost[fresh.dist_slot]
+                    + fresh.distance_bits(self)
             }
         })
     }
@@ -887,6 +919,7 @@ impl BlockSplitter {
 /// last match, whether it sits in the cache, and the length bonus a fresh
 /// distance costs — so the run is computed without looking at the encoder
 /// state again.
+#[cfg(test)]
 fn same_price_run_end(plan: &MatchDistancePlan, length: u32, max_match: usize) -> u32 {
     // Repeating the last distance at the last length codes in a couple of
     // bits, so that one length must be priced on its own rather than
@@ -911,6 +944,126 @@ fn same_price_run_end(plan: &MatchDistancePlan, length: u32, max_match: usize) -
         end = end.min(repeat_length - 1);
     }
     end.max(length).min(max_match as u32)
+}
+
+/// One run's worth of pricing, hoisted out of the per-length step. The
+/// distance side of a run — the length-slot cost table, the distance cost, the
+/// length bonus a fresh distance makes the raw length absorb, and the length
+/// that codes as a repeat — is the same for every length in the run, so the run
+/// classifies it once and each step is then one `ilog2`, one shift and two
+/// table lookups, instead of resolving a shape, a slot and the distance side per
+/// candidate (as rars does, and as Fast LZMA2 hoists away).
+///
+/// Every step is pinned to the expanded form — [`same_price_run_end`] plus
+/// [`TokenPrices::match_cost`] or [`estimated_match_cost`], both kept below as
+/// the reference — by `slot_pricer_tests`: same reach, same price, same `None`s,
+/// for every length of every run shape.
+struct SlotPricer<'a> {
+    /// Per-slot length cost, without the distance side.
+    slot_cost: &'a [u32; HUFF_RC],
+    /// What the distance itself costs: a cache slot's symbol, or a fresh
+    /// distance's slot symbol plus its extra bits; on the first pass, the guess
+    /// the estimated price uses.
+    base: u32,
+    repeat_cost: u32,
+    /// Length bonus a fresh distance costs, zero for a cached one.
+    bonus: u32,
+    /// The remembered length that codes as a repeat, `0` when this distance is
+    /// not the repeat distance. Pricing never steps through that length.
+    repeat_length: u32,
+    /// Price of `repeat_length - 1`, resolved once per run: that length can
+    /// fall in a later slot than the run's other steps.
+    repeat_bound: Option<u32>,
+}
+
+impl<'a> SlotPricer<'a> {
+    /// Classify one run of lengths at `distance`, priced against the distance
+    /// memory `state` holds at the run's start.
+    fn for_run(
+        state: &EncoderMatchState,
+        distance: u32,
+        variant: ArchiveVersion,
+        prices: Option<&'a TokenPrices>,
+    ) -> Self {
+        let plan = state.plan(distance, variant);
+        let (slot_cost, base) = match (prices, plan.cache_index, plan.fresh) {
+            (Some(prices), Some(index), _) => (&prices.cache_len_cost, prices.cache_cost[index]),
+            (Some(prices), None, Some(fresh)) => (
+                &prices.new_len_cost,
+                prices.dc_cost[fresh.dist_slot] + fresh.distance_bits(prices),
+            ),
+            // The first pass has no code lengths yet, so a slot costs the extra
+            // bits it carries (see [`estimated_match_cost`]).
+            (None, Some(_), _) => (&SLOT_EXTRA_BITS, 5),
+            (None, None, Some(fresh)) => (&SLOT_EXTRA_BITS, 10 + fresh.dbits as u32),
+            // A plan is always either cached or fresh; pricing stays total
+            // anyway, at what a symbol no table assigned costs.
+            (_, None, None) => (&SLOT_EXTRA_BITS, UNUSED_SYMBOL_COST as u32),
+        };
+        let mut pricer = Self {
+            slot_cost,
+            base,
+            repeat_cost: prices.map_or(2, |prices| prices.repeat_cost),
+            bonus: plan.fresh.map_or(0, |fresh| fresh.bonus),
+            repeat_length: plan.repeat_length,
+            repeat_bound: None,
+        };
+        if pricer.repeat_length > 0 {
+            pricer.repeat_bound = pricer.price_of_one(pricer.repeat_length - 1);
+        }
+        pricer
+    }
+
+    /// Price of a single length, for the lengths [`Self::step`] cannot fold into
+    /// its slot arithmetic.
+    fn price_of_one(&self, length: u32) -> Option<u32> {
+        let raw = length.checked_sub(self.bonus)?;
+        if raw < 2 {
+            return None;
+        }
+        Some(self.base + self.slot_cost[encode_length_slot(raw)])
+    }
+
+    /// The longest reach worth pricing from `length` (never past `run_end`), and
+    /// what that reach costs — the same reach [`same_price_run_end`] gives and
+    /// the same price the expanded form charges for it.
+    #[inline]
+    fn step(&self, length: u32, run_end: u32) -> (u32, Option<u32>) {
+        // Repeating the last distance at the remembered length codes in a
+        // couple of bits, so that length must be priced on its own rather than
+        // folded into the run around it.
+        if length == self.repeat_length {
+            return (length, Some(self.repeat_cost));
+        }
+        let Some(value) = length.checked_sub(2 + self.bonus) else {
+            // The bonus outgrew the raw length, and the shortest match the
+            // writer can emit is two bytes: this match cannot be encoded.
+            return (length, None);
+        };
+        // The eight lowest slots cover one length each, so there is no run of
+        // lengths to walk.
+        if value < 8 {
+            return (length, Some(self.base + self.slot_cost[value as usize]));
+        }
+        // A slot holds `2 << bits` lengths; it ends at the last value that
+        // shares this one's leading bits, which is the longest length still
+        // coding in the same slot and so the last worth pricing.
+        let bits = value.ilog2() - 2;
+        let sub = (value >> bits) & 3;
+        let slot = (4 * (bits + 1) + sub).min(HUFF_RC as u32 - 1) as usize;
+        let natural_end = (((value >> bits) + 1) << bits) - 1 + 2 + self.bonus;
+        let cost = self.base + self.slot_cost[slot];
+        let reach = natural_end.min(run_end);
+        if length < self.repeat_length {
+            let bound = self.repeat_length - 1;
+            if reach > bound {
+                // `bound` can sit in a later slot than `length`, so it carries
+                // its own price — and that price may not be one at all.
+                return (bound, self.repeat_bound);
+            }
+        }
+        (reach, Some(cost))
+    }
 }
 
 /// Prices every path through the block and keeps the cheapest (rars
@@ -1044,7 +1197,7 @@ fn optimal_parse_tokens(
             // The distance side of every candidate in this run is the same,
             // so classify it once: the per-length step below only resolves
             // the length slot (and the repeat length's exact match).
-            let plan = state.plan(distance, variant);
+            let pricer = SlotPricer::for_run(&state, distance, variant, prices);
             let mut length = run_start.max(4);
             while length <= run_end {
                 if i != longest_idx {
@@ -1053,11 +1206,7 @@ fn optimal_parse_tokens(
                     }
                     steps_left -= 1;
                 }
-                let reach = same_price_run_end(&plan, length, max_match).min(run_end);
-                let cost = match prices {
-                    Some(prices) => prices.match_cost(&plan, reach),
-                    None => estimated_match_cost(&plan, reach),
-                };
+                let (reach, cost) = pricer.step(length, run_end);
                 // `None`: a fresh-distance match whose length bonus would
                 // underflow the encodable raw length — the writer cannot
                 // emit it, so it is not a candidate.
@@ -1537,4 +1686,108 @@ fn parse_one_block(
     }
     let (symbols, _) = convert_tokens(&tokens, combined, block.clone(), state, variant);
     symbols
+}
+
+#[cfg(test)]
+mod slot_pricer_tests {
+    use super::*;
+
+    /// A cheap deterministic generator: the test needs spread, not quality.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, bound: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % bound
+        }
+    }
+
+    /// Code lengths with the occasional zero, which is a real case: a block
+    /// need not use every symbol its table has room for, and an unused symbol
+    /// is priced at [`UNUSED_SYMBOL_COST`].
+    fn code_lengths(rng: &mut Rng, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                if rng.below(8) == 0 {
+                    0
+                } else {
+                    1 + rng.below(MAX_CODE_LENGTH as u64) as u8
+                }
+            })
+            .collect()
+    }
+
+    fn prices(rng: &mut Rng) -> TokenPrices {
+        TokenPrices::new(
+            &code_lengths(rng, HUFF_NC),
+            &code_lengths(rng, HUFF_DCX),
+            &code_lengths(rng, 16),
+            &code_lengths(rng, HUFF_RC),
+        )
+    }
+
+    /// Every shape the fused step has to reproduce: a run at the repeat
+    /// distance with a remembered length inside it, a cached distance (no
+    /// length bonus), and fresh distances at each bonus step — priced and
+    /// unpriced, v50 and v70.
+    #[test]
+    fn step_matches_the_expanded_price() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        // One distance per bonus step (`length_bonus` counts the thresholds).
+        let candidates = [1u32, 0x101, 0x2001, 0x40001].map(|base| base + rng.below(64) as u32);
+        let mut steps = 0u32;
+        for _ in 0..4000 {
+            let table = prices(&mut rng);
+            let distance = candidates[rng.below(candidates.len() as u64) as usize];
+            let other = 1 + rng.below(0x80) as u32;
+            let mut reps = [0u32; DIST_CACHE_SIZE];
+            match rng.below(3) {
+                // The run's distance is the repeat distance.
+                0 => reps[0] = distance,
+                // Cached, but not necessarily the repeat distance.
+                1 => reps[rng.below(DIST_CACHE_SIZE as u64) as usize] = distance,
+                // Not cached at all.
+                _ => {}
+            }
+            if reps[0] == 0 {
+                reps[0] = other;
+            }
+            // Zero means no remembered length, as at a block start.
+            let last_length = match rng.below(3) {
+                0 => 0,
+                _ => 4 + rng.below(160) as u32,
+            };
+            let state = EncoderMatchState::new(reps, last_length);
+            let variant = if rng.below(2) == 0 {
+                ArchiveVersion::V50
+            } else {
+                ArchiveVersion::V70
+            };
+            let plan = state.plan(distance, variant);
+            let priced = SlotPricer::for_run(&state, distance, variant, Some(&table));
+            let unpriced = SlotPricer::for_run(&state, distance, variant, None);
+            let max_match = 0x1000;
+            let run_start = 4 + rng.below(48) as u32;
+            let run_end = run_start + rng.below(200) as u32;
+            let mut length = run_start;
+            while length <= run_end {
+                let reach = same_price_run_end(&plan, length, max_match).min(run_end);
+                assert_eq!(
+                    priced.step(length, run_end),
+                    (reach, table.match_cost(&plan, reach)),
+                    "priced {length}..{run_end} at {distance}, reps {reps:?}, last {last_length}, {variant:?}"
+                );
+                assert_eq!(
+                    unpriced.step(length, run_end),
+                    (reach, estimated_match_cost(&plan, reach)),
+                    "unpriced {length}..{run_end} at {distance}, reps {reps:?}, last {last_length}"
+                );
+                length = reach + 1;
+                steps += 1;
+            }
+        }
+        assert!(steps > 8_000, "only {steps} steps priced");
+    }
 }
