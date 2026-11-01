@@ -156,7 +156,7 @@
 - **比率是契约**：任何提速必须让标准语料（text / mixed / xml / sparse +
   random）的 packed 字节不变或变小。
 - **优先字节相同的快路径**，而不是启发式。
-- **先测再优化**：`mtprobe` / `ratiocheck` 示例是回归闸门，热点需先由探针确认。
+- **先测再优化**：`mtprobe` / `ratiocheck` 示例是回归闸门，热点需先由探针确认；`ratiocheck` 现在同时打印 packed 流的 FNV 指纹，用来证明「字节相同」而不只是「大小相同」。
 - **发射块策略只有一个 owner**：`EMITTED_BLOCK_SIZE` + `find_block_end_adaptive`
   在 `codec/modern/lzss_huff/encoder/parse/block.rs`。
 - **`-mt` 低步数搜索是已接受的取舍**（ratio 换速度），不是待修的 bug。
@@ -197,7 +197,17 @@ memmove 次数从 `len/dist` 降到 `log2(len/dist)`；真实归档无变化—�
 不再每步回扫 `state.reps`；重定价收敛即早退。字节相同，同机交替 A/B：`ntoskrnl`
 m5/m3 `-mt1`、30 MB 文本 m5、`-mt16` 全部 −4.5~−8.9%，20 组归档 sha256 全等；
 收敛早退只在二进制上触发。已否决的后续尝试与实测口径见 `docs/PITFALLS.md` 的
-「DP 解析的两笔账」条）。
+「DP 解析的两笔账」条）、
+23 **槽步进定价的融合**（一个 run 的距离侧（缓存槽码长 / 新鲜距离的槽 + 额外位、
+长度加成、哪个长度走 repeat）对 run 里每个长度都相同，`SlotPricer::for_run` 一次
+分类好；`step` 每步只剩一次 `ilog2`、一次移位和两次查表，替掉原来每步的
+`MatchShape` 解析 + `encode_length_slot` + `distance_bits`。唯一例外是 repeat 截断的
+边界长度（可能落在更靠后的槽），每 run 预解一次。字节逐位相同：4 语料 × 3 档 packed
+流 FNV 全等（`examples/ratiocheck.rs` 的 hash 列），`slot_pricer_tests` 把融合版与保留为
+`#[cfg(test)]` 的参考实现逐长度对拍。同机交替 A/B：DP 阶段 −9.4%（wordtext m3）/
+−9.6%（m5），端到端 wordtext m3 −8%、xml −6.4%、dll-like −6.3%、x86syn −3.0%、
+text −1.4%、mixed/random 持平。边界与「别改回去」见 `docs/PITFALLS.md`
+「槽步进定价的融合版」条）。
 
 **解压基线**（`cargo run --release --example decode_bench`，自建语料，packed 比例
 29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74 MB/s，

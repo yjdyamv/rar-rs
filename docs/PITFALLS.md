@@ -461,6 +461,30 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   到 16 KiB 只换来 3.7% 且改变字节——**DP 的 55% 是远地址探测的缓存缺失加每步定价
   本身，不是数组足迹**。做这类对比必须交替跑两个二进制取最小值：同机抖动可达
   ±30%，单跑一轮会得出反的结论。
+- **槽步进定价的融合版：一个 run 只解一次距离侧，参考实现必须留着当判据**：
+  `optimal_parse_tokens` 的每一步原本问两次——`same_price_run_end`（这个长度的价格
+  区间到哪结束）与 `match_cost`/`estimated_match_cost`（那个 reach 值多少）——两次都
+  从 `plan` 重新解一遍 `MatchShape`、一次 `encode_length_slot`（`leading_zeros`）、一次
+  `distance_bits` 查表。但一个 run 的**距离侧**（缓存槽的码长、新鲜距离的槽符号与额外
+  位、长度加成、以及哪个长度走 repeat）对 run 里每个长度都一样，于是
+  `SlotPricer::for_run` 把它一次分类好，`step` 每步只解长度槽：
+  `bits = value.ilog2() - 2`、`sub = (value >> bits) & 3`、`slot = 4 * (bits + 1) + sub`、
+  `natural_end = (((value >> bits) + 1) << bits) - 1 + 2 + bonus`——**槽号不需要
+  `encode_length_slot`，也不需要 `last_value`**（`last_value` 的 `ilog2` 恒为
+  `bits + 2`，sub 恒为同一次移位的结果）。
+  **唯一不能省的是 repeat 截断**：`reach = min(…, repeat_length - 1)` 落到的槽可能比
+  当前长度**更靠后**，那一格得按 `repeat_length - 1` 自己算，所以每 run 预解一次
+  `price_of_one(repeat_length - 1)`（`Option`，可能根本不可编码）当 `repeat_bound`；
+  `run_end` 截断则始终同槽，可以沿用本步价格。`same_price_run_end` / `match_cost` /
+  `estimated_match_cost` / `shape` 全部保留为 `#[cfg(test)]` 的参照实现，
+  `slot_pricer_tests`（4000 组随机 `TokenPrices`/reps/last_length/距离/variant，逐长度
+  比对 reach、价格与 `None`）是这道口子的闸门——把 `if reach > bound` 改成
+  `if false && reach > bound` 它会立刻报
+  `V50: left (161, Some(14)) right (156, Some(14))`。同理**不许动步数预算记账**：
+  `MAX_PARSE_STEPS_PER_POSITION` 只数非最长者的步，reach 序列一变预算就变、字节就变。
+  实测：packed 字节逐位相同（4 语料 × 3 档的 packed 流 FNV 全等，`examples/ratiocheck.rs` 的 hash 列），
+  DP 阶段 −9.4%（wordtext m3）/ −9.6%（m5），端到端 wordtext m3 −8%、xml −6.4%、
+  dll-like −6.3%、x86syn −3.0%、text −1.4%、mixed/random 持平。
 - **并行提取必须给逐成员语义让路**：开了进度回调、或策略不是 `Abort` 时，
   `extract_all_parallel` 一律返回 `None`
   退回串行——它先把所有成员解码完，"在第一个失败处停下"根本无法实现，与其猜不如让路。改这些条件前先想清楚顺序语义。

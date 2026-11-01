@@ -1,7 +1,7 @@
-//! Compare packed sizes (ratio) and wall time of several synthetic
-//! corpora (text, mixed, xml, sparse-copies) across compression levels —
-//! the regression guard for collector/parse changes: ratios must stay put
-//! while speed may only improve.
+//! Compare packed sizes (ratio), wall time, and a packed-stream fingerprint of
+//! several synthetic corpora (text, mixed, xml, sparse-copies) across
+//! compression levels — the regression guard for collector/parse changes: ratios
+//! and hashes must stay put while speed may only improve.
 //!
 //! Run: cargo run --release --features parallel --example ratiocheck [mt_threads]
 use std::time::Instant;
@@ -139,9 +139,15 @@ fn main() {
                 rar_rs::ArchiveVersion::V50,
             );
             let ms = t0.elapsed().as_millis();
+            // FNV-1a over the packed stream: the encoder's contract is that a
+            // change only meant to be faster leaves the bytes alone, and the
+            // size alone cannot show that.
+            let hash = packed.iter().fold(0xcbf29ce484222325u64, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+            });
             let ratio = packed.len() as f64 * 100.0 / corpus.len() as f64;
             println!(
-                "{name:<14} l{level} mt{threads}: {:>7.2}%  {:>5} ms  ({} -> {})",
+                "{name:<14} l{level} mt{threads}: {:>7.2}%  {:>5} ms  ({} -> {}) {hash:016x}",
                 ratio,
                 ms,
                 corpus.len(),
