@@ -16,8 +16,8 @@ use super::super::super::{
     SYM_REPEAT,
 };
 use super::super::emit::{
-    apply_length_bonus, cache_find, cache_push, cache_touch, encode_distance_slot, encode_length_slot,
-    ensure_nonzero, remove_length_bonus,
+    apply_length_bonus, cache_find, cache_push, cache_touch, encode_distance_slot,
+    encode_length_slot, ensure_nonzero, remove_length_bonus,
 };
 use super::collect::{
     BlockMatches, DISABLE_MATCHLESS_FAST_PATH, FAST_RECOVER_INTERVAL, NICE_MATCH_LENGTH,

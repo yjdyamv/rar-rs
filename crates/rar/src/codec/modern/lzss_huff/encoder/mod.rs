@@ -67,6 +67,54 @@ const LEVEL_PARAMS: [(usize, usize, usize); 6] = [
 
 const MAX_BLOCK_SIZE: usize = 0x20000; // 128 KB (parse block cap; prices stay localised)
 
+/// Cut budget for the experimental priced tier, or `None` (the default) to
+/// keep the level's own parameters.
+///
+/// Issue 15, lever B.3 asked for a priced rung between `-m1` and `-m2`. The
+/// measured answer is that the rung is not a different *pricer* — the DP
+/// costs the same at every budget — it is a different *collector budget*:
+/// with the long-range table doing the far work, four candidates per
+/// position still carry most of `-m2`'s ratio, and the priced parse stops
+/// being a 10-40x jump over `-m1`.
+///
+/// It changes the packed bytes by design, so it can only ever be opt-in.
+/// Promote it to a documented option (or delete it) once the numbers in
+/// `docs/issues/compression-perf/15-fl2-zstd-parser-tiers.md` settle.
+fn price_tier_cut() -> Option<usize> {
+    #[cfg(test)]
+    {
+        let forced = PRICE_TIER_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+        if forced != PRICE_TIER_OFF {
+            return Some(forced);
+        }
+    }
+    static CUT: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *CUT.get_or_init(|| {
+        std::env::var("RAR_RS_SEQ_PRICE_TIER")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&cut| cut >= 1)
+    })
+}
+
+/// [`price_tier_cut`] reads the environment once per process, which a test
+/// cannot vary; this seam forces the value instead (the fast-path switch uses
+/// the same shape). `PRICE_TIER_OFF` means "no override".
+#[cfg(test)]
+pub(crate) static PRICE_TIER_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(PRICE_TIER_OFF);
+
+#[cfg(test)]
+const PRICE_TIER_OFF: usize = usize::MAX;
+
+#[cfg(test)]
+pub(crate) fn set_price_tier_cut(cut: Option<usize>) {
+    PRICE_TIER_OVERRIDE.store(
+        cut.unwrap_or(PRICE_TIER_OFF),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// Near-window (tail) context cap shared by the sequential and parallel
 /// encoders: the hash-chain matcher only needs short distances, longer
 /// ones come from the sampled long-range history.

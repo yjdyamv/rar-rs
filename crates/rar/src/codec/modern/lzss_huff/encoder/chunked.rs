@@ -229,6 +229,15 @@ fn encode_chunked_raw_inner(
 
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
+    // Experimental (issue 15, lever B.3): a priced parse with a bounded
+    // candidate budget, which is what fills the gap between `-m1` (greedy)
+    // and `-m2` (priced): those two sit 10-40x apart in time, and almost all
+    // of that jump is the collector, not the pricing.
+    let (chain_len, passes) = match price_tier_cut() {
+        Some(cut) if level >= 2 => (cut, 1),
+        _ => (chain_len, OPTIMAL_PARSE_PASSES[level]),
+    };
+    let miss_threshold = super::parse::COLLECT_MISS_THRESHOLD[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     // WinRAR applies the long range search to -m2..-m5 and ignores it
     // for -m1 (fastest); it is automatic (no -mcl switch needed) and
@@ -260,8 +269,8 @@ fn encode_chunked_raw_inner(
                         variant,
                     },
                     chain_len,
-                    passes: OPTIMAL_PARSE_PASSES[level],
-                    miss_threshold: super::parse::COLLECT_MISS_THRESHOLD[level],
+                    passes,
+                    miss_threshold,
                     long_range,
                     // Sequential path: the state's own long-range table is
                     // used and extended inside the parse.

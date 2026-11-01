@@ -130,6 +130,14 @@ fn fast_path_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+/// Serializes the tests that drive the experimental price tier, which is also
+/// process-global.
+#[cfg(test)]
+fn price_tier_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Cheap default-suite guard for the matchless fast path (see
 /// `docs/testing.md`). The full corpus matrix lives in `mt_tests` and is
 /// `#[ignore]`d (~7 min on the reference box), so this runs the two things
@@ -240,6 +248,94 @@ mod fast_path_tests {
             fired_total > 0,
             "the matchless fast path never fired, so the byte comparison is vacuous"
         );
+    }
+}
+
+#[cfg(test)]
+mod price_tier_tests {
+    use super::encoder::set_price_tier_cut;
+    use super::{DEFAULT_CHUNK_SIZE, EncodeOptions, encode_chunked};
+    use crate::version::ArchiveVersion;
+
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            set_price_tier_cut(None);
+        }
+    }
+
+    /// Eight-word text: compressible enough that a four-candidate budget
+    /// visibly loses ratio, deterministic so the bytes repeat.
+    fn text_like() -> Vec<u8> {
+        const WORDS: [&str; 8] = [
+            "alpha ", "beta ", "gamma ", "delta ", "epsilon ", "zeta ", "eta ", "theta ",
+        ];
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut out = Vec::with_capacity(384 * 1024);
+        while out.len() < 384 * 1024 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            out.extend_from_slice(WORDS[(s >> 33) as usize % WORDS.len()].as_bytes());
+        }
+        out
+    }
+
+    fn encode(data: &[u8], level: u8) -> Vec<u8> {
+        encode_chunked(
+            data,
+            EncodeOptions {
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                state: None,
+                is_final: true,
+                variant: ArchiveVersion::V50,
+                skip_incompressible_probe: true,
+                ..EncodeOptions::new(level, 6)
+            },
+        )
+        .unwrap()
+    }
+
+    /// The tier changes the packed bytes by design, so it is opt-in: this pins
+    /// down that the switch is actually wired into the parser (a silently
+    /// ignored switch would make every published number a no-op), that it is
+    /// deterministic, and that a four-candidate budget never buys ratio.
+    #[test]
+    fn tier_reaches_the_parser_deterministically_and_never_wins() {
+        let _g = Guard;
+        let _serial = super::price_tier_lock().lock().expect("price tier lock");
+        let data = text_like();
+
+        set_price_tier_cut(None);
+        let default = encode(&data, 2);
+        set_price_tier_cut(Some(4));
+        let tier = encode(&data, 2);
+        let tier_again = encode(&data, 2);
+
+        assert_eq!(tier, tier_again, "the tier must not vary between runs");
+        assert_ne!(tier, default, "the tier switch never reached the parser");
+        assert!(
+            tier.len() >= default.len(),
+            "a four-candidate budget beat the level's own: {} < {}",
+            tier.len(),
+            default.len()
+        );
+    }
+
+    /// Level 1 is greedy, so there is no priced parse to re-budget; the switch
+    /// must be inert there rather than quietly upgrading `-m1`.
+    #[test]
+    fn tier_leaves_the_greedy_level_alone() {
+        let _g = Guard;
+        let _serial = super::price_tier_lock().lock().expect("price tier lock");
+        let data = text_like();
+
+        set_price_tier_cut(None);
+        let plain = encode(&data, 1);
+        set_price_tier_cut(Some(4));
+        let tier = encode(&data, 1);
+
+        assert_eq!(plain, tier, "level 1 must ignore the tier switch");
     }
 }
 
