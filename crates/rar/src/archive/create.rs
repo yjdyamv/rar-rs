@@ -1248,6 +1248,9 @@ impl WriteOptionFlags {
         Self {
             quick_open: options.quick_open || options.quick_open_auto,
             blake2: options.blake2,
+            // `new_with_options` already dropped a zero percent ("no record",
+            // like WinRAR's `-rr0%`), so both write surfaces arrive here with
+            // `Some(1..=100)` or `None`.
             recovery_percent: options.recovery_percent,
             recovery_sectors: options.recovery_sectors,
             recovery_volumes_percent: options.recovery_volumes_percent,

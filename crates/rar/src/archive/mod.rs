@@ -757,7 +757,15 @@ impl RarArchive {
 
     /// Validate options and build the archive state (without opening the
     /// stream).
-    fn new_with_options(path: PathBuf, opts: crate::options::CreateOptions) -> RarResult<Self> {
+    fn new_with_options(path: PathBuf, mut opts: crate::options::CreateOptions) -> RarResult<Self> {
+        // Zero asks for no record at all: WinRAR prints "Adjusting rr0% value
+        // to 0" and stores nothing, while both records have a floor (one RAR5
+        // shard, two RAR4 sectors), so a stored 0 would otherwise write a
+        // record nobody asked for — or fail the RAR5 close on a zero shard
+        // count. Normalized once here so every read of these fields below
+        // (option validation, the record itself, the volume budget) agrees.
+        opts.recovery_percent = opts.recovery_percent.filter(|percent| *percent > 0);
+        opts.recovery_sectors = opts.recovery_sectors.filter(|sectors| *sectors > 0);
         opts.validate()?;
         let is_rar4 = opts.compression.is_legacy();
         let is_rar13 = opts.compression.is_rar13();
