@@ -36,6 +36,12 @@ const PRIMITIVE_POLYNOMIAL: u32 = 0x1100b;
 const ZERO_LOG_SENTINEL: u32 = (FIELD_SIZE * 2) as u32;
 const MAX_WINRAR602_DATA_SHARDS: u64 = 200;
 const KIB: u64 = 1024;
+/// Largest parity payload one `{RB}` chunk carries. WinRAR splits every
+/// recovery shard into chunks of at most this many bytes, each with its own
+/// header, so a chunk's u32 `total_size` stays small and a damaged chunk only
+/// costs 64 KiB of parity. The header geometry (`shard_size`) accounts for the
+/// per-chunk headers: `group_count + blocks * header_size`.
+const RAR5_RECOVERY_BLOCK_PAYLOAD_SIZE: u64 = 64 * KIB;
 const RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE: u64 = 0x48;
 
 /// The process-wide GF(2^16) field tables (256 KiB, built once).
