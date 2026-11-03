@@ -121,19 +121,15 @@ pub const BLOCK_CHECKSUM_SEED: u8 = 0x5A;
 /// Nibble-based RLE escape value for Huffman table encoding.
 pub const NIBBLE_ESCAPE: u8 = 15;
 
-/// Serializes the tests that toggle the process-global fast-path switch, so
-/// the default-suite smoke test and the full `mt_tests` matrix cannot
-/// interleave their on/off arms (or their counter deltas).
+/// Serializes every test that toggles a process-global encoder switch: the
+/// matchless fast path, the price-table carry and the price tier. They are all
+/// process-global, so two tests flipping different ones still race — a smoke
+/// test comparing its "off" arm against its "on" arm would pick up another
+/// test's toggle and report a divergence that does not exist. The counter
+/// deltas (`MATCHLESS_FAST_PATH_USES`) need the same exclusion for their
+/// before/after pairs.
 #[cfg(test)]
-fn fast_path_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
-/// Serializes the tests that drive the experimental price tier, which is also
-/// process-global.
-#[cfg(test)]
-fn price_tier_lock() -> &'static std::sync::Mutex<()> {
+fn codec_toggle_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
@@ -213,7 +209,9 @@ mod fast_path_tests {
     #[test]
     fn matchless_fast_path_smoke_is_byte_identical() {
         let _g = Guard;
-        let _serial = super::fast_path_lock().lock().expect("fast path lock");
+        let _serial = super::codec_toggle_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let mut fired_total = 0usize;
         for (name, data) in [("random", random()), ("sparse-4byte", sparse_4byte())] {
@@ -313,7 +311,9 @@ mod price_tier_tests {
     #[test]
     fn tier_reaches_the_parser_deterministically_and_never_wins() {
         let _g = Guard;
-        let _serial = super::price_tier_lock().lock().expect("price tier lock");
+        let _serial = super::codec_toggle_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let data = text_like();
 
         set_price_tier_cut(None);
@@ -340,7 +340,9 @@ mod price_tier_tests {
     #[test]
     fn tier_reaches_the_filtered_parser() {
         let _g = Guard;
-        let _serial = super::price_tier_lock().lock().expect("price tier lock");
+        let _serial = super::codec_toggle_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let data = text_like();
 
         set_price_tier_cut(None);
@@ -362,7 +364,9 @@ mod price_tier_tests {
     #[test]
     fn tier_leaves_the_greedy_level_alone() {
         let _g = Guard;
-        let _serial = super::price_tier_lock().lock().expect("price tier lock");
+        let _serial = super::codec_toggle_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let data = text_like();
 
         set_price_tier_cut(None);
@@ -827,7 +831,9 @@ mod mt_tests {
     /// would have to swallow.
     #[test]
     fn carried_prices_beat_starting_from_the_flat_estimate() {
-        let _serial = super::fast_path_lock().lock().expect("price carry lock");
+        let _serial = super::codec_toggle_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         struct Guard;
         impl Drop for Guard {
             fn drop(&mut self) {
@@ -919,7 +925,9 @@ mod mt_tests {
             }
         }
         let _g = Guard;
-        let _serial = super::fast_path_lock().lock().expect("fast path lock");
+        let _serial = super::codec_toggle_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let mut corpora: Vec<(String, Vec<u8>)> = Vec::new();
         corpora.push(("random".into(), prng_block(3 * DEFAULT_CHUNK_SIZE, 42)));
