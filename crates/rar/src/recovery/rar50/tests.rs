@@ -68,6 +68,10 @@ fn rar5_inline_recovery_plan_handles_clamps_and_large_prefixes() {
 
 #[test]
 fn rar5_inline_recovery_plan_keeps_fixed_header_above_64k_groups() {
+    // WinRAR splits a recovery shard into 64 KiB parity blocks, each preceded
+    // by a full header, so `shard_size` grows by `header_size` per block. The
+    // boundary and the block arithmetic below were verified against WinRAR
+    // itself (gc=65_552 and gc=131_002 both report shard_size = gc + 2*1672).
     let boundary = MAX_WINRAR602_DATA_SHARDS * 0x10000;
     assert_eq!(
         plan_inline_recovery(boundary, 1).unwrap(),
@@ -79,16 +83,26 @@ fn rar5_inline_recovery_plan_keeps_fixed_header_above_64k_groups() {
             shard_size: 67_208,
         }
     );
+    let above = plan_inline_recovery(boundary + 1, 1).unwrap();
+    assert_eq!(above.group_count, 65_538);
+    assert_eq!(above.header_size, 1672);
+    assert_eq!(above.blocks_per_shard(), 2);
+    assert_eq!(above.shard_size, 65_538 + 2 * 1672);
+
+    // Exactly one byte past a 64 KiB boundary starts a second block; one byte
+    // short of it stays in the first.
     assert_eq!(
-        plan_inline_recovery(boundary + 1, 1).unwrap(),
-        InlineRecoveryPlan {
-            data_shards: 200,
-            recovery_shards: 2,
-            group_count: 65_538,
-            header_size: 1672,
-            shard_size: 67_210,
-        }
+        plan_inline_recovery(boundary, 1)
+            .unwrap()
+            .blocks_per_shard(),
+        1
     );
+    // The even-rounding of `group_count` moves this case back onto the same
+    // geometry: still two blocks, hence two headers.
+    let two = plan_inline_recovery(boundary + 2, 1).unwrap();
+    assert_eq!(two.group_count, 65_538);
+    assert_eq!(two.blocks_per_shard(), 2);
+    assert_eq!(two.shard_size, two.group_count + 2 * 1672);
 }
 
 #[test]
@@ -319,24 +333,54 @@ fn rar5_structural_inline_recovery_round_trips_above_64k_groups() {
 
     assert_eq!(plan.header_size, 1672);
     assert_eq!(plan.group_count, 65_538);
+    assert_eq!(plan.blocks_per_shard(), 2);
+    assert_eq!(plan.shard_size, 65_538 + 2 * 1672);
     assert_eq!(recovery_data.len(), plan.payload_size().unwrap() as usize);
-    for shard_index in 0..plan.recovery_shards as usize {
-        let chunk_start = shard_index * plan.shard_size as usize;
-        let chunk_end = chunk_start + plan.shard_size as usize;
-        let chunk = &recovery_data[chunk_start..chunk_end];
-        assert_eq!(
-            u32::from_le_bytes(chunk[0x0c..0x10].try_into().unwrap()) as u64,
-            plan.shard_size
-        );
-        assert_eq!(
-            u32::from_le_bytes(chunk[0x10..0x14].try_into().unwrap()) as u64,
-            plan.header_size
-        );
-        assert_eq!(
-            u64::from_le_bytes(chunk[0x04..0x0c].try_into().unwrap()),
-            crc64_xz(&chunk[0x0c..])
-        );
+
+    // Each shard is stored as consecutive blocks of at most 64 KiB parity, and
+    // every block carries its own header + CRC64.
+    let mut offset = 0usize;
+    for shard_index in 0..plan.recovery_shards {
+        for block in 0..plan.blocks_per_shard() {
+            let block_len = plan.block_payload_len(block) as usize;
+            let total = plan.header_size as usize + block_len;
+            let chunk = &recovery_data[offset..offset + total];
+            assert_eq!(chunk[..4], *b"{RB}");
+            assert_eq!(
+                u32::from_le_bytes(chunk[0x0c..0x10].try_into().unwrap()) as u64,
+                total as u64
+            );
+            assert_eq!(
+                u32::from_le_bytes(chunk[0x10..0x14].try_into().unwrap()) as u64,
+                plan.header_size
+            );
+            // Offset of this block inside the shard's parity, plus the real
+            // (unpadded) byte extent it protects.
+            assert_eq!(
+                u64::from_le_bytes(chunk[0x16..0x1e].try_into().unwrap()),
+                plan.block_offset(block)
+            );
+            let expected_extent = (prefix.len() as u64)
+                .saturating_sub((plan.data_shards - 1) * plan.group_count)
+                .min(plan.group_count)
+                .saturating_sub(plan.block_offset(block))
+                .min(block_len as u64);
+            assert_eq!(
+                u32::from_le_bytes(chunk[0x1e..0x22].try_into().unwrap()) as u64,
+                expected_extent
+            );
+            assert_eq!(
+                u16::from_le_bytes(chunk[0x3e..0x40].try_into().unwrap()) as u64,
+                shard_index
+            );
+            assert_eq!(
+                u64::from_le_bytes(chunk[0x04..0x0c].try_into().unwrap()),
+                crc64_xz(&chunk[0x0c..])
+            );
+            offset += total;
+        }
     }
+    assert_eq!(offset, recovery_data.len());
 
     assert_eq!(
         repair_inline_recovery_prefix(&prefix, &recovery_data).unwrap(),

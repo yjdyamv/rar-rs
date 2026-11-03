@@ -193,8 +193,10 @@ fn find_inline_recovery_chunks_in_file(
                     saw_marker = true;
                     if let Some((abs, chunk, raw)) = try_parse_chunk_at(src, file_size, candidate)?
                     {
-                        let shard_size = chunk.plan.shard_size;
-                        skip_until = abs.saturating_add(shard_size);
+                        // Skip past this chunk's bytes (header + the parity it
+                        // carries, which is one 64 KiB block of a shard for all
+                        // but small archives).
+                        skip_until = abs.saturating_add(chunk.chunk_len());
                         found.push((abs, chunk, raw));
                     }
                 }

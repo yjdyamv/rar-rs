@@ -4,16 +4,79 @@
 use super::gf16::{apply_inverse_matrix, invert_linear_system_matrix, read_u32, read_u64};
 use super::plan::{InlineRecoveryPlan, split_prefix_shard_ranges, split_prefix_shards};
 use super::{
-    Error, RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE, Result, check_cancel, crc64_rar_state, crc64_xz,
-    make_encoder_matrix, shared_gf16,
+    Error, RAR5_RECOVERY_BLOCK_PAYLOAD_SIZE, RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE, Result,
+    check_cancel, crc64_rar_state, crc64_xz, make_encoder_matrix, shared_gf16,
 };
 #[derive(Debug, Clone)]
 pub(super) struct InlineRecoveryChunk {
     pub(super) plan: InlineRecoveryPlan,
     pub(super) protected_size: u64,
     pub(super) shard_index: usize,
-    pub(super) data_shard_states: Vec<u64>,
+    /// `(block index, per-data-shard CRC64 for that block)` pairs, one per 64 KiB
+    /// parity block this shard is split into. WinRAR records the data shards'
+    /// state block by block: the table inside a chunk covers only the bytes that
+    /// the chunk's own 64 KiB slice of every data shard holds, so there is no
+    /// single whole-shard CRC64 anywhere in the record.
+    pub(super) block_states: Vec<(u64, Vec<u64>)>,
+    /// Byte offset of this chunk's parity inside its recovery shard. Non-zero
+    /// for every chunk after the first of a shard, because WinRAR splits a
+    /// shard's parity into 64 KiB blocks that each carry a full header.
+    pub(super) chunk_offset: u64,
+    /// True for the pre-chunking layout that one of our own writers emitted: a
+    /// single chunk carrying the whole shard, whose state table therefore holds
+    /// one whole-shard CRC64 instead of per-block ones. WinRAR cannot read that
+    /// layout (it reports a nonsense record size and refuses to repair), but
+    /// archives already written that way must still be repairable here.
+    pub(super) legacy_whole_shard: bool,
     pub(super) parity: Vec<u8>,
+}
+
+impl InlineRecoveryChunk {
+    /// Number of bytes one on-disk chunk occupies: header plus the parity it
+    /// carries (a whole shard, or one 64 KiB block of it).
+    pub(super) fn chunk_len(&self) -> u64 {
+        self.plan
+            .header_size
+            .saturating_add(u64::try_from(self.parity.len()).unwrap_or(u64::MAX))
+    }
+
+    /// Whether `bytes` — the content of data shard `index` — still matches every
+    /// per-block CRC64 the record holds for that shard. `None` when the record
+    /// carries no state at all (nothing to compare), `Some(false)` on mismatch.
+    fn bytes_match(&self, bytes: &[u8], index: usize) -> Option<bool> {
+        if self.legacy_whole_shard {
+            // Legacy record: the table entry covers the entire shard.
+            let state = self
+                .block_states
+                .first()
+                .and_then(|(_, states)| states.get(index).copied())?;
+            return Some(crc64_rar_state(bytes) == state);
+        }
+        let mut checked = false;
+        for (block, states) in &self.block_states {
+            let state = *states.get(index)?;
+            let block_len = usize::try_from(RAR5_RECOVERY_BLOCK_PAYLOAD_SIZE).ok()?;
+            let start = usize::try_from(block.saturating_mul(RAR5_RECOVERY_BLOCK_PAYLOAD_SIZE))
+                .ok()?
+                .min(bytes.len());
+            let end = start.saturating_add(block_len).min(bytes.len());
+            if crc64_rar_state(&bytes[start..end]) != state {
+                return Some(false);
+            }
+            checked = true;
+        }
+        checked.then_some(true)
+    }
+
+    /// Whether data shard `index` in `prefix` still matches the record.
+    fn shard_matches(
+        &self,
+        prefix: &[u8],
+        shard_range: std::ops::Range<usize>,
+        index: usize,
+    ) -> Option<bool> {
+        self.bytes_match(prefix.get(shard_range)?, index)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -32,11 +95,10 @@ pub fn repair_inline_recovery_prefix(
     if first.protected_size != archive_prefix.len() as u64 {
         return Err(Error::BadRecoveryChunk);
     }
-    if chunks.iter().any(|chunk| {
-        chunk.plan != plan
-            || chunk.protected_size != first.protected_size
-            || chunk.data_shard_states != first.data_shard_states
-    }) {
+    if chunks
+        .iter()
+        .any(|chunk| chunk.plan != plan || chunk.protected_size != first.protected_size)
+    {
         return Err(Error::BadRecoveryChunk);
     }
 
@@ -45,10 +107,12 @@ pub fn repair_inline_recovery_prefix(
     let damaged: Vec<usize> = shard_ranges
         .iter()
         .enumerate()
-        .filter_map(|(index, range)| {
-            (crc64_rar_state(&archive_prefix[range.clone()]) != first.data_shard_states[index])
-                .then_some(index)
+        .filter(|(index, range)| {
+            !first
+                .shard_matches(archive_prefix, (*range).clone(), *index)
+                .unwrap_or(false)
         })
+        .map(|(index, _)| index)
         .collect();
     if damaged.is_empty() {
         return Ok(archive_prefix.to_vec());
@@ -89,7 +153,7 @@ pub fn repair_inline_recovery_prefix(
                 continue;
             }
             let candidate = &archive_prefix[cand_start as usize..cand_end as usize];
-            if crc64_rar_state(candidate) == first.data_shard_states[index] {
+            if first.bytes_match(candidate, index) == Some(true) {
                 data_shards[index] = candidate.to_vec();
                 relocated = true;
                 break;
@@ -203,11 +267,10 @@ where
     if first.protected_size != protected_size as u64 {
         return Err(Error::BadRecoveryChunk);
     }
-    if chunks.iter().any(|chunk| {
-        chunk.plan != first.plan
-            || chunk.protected_size != first.protected_size
-            || chunk.data_shard_states != first.data_shard_states
-    }) {
+    if chunks
+        .iter()
+        .any(|chunk| chunk.plan != first.plan || chunk.protected_size != first.protected_size)
+    {
         return Err(Error::BadRecoveryChunk);
     }
 
@@ -221,7 +284,7 @@ where
     for (index, range) in shard_ranges.iter().enumerate() {
         check_cancel(cancel)?;
         let shard = read_range(range.clone())?;
-        if crc64_rar_state(&shard) != first.data_shard_states[index] {
+        if !first.bytes_match(&shard, index).unwrap_or(false) {
             damaged.push(index);
         }
     }
@@ -315,7 +378,7 @@ where
     // protected size happen to match.
     let mut verified = Vec::with_capacity(repaired.len());
     for (index, data) in damaged.into_iter().zip(repaired) {
-        if crc64_rar_state(&data) != first.data_shard_states[index] {
+        if first.bytes_match(&data, index) != Some(true) {
             return Err(Error::BadRecoveryChunk);
         }
         verified.push((shard_ranges[index].clone(), data));
@@ -362,7 +425,7 @@ pub fn repair_inline_recovery_archive(input: &[u8]) -> Result<Vec<u8>> {
     let mut recovery_data = Vec::with_capacity(
         chunks
             .iter()
-            .map(|found| found.chunk.plan.shard_size as usize)
+            .map(|found| found.chunk.chunk_len() as usize)
             .sum(),
     );
     for found in &chunks {
@@ -388,14 +451,13 @@ fn find_inline_recovery_chunks(input: &[u8]) -> Result<Vec<FoundInlineRecoveryCh
         let start = offset + relative;
         saw_marker = true;
         if let Ok(chunk) = parse_inline_recovery_chunk(&input[start..]) {
-            let shard_size =
-                usize::try_from(chunk.plan.shard_size).map_err(|_| Error::PlanOverflow)?;
-            if input.len().saturating_sub(start) >= shard_size {
+            let chunk_len = usize::try_from(chunk.chunk_len()).map_err(|_| Error::PlanOverflow)?;
+            if input.len().saturating_sub(start) >= chunk_len {
                 chunks.push(FoundInlineRecoveryChunk {
                     offset: start,
                     chunk,
                 });
-                offset = start + shard_size;
+                offset = start + chunk_len;
                 continue;
             }
         }
@@ -425,10 +487,9 @@ fn append_inline_recovery_chunk(
     found: &FoundInlineRecoveryChunk,
     out: &mut Vec<u8>,
 ) -> Result<()> {
-    let shard_size =
-        usize::try_from(found.chunk.plan.shard_size).map_err(|_| Error::PlanOverflow)?;
+    let chunk_len = usize::try_from(found.chunk.chunk_len()).map_err(|_| Error::PlanOverflow)?;
     let start = found.offset;
-    let end = start.checked_add(shard_size).ok_or(Error::PlanOverflow)?;
+    let end = start.checked_add(chunk_len).ok_or(Error::PlanOverflow)?;
     out.extend_from_slice(input.get(start..end).ok_or(Error::BadRecoveryChunk)?);
     Ok(())
 }
@@ -479,13 +540,125 @@ pub fn reconstruct_data_shards(
     Ok(out)
 }
 
+/// Parse the record's chunks and rebuild one full parity shard per recovery
+/// shard.
+///
+/// WinRAR stores a recovery shard as `blocks_per_shard()` consecutive chunks of
+/// at most 64 KiB parity each; the record is only usable once the blocks of a
+/// shard are stitched back together, so this returns whole shards and drops any
+/// shard whose blocks do not cover it completely (a truncated tail leaves the
+/// last shard partial — the shards that are complete can still repair).
 fn parse_available_inline_recovery_chunks(
     recovery_data: &[u8],
 ) -> Result<Vec<InlineRecoveryChunk>> {
-    Ok(find_inline_recovery_chunks(recovery_data)?
+    struct Assembly {
+        chunk: InlineRecoveryChunk,
+        covered: Vec<bool>,
+    }
+
+    let mut assemblies: Vec<Assembly> = Vec::new();
+    for found in find_inline_recovery_chunks(recovery_data)? {
+        let piece = found.chunk;
+        let group_count =
+            usize::try_from(piece.plan.group_count).map_err(|_| Error::PlanOverflow)?;
+        let block_len =
+            usize::try_from(RAR5_RECOVERY_BLOCK_PAYLOAD_SIZE).map_err(|_| Error::PlanOverflow)?;
+        let block_count = group_count.div_ceil(block_len).max(1);
+        let piece_start = usize::try_from(piece.chunk_offset).map_err(|_| Error::PlanOverflow)?;
+        let piece_end = piece_start
+            .checked_add(piece.parity.len())
+            .ok_or(Error::PlanOverflow)?;
+        if piece_end > group_count {
+            return Err(Error::BadRecoveryChunk);
+        }
+
+        let index = match assemblies
+            .iter()
+            .position(|assembly| assembly.chunk.shard_index == piece.shard_index)
+        {
+            Some(index) => index,
+            None => {
+                let blocks = usize::try_from(
+                    piece.plan.shard_size.saturating_sub(piece.plan.group_count)
+                        / piece.plan.header_size.max(1),
+                )
+                .map_err(|_| Error::PlanOverflow)?;
+                assemblies.push(Assembly {
+                    chunk: InlineRecoveryChunk {
+                        plan: piece.plan,
+                        protected_size: piece.protected_size,
+                        shard_index: piece.shard_index,
+                        block_states: Vec::new(),
+                        chunk_offset: 0,
+                        legacy_whole_shard: piece.legacy_whole_shard,
+                        parity: vec![0u8; group_count],
+                    },
+                    // A legacy chunk already carries the whole shard.
+                    covered: vec![piece.legacy_whole_shard; blocks.max(block_count)],
+                });
+                assemblies.len() - 1
+            }
+        };
+
+        let assembly = &mut assemblies[index];
+        if assembly.chunk.plan != piece.plan
+            || assembly.chunk.protected_size != piece.protected_size
+            || assembly.chunk.legacy_whole_shard != piece.legacy_whole_shard
+        {
+            return Err(Error::BadRecoveryChunk);
+        }
+        if assembly.chunk.parity.len() != group_count {
+            return Err(Error::BadRecoveryChunk);
+        }
+        assembly.chunk.parity[piece_start..piece_end].copy_from_slice(&piece.parity);
+        // A shard's chunks each carry the state table of their own 64 KiB block;
+        // stitch them back so the assembled shard knows every block's CRC64.
+        for (block, states) in piece.block_states {
+            if let Some(existing) = assembly
+                .chunk
+                .block_states
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == block)
+            {
+                // Two chunks of one shard that disagree about the block's state
+                // come from different recovery-record generations (two RRs of
+                // the same protected size share a plan). Solving across them
+                // would mix parity rows of unrelated archives, so refuse.
+                if existing.1 != states {
+                    return Err(Error::BadRecoveryChunk);
+                }
+            } else {
+                assembly.chunk.block_states.push((block, states));
+            }
+        }
+        for (block, covered) in assembly.covered.iter_mut().enumerate() {
+            let block_start = block.saturating_mul(block_len).min(group_count);
+            let block_end = block
+                .saturating_add(1)
+                .saturating_mul(block_len)
+                .min(group_count);
+            if block_start >= piece_start && block_end <= piece_end {
+                *covered = true;
+            }
+        }
+    }
+
+    let mut shards: Vec<InlineRecoveryChunk> = assemblies
         .into_iter()
-        .map(|found| found.chunk)
-        .collect())
+        .filter(|assembly| assembly.covered.iter().all(|covered| *covered))
+        .map(|mut assembly| {
+            assembly.chunk.block_states.sort_by_key(|(block, _)| *block);
+            assembly.chunk
+        })
+        // Parity and state table must both be complete: a shard whose blocks are
+        // all on disk still cannot be validated without every block's CRC64.
+        .filter(|chunk| {
+            chunk.legacy_whole_shard
+                || chunk.block_states.len() as u64 == chunk.plan.blocks_per_shard()
+        })
+        .collect();
+    shards.sort_by_key(|chunk| chunk.shard_index);
+    Ok(shards)
 }
 
 pub(super) fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecoveryChunk> {
@@ -520,6 +693,7 @@ pub(super) fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecovery
         return Err(Error::OddShardSize);
     }
     let shard_size = read_u64(input, 0x32)?;
+    let chunk_offset = read_u64(input, 0x16)?;
     let data_shards = u16::from_le_bytes(input[0x3a..0x3c].try_into().unwrap()) as u64;
     let recovery_shards = u16::from_le_bytes(input[0x3c..0x3e].try_into().unwrap()) as u64;
     let shard_index = u16::from_le_bytes(input[0x3e..0x40].try_into().unwrap()) as usize;
@@ -534,13 +708,29 @@ pub(super) fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecovery
         != recovery_shards
             .checked_mul(shard_size)
             .ok_or(Error::PlanOverflow)?
-        || shard_size != total_size
         || shard_index >= recovery_shards as usize
         || header_size_usize != 0x48 + data_shards as usize * 8
         || total_size_usize < header_size_usize
     {
         return Err(Error::BadRecoveryChunk);
     }
+    // A shard's chunks are laid out as `group_count` parity bytes plus one
+    // header per 64 KiB block, so the leftover after the parity must be a whole
+    // number of headers. WinRAR emits exactly that; a chunk that claims
+    // otherwise cannot be reassembled.
+    let shard_headers = shard_size.saturating_sub(group_count);
+    if shard_size < group_count.saturating_add(header_size)
+        || shard_headers % header_size != 0
+        || shard_headers / header_size == 0
+    {
+        return Err(Error::BadRecoveryChunk);
+    }
+    // A shard that advertises a single header while its parity spans several
+    // 64 KiB blocks is our own pre-chunking layout: one chunk carrying the whole
+    // shard, whose state table holds whole-shard CRC64s. Keep accepting it so
+    // archives written by that version still repair.
+    let blocks = shard_headers / header_size;
+    let legacy_whole_shard = blocks == 1 && plan.blocks_per_shard() > 1;
 
     let mut data_shard_states = Vec::with_capacity(data_shards as usize);
     let mut pos = 0x40;
@@ -550,14 +740,20 @@ pub(super) fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecovery
     }
     let _final_state = read_u64(input, pos)?;
     let parity = input[header_size_usize..total_size_usize].to_vec();
-    if parity.len() as u64 != group_count {
+    if chunk_offset.saturating_add(parity.len() as u64) > group_count {
         return Err(Error::BadRecoveryChunk);
     }
+    if chunk_offset % RAR5_RECOVERY_BLOCK_PAYLOAD_SIZE != 0 {
+        return Err(Error::BadRecoveryChunk);
+    }
+    let block = chunk_offset / RAR5_RECOVERY_BLOCK_PAYLOAD_SIZE;
     Ok(InlineRecoveryChunk {
         plan,
         protected_size,
         shard_index,
-        data_shard_states,
+        block_states: vec![(block, data_shard_states)],
+        chunk_offset,
+        legacy_whole_shard,
         parity,
     })
 }

@@ -4,8 +4,8 @@ use std::io::{self, Read};
 
 use super::gf16::{encode_parity_shards_with_progress, make_encoder_matrix};
 use super::plan::{
-    InlineRecoveryPlan, crc64_rar_state, crc64_xz, plan_inline_recovery, split_prefix_shard_ranges,
-    split_prefix_shards,
+    InlineRecoveryPlan, crc64_rar_state, crc64_xz, plan_inline_recovery, shard_block_range,
+    split_prefix_shard_ranges, split_prefix_shards,
 };
 use super::{Error, Result, shared_gf16};
 use crate::write_progress::ProgressReporter;
@@ -76,102 +76,153 @@ pub(crate) fn build_structural_inline_recovery_data_with_progress(
         pass,
     )?;
     let shard_ranges = split_prefix_shard_ranges(archive_prefix.len(), plan)?;
-    let data_shard_states: Vec<u64> = shard_ranges
-        .iter()
-        .map(|range| crc64_rar_state(&archive_prefix[range.clone()]))
+    // One state table per 64 KiB block: each `{RB}` chunk carries the CRC64s of
+    // the data-shard bytes that its own block covers, not of the whole shard.
+    let block_states: Vec<Vec<u64>> = (0..plan.blocks_per_shard())
+        .map(|block| {
+            shard_ranges
+                .iter()
+                .map(|range| {
+                    crc64_rar_state(&archive_prefix[shard_block_range(range.clone(), block)])
+                })
+                .collect()
+        })
         .collect();
     let final_state = parity
         .first()
         .map(|payload| crc64_rar_state(payload))
         .unwrap_or(0);
-    let chunk_data_extent = shard_ranges.last().map_or(0usize, std::ops::Range::len);
     assemble_recovery_data(
         plan,
         parity,
-        data_shard_states,
+        block_states,
         final_state,
-        archive_prefix.len(),
-        chunk_data_extent,
+        archive_prefix.len() as u64,
     )
 }
 
 /// Assemble the on-disk recovery-record payload from a finished parity plan.
 /// Shared by the buffered and streaming encoders so both emit byte-identical
 /// output — the bytes must match WinRAR / UnRAR for the archive to be repairable.
+///
+/// Every recovery shard's parity is split into `plan.blocks_per_shard()` chunks
+/// of at most 64 KiB, each carrying its own header. WinRAR lays the record out
+/// this way, and it is what makes the record's advertised geometry
+/// (`shard_size`) consistent with the bytes on disk: a single chunk per shard
+/// describes a `total_size` field WinRAR cannot reconcile, and it then reports a
+/// nonsense recovery-record size.
+/// `block_states[block][shard]` is the CRC64 the `{RB}` chunk of `block`
+/// records for data shard `shard`.
 fn assemble_recovery_data(
     plan: InlineRecoveryPlan,
     parity: Vec<Vec<u8>>,
-    data_shard_states: Vec<u64>,
+    block_states: Vec<Vec<u64>>,
     final_state: u64,
-    archive_len: usize,
-    chunk_data_extent: usize,
+    archive_len: u64,
 ) -> Result<Vec<u8>> {
     let total_len = usize::try_from(plan.payload_size()?).map_err(|_| Error::PlanOverflow)?;
     let header_size = usize::try_from(plan.header_size).map_err(|_| Error::PlanOverflow)?;
-    let shard_size = usize::try_from(plan.shard_size).map_err(|_| Error::PlanOverflow)?;
     let data_shards = usize::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
     let recovery_shards = usize::try_from(plan.recovery_shards).map_err(|_| Error::PlanOverflow)?;
-    let total_size = u32::try_from(plan.shard_size).map_err(|_| Error::PlanOverflow)?;
     let header_size_u32 = u32::try_from(plan.header_size).map_err(|_| Error::PlanOverflow)?;
     let data_shards_u16 = u16::try_from(plan.data_shards).map_err(|_| Error::PlanOverflow)?;
     let recovery_shards_u16 =
         u16::try_from(plan.recovery_shards).map_err(|_| Error::PlanOverflow)?;
-    let chunk_data_extent_u32 =
-        u32::try_from(chunk_data_extent).map_err(|_| Error::PlanOverflow)?;
+
+    // Real length of the last data shard: everything past it inside the padded
+    // parity is zero fill, which the structural header excludes from the chunk's
+    // `data_extent` field.
+    let last_shard_len = archive_len
+        .saturating_sub(
+            plan.data_shards
+                .saturating_sub(1)
+                .saturating_mul(plan.group_count),
+        )
+        .min(plan.group_count);
 
     let mut out = Vec::with_capacity(total_len);
     for (shard_index, payload) in parity.iter().enumerate() {
-        if payload.len() + header_size != shard_size {
+        if payload.len() != usize::try_from(plan.group_count).map_err(|_| Error::PlanOverflow)? {
             return Err(Error::PlanOverflow);
         }
+        for block in 0..plan.blocks_per_shard() {
+            let block_offset =
+                usize::try_from(plan.block_offset(block)).map_err(|_| Error::PlanOverflow)?;
+            let block_len =
+                usize::try_from(plan.block_payload_len(block)).map_err(|_| Error::PlanOverflow)?;
+            let block_end = block_offset
+                .checked_add(block_len)
+                .ok_or(Error::PlanOverflow)?;
+            let payload_slice = payload
+                .get(block_offset..block_end)
+                .ok_or(Error::PlanOverflow)?;
+            let total_size = u32::try_from(
+                plan.header_size
+                    .checked_add(block_len as u64)
+                    .ok_or(Error::PlanOverflow)?,
+            )
+            .map_err(|_| Error::PlanOverflow)?;
+            // Parity words past the real data are zero fill; report only the
+            // protected bytes that this block actually covers.
+            let data_extent = last_shard_len
+                .saturating_sub(plan.block_offset(block))
+                .min(block_len as u64);
+            let data_extent_u32 = u32::try_from(data_extent).map_err(|_| Error::PlanOverflow)?;
 
-        let chunk_start = out.len();
-        out.extend_from_slice(b"{RB}");
-        out.extend_from_slice(&0u64.to_le_bytes());
-        out.extend_from_slice(&total_size.to_le_bytes());
-        out.extend_from_slice(&header_size_u32.to_le_bytes());
-        out.push(1);
-        out.push(1);
-        out.extend_from_slice(&0u64.to_le_bytes());
-        out.extend_from_slice(&chunk_data_extent_u32.to_le_bytes());
-        out.extend_from_slice(&(archive_len as u64).to_le_bytes());
-        out.extend_from_slice(&plan.group_count.to_le_bytes());
-        out.extend_from_slice(&plan.shard_size.to_le_bytes());
-        out.extend_from_slice(&data_shards_u16.to_le_bytes());
-        out.extend_from_slice(&recovery_shards_u16.to_le_bytes());
-        out.extend_from_slice(
-            &u16::try_from(shard_index)
-                .map_err(|_| Error::PlanOverflow)?
-                .to_le_bytes(),
-        );
-        for &state in &data_shard_states {
-            out.extend_from_slice(&state.to_le_bytes());
-        }
-        out.extend_from_slice(&final_state.to_le_bytes());
-        if out.len() - chunk_start != header_size {
-            return Err(Error::PlanOverflow);
-        }
-        out.extend_from_slice(payload);
-        if out.len() - chunk_start != shard_size {
-            return Err(Error::PlanOverflow);
-        }
+            let chunk_start = out.len();
+            out.extend_from_slice(b"{RB}");
+            out.extend_from_slice(&0u64.to_le_bytes());
+            out.extend_from_slice(&total_size.to_le_bytes());
+            out.extend_from_slice(&header_size_u32.to_le_bytes());
+            out.push(1);
+            out.push(1);
+            out.extend_from_slice(&plan.block_offset(block).to_le_bytes());
+            out.extend_from_slice(&data_extent_u32.to_le_bytes());
+            out.extend_from_slice(&archive_len.to_le_bytes());
+            out.extend_from_slice(&plan.group_count.to_le_bytes());
+            out.extend_from_slice(&plan.shard_size.to_le_bytes());
+            out.extend_from_slice(&data_shards_u16.to_le_bytes());
+            out.extend_from_slice(&recovery_shards_u16.to_le_bytes());
+            out.extend_from_slice(
+                &u16::try_from(shard_index)
+                    .map_err(|_| Error::PlanOverflow)?
+                    .to_le_bytes(),
+            );
+            for &state in block_states
+                .get(usize::try_from(block).map_err(|_| Error::PlanOverflow)?)
+                .ok_or(Error::PlanOverflow)?
+            {
+                out.extend_from_slice(&state.to_le_bytes());
+            }
+            out.extend_from_slice(&final_state.to_le_bytes());
+            if out.len() - chunk_start != header_size {
+                return Err(Error::PlanOverflow);
+            }
+            out.extend_from_slice(payload_slice);
+            let chunk_end = out.len();
+            if chunk_end - chunk_start != total_size as usize {
+                return Err(Error::PlanOverflow);
+            }
 
-        let chunk_end = chunk_start
-            .checked_add(shard_size)
-            .ok_or(Error::PlanOverflow)?;
-        let crc_start = chunk_start.checked_add(0x0c).ok_or(Error::PlanOverflow)?;
-        let crc = crc64_xz(out.get(crc_start..chunk_end).ok_or(Error::PlanOverflow)?);
-        let crc_field_start = chunk_start.checked_add(0x04).ok_or(Error::PlanOverflow)?;
-        let crc_field_end = chunk_start.checked_add(0x0c).ok_or(Error::PlanOverflow)?;
-        out.get_mut(crc_field_start..crc_field_end)
-            .ok_or(Error::PlanOverflow)?
-            .copy_from_slice(&crc.to_le_bytes());
+            let crc = crc64_xz(
+                out.get(chunk_start + 0x0c..chunk_end)
+                    .ok_or(Error::PlanOverflow)?,
+            );
+            out.get_mut(chunk_start + 0x04..chunk_start + 0x0c)
+                .ok_or(Error::PlanOverflow)?
+                .copy_from_slice(&crc.to_le_bytes());
+        }
     }
     if out.len() != total_len {
         return Err(Error::PlanOverflow);
     }
     debug_assert_eq!(parity.len(), recovery_shards);
-    debug_assert_eq!(data_shard_states.len(), data_shards);
+    debug_assert_eq!(block_states.len() as u64, plan.blocks_per_shard());
+    debug_assert!(
+        block_states
+            .iter()
+            .all(|states| states.len() == data_shards)
+    );
     Ok(out)
 }
 
@@ -230,17 +281,26 @@ pub(crate) fn build_structural_inline_recovery_data_streaming<R: Read>(
     let gf = shared_gf16();
 
     let mut parity: Vec<Vec<u8>> = vec![vec![0u8; group_count]; recovery_shards];
-    let mut data_shard_states = vec![0u64; data_shards];
+    let blocks = plan.blocks_per_shard();
+    let mut block_states: Vec<Vec<u64>> =
+        vec![vec![0u64; data_shards]; usize::try_from(blocks).map_err(|_| Error::PlanOverflow)?];
+    let block_len = usize::try_from(super::RAR5_RECOVERY_BLOCK_PAYLOAD_SIZE)
+        .map_err(|_| Error::PlanOverflow)?;
 
     for s in 0..data_shards {
         // Fresh, zeroed buffer each shard: a partial trailing shard must pad with
         // zeros (matching `split_prefix_shards`), not the previous shard's bytes.
         let mut buf = vec![0u8; group_count];
         let got = read_prefix_chunk(&mut reader, &mut buf)?;
-        // CRC over the *real* prefix bytes only — `split_prefix_shards` treats
-        // overflow shards as empty slices, so an EOF (got == 0) yields the crc64
-        // of nothing, matching the buffered path.
-        data_shard_states[s] = crc64_rar_state(&buf[..got]);
+        // CRC over the *real* prefix bytes only, one entry per 64 KiB block —
+        // `split_prefix_shards` treats overflow shards as empty slices, so an
+        // EOF (got == 0) yields the crc64 of nothing, matching the buffered
+        // path. A block that starts past the real bytes covers nothing.
+        for (block, states) in block_states.iter_mut().enumerate() {
+            let start = block.saturating_mul(block_len).min(got);
+            let end = start.saturating_add(block_len).min(got);
+            states[s] = crc64_rar_state(&buf[start..end]);
+        }
         for (j, row) in matrix.iter().enumerate() {
             let col = row[s];
             for word_offset in (0..group_count).step_by(2) {
@@ -258,19 +318,7 @@ pub(crate) fn build_structural_inline_recovery_data_streaming<R: Read>(
         .map(|payload| crc64_rar_state(payload))
         .unwrap_or(0);
 
-    // Last shard's real extent, carried in the structural header.
-    let chunk_data_extent = (archive_size as usize)
-        .saturating_sub((data_shards - 1) * group_count)
-        .min(group_count);
-
-    let out = assemble_recovery_data(
-        plan,
-        parity,
-        data_shard_states,
-        final_state,
-        archive_size as usize,
-        chunk_data_extent,
-    )?;
+    let out = assemble_recovery_data(plan, parity, block_states, final_state, archive_size)?;
     if let Some(p) = &progress {
         p.report(WriteProgressEvent::OperationFinished {
             operation: WriteOperation::Recovery,
