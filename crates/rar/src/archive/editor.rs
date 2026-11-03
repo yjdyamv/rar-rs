@@ -313,6 +313,15 @@ impl ArchiveEditor {
                             "an edit plan can carry only one recovery-record change",
                         ));
                     }
+                    // 0% has no record to write, and the rewrite path has no
+                    // "drop the record" state (an absent change means "carry
+                    // the archive's own strength over"), so refuse instead of
+                    // silently rebuilding a record at the format's floor.
+                    if *percent == 0 {
+                        return Err(RarError::invalid_option(
+                            "a recovery record needs a percent of 1 or more",
+                        ));
+                    }
                     force_rr = Some(*percent);
                 }
                 EditOp::SetRecoverySectors(_) => {
@@ -387,6 +396,11 @@ impl ArchiveEditor {
                     if force_rr.is_some() || force_sectors.is_some() {
                         return Err(RarError::invalid_option(
                             "an edit plan can carry only one recovery-record change",
+                        ));
+                    }
+                    if *percent == 0 {
+                        return Err(RarError::invalid_option(
+                            "a recovery record needs a percent of 1 or more",
                         ));
                     }
                     force_rr = Some(*percent);

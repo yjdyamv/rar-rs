@@ -634,6 +634,50 @@ fn recovery_volumes_roundtrip_and_repair() {
 }
 
 #[test]
+fn zero_percent_recovery_writes_no_record_in_either_format() {
+    use crate::options::CreateOptions;
+    use crate::version::ArchiveVersion;
+
+    // WinRAR's `-rr0%` prints "Adjusting rr0% value to 0" and stores no
+    // record. Both records have a floor (one RAR5 shard / two RAR4
+    // sectors), so 0 has to mean "absent" — not "the smallest record the
+    // format can express", which is what storing the 0 verbatim produced.
+    for version in [ArchiveVersion::V50, ArchiveVersion::V29] {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"zero percent recovery record ".repeat(4000);
+        let build = |name: &str, percent: Option<u8>| {
+            let path = dir.path().join(name);
+            let mut archive = RarArchive::create_with_options(
+                &path,
+                CreateOptions {
+                    compression: version,
+                    recovery_percent: percent,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            archive.add_bytes("a.bin", &data, 0).unwrap();
+            archive.close().unwrap();
+            std::fs::read(&path).unwrap()
+        };
+
+        let plain = build("plain.rar", None);
+        let zero = build("zero.rar", Some(0));
+        assert_eq!(
+            zero, plain,
+            "{version}: a 0% record must store nothing at all"
+        );
+        // Guard the assertion above: a nonzero percent does change the
+        // bytes, so the equality is a real signal and not a no-op build.
+        let five = build("five.rar", Some(5));
+        assert!(
+            five.len() > plain.len(),
+            "{version}: 5% must append a recovery record"
+        );
+    }
+}
+
+#[test]
 fn recovery_record_roundtrip_and_repair() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().with_extension("rar");

@@ -279,9 +279,15 @@ impl WriterOptions {
     /// combined with `.rev` recovery volumes. Validation still rejects formats
     /// without recovery records (`v14`, and the RAR5-only fields on legacy
     /// writers) with `InvalidOption`.
+    ///
+    /// A `percent` of 0 asks for no record at all and stores nothing, matching
+    /// WinRAR's `-rr0%` (it prints "Adjusting rr0% value to 0" and writes no
+    /// record). Both records have a floor of one shard / two sectors, so
+    /// storing 0 would otherwise produce a record the caller never asked for —
+    /// or, for RAR5, fail the close with an invalid shard count.
     #[must_use]
     pub fn recovery_percent(mut self, percent: u8) -> Self {
-        self.recovery_percent = Some(percent);
+        self.recovery_percent = (percent > 0).then_some(percent);
         self
     }
 
