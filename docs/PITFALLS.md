@@ -145,6 +145,23 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **`-rr` 三种形式**：裸 `-rr<N>` 是 legacy RAR4 的 parity **扇区数**，`-rr<N>%`
   是受保护前缀的百分比，裸 `-rr` 是官方默认 3%。RAR5
   记录只按百分比定尺，故裸数字在 RAR5 上按百分比解释。
+- **RAR5 的 parity 按 64 KiB 分块写，每块各带一个完整头**：一个 recovery
+  shard 的奇偶数据不是一整块，而是切成 `blocks = ceil(group_count / 65536)`
+  个块，**每块各写一条 `{RB}` 头**（`header_size` 字节，含它自己那份
+  `data_shard_states` 表），块内 `0x16` 字段是该块在 shard 内的字节偏移、
+  末块的数据长度按真实末 shard 长度 clamp。故
+  `shard_size = group_count + blocks * header_size`（不是
+  `header_size + group_count`）。少分块会让 WinRAR 把记录长度算错：3.5 GB
+  归档 5% 记录被显示成 `Recovery record 395 TB`，官方 `rar r`
+  报 `cannot recover data`；官方 `t` 仍能通过，所以只有修复路径能暴露。
+- **`data_shard_states` 是逐块算的，不是逐 shard**：第 `b` 块的 `state[i]`
+  = `crc64(prefix[i*gc + b*65536 .. min(i*gc + (b+1)*65536, (i+1)*gc, prot)])`，
+  **init 为 0、块间不链式**、末 shard 按 `protected_size` 截断（不补零）。
+  每个块只能写自己那 64 KiB 切片的表；把整 shard 的 CRC 抄进每个块，
+  头部长度仍对但官方修复会退化（`0 blocks are recovered`）。历史上的单块旧
+  布局（一块覆盖整个 shard）仍可读，解析侧以 `legacy_whole_shard`
+  分支兼容。头里 `0x680` 的 `final_state` 官方语义未破解，我们写 parity
+  首 shard 的 CRC，官方不据此拒绝。
 - **`-rr` 配 `-v` 时每卷各带一份内联记录**，每卷只保护自己的前缀；卷预算按
   `recovery_volume_reserve(prefix_len)`
   的几何长度做**候选前缀二分**（直接按最大记录收窄每卷会白扔约 2 KB）。
@@ -174,6 +191,13 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **`rar rr` 只在 3% 上写记录是官方缺陷**：6.23/7.23 无视
   `-rr10`/`-rr20`/已有记录一律写 3%。我们**显式强度照样生效**（与 `a`
   同一套单位），裸 `-rr` 才 3%。
+- **0% 等于「不写记录」，两条记录都没有 0 这个档位**：RAR5 至少一个 shard、
+  RAR4 至少两个扇区，把 0 传下去就会写出没人要的记录（1 KiB 归档凭空多 651
+  字节），超过 200 KiB 时还会因 shard 数算出 0 而在关闭时报
+  `RAR 5 recovery shard count is invalid`。归一化点在 `Archive::new_with_options`
+  （所有写入口共用的漏斗），CLI 的 `--recovery-percent` 也只接 1..=100。
+  编辑面无法表达「删掉记录」（缺省语义是「沿用归档自己的强度」），`SetRecovery(0)`
+  直接拒绝。契约 `zero_percent_recovery_writes_no_record_in_either_format`。
 - **`-ts` 的「字母+数字」组合**：官方 `-tsc2`/`-tsa2`/`-ts3` 静默退化成仅 mtime
   （丢掉用户点名的种类）。我们按文档语义处理（`1` 对**已选**时间做秒截断），故
   `-tsc1`/`-tsa1` 与官方差一个 ns 位。
