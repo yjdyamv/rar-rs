@@ -1,6 +1,6 @@
 # 不变量与地雷（改代码前先看）
 
-> 最后核对：2026-10-02 @ `3dfd460`；实现细节以源码为准。
+> 最后核对：2026-11-03 @ `fd8aedf`；实现细节以源码为准。
 
 本文件是**长期规则**的单一来源：所有「改回去就是 bug」「看着像 bug 其实是设计」
 「与官方有意不同」的结论都收在这里，**一条一行**。这里的每条都由源码或测试钉住
@@ -194,10 +194,11 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **0% 等于「不写记录」，两条记录都没有 0 这个档位**：RAR5 至少一个 shard、
   RAR4 至少两个扇区，把 0 传下去就会写出没人要的记录（1 KiB 归档凭空多 651
   字节），超过 200 KiB 时还会因 shard 数算出 0 而在关闭时报
-  `RAR 5 recovery shard count is invalid`。归一化点在 `Archive::new_with_options`
-  （所有写入口共用的漏斗），CLI 的 `--recovery-percent` 也只接 1..=100。
-  编辑面无法表达「删掉记录」（缺省语义是「沿用归档自己的强度」），`SetRecovery(0)`
-  直接拒绝。契约 `zero_percent_recovery_writes_no_record_in_either_format`。
+  `RAR 5 recovery shard count is invalid`。归一化点在
+  `Archive::new_with_options`（所有写入口共用的漏斗），CLI 的
+  `--recovery-percent` 也只接 1..=100。编辑面无法表达「删掉记录」（缺省语义是
+  「沿用归档自己的强度」），`SetRecovery(0)` 直接拒绝。契约
+  `zero_percent_recovery_writes_no_record_in_either_format`。
 - **`-ts` 的「字母+数字」组合**：官方 `-tsc2`/`-tsa2`/`-ts3` 静默退化成仅 mtime
   （丢掉用户点名的种类）。我们按文档语义处理（`1` 对**已选**时间做秒截断），故
   `-tsc1`/`-tsa1` 与官方差一个 ns 位。
