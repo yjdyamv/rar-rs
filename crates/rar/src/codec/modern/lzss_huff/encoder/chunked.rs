@@ -16,8 +16,7 @@ use super::emit::{encode_block, encode_empty_block};
 #[cfg(feature = "parallel")]
 use super::parse::find_matches_in_range;
 use super::parse::{
-    EMITTED_BLOCK_SIZE, OPTIMAL_PARSE_PASSES, find_block_end_adaptive, find_matches_optimal,
-    find_matches_with_tail,
+    EMITTED_BLOCK_SIZE, find_block_end_adaptive, find_matches_optimal, find_matches_with_tail,
 };
 
 #[cfg(feature = "parallel")]
@@ -228,16 +227,13 @@ fn encode_chunked_raw_inner(
     }
 
     let level = (method as usize).clamp(1, 5);
-    let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
+    let (_, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     // Experimental (issue 15, lever B.3): a priced parse with a bounded
     // candidate budget, which is what fills the gap between `-m1` (greedy)
     // and `-m2` (priced): those two sit 10-40x apart in time, and almost all
-    // of that jump is the collector, not the pricing.
-    let (chain_len, passes) = match price_tier_cut() {
-        Some(cut) if level >= 2 => (cut, 1),
-        _ => (chain_len, OPTIMAL_PARSE_PASSES[level]),
-    };
-    let miss_threshold = super::parse::COLLECT_MISS_THRESHOLD[level];
+    // of that jump is the collector, not the pricing. The decision itself
+    // lives in `parse_tier` so the filtered path cannot drift from this one.
+    let (chain_len, passes, miss_threshold) = super::parse_tier(method);
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     // WinRAR applies the long range search to -m2..-m5 and ignores it
     // for -m1 (fastest); it is automatic (no -mcl switch needed) and

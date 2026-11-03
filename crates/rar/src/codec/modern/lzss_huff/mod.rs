@@ -296,6 +296,16 @@ mod price_tier_tests {
         .unwrap()
     }
 
+    fn encode_filtered(data: &[u8], level: u8) -> Vec<u8> {
+        let filters = [super::FilterSpec::new(
+            super::FILTER_E8,
+            0,
+            0,
+            data.len() as u32,
+        )];
+        super::encode_with_filters(data, level, 6, &filters, ArchiveVersion::V50).unwrap()
+    }
+
     /// The tier changes the packed bytes by design, so it is opt-in: this pins
     /// down that the switch is actually wired into the parser (a silently
     /// ignored switch would make every published number a no-op), that it is
@@ -314,6 +324,31 @@ mod price_tier_tests {
 
         assert_eq!(tier, tier_again, "the tier must not vary between runs");
         assert_ne!(tier, default, "the tier switch never reached the parser");
+        assert!(
+            tier.len() >= default.len(),
+            "a four-candidate budget beat the level's own: {} < {}",
+            tier.len(),
+            default.len()
+        );
+    }
+
+    /// The filtered entry point builds its own `SequentialSearch`, and it is
+    /// the one every member with an automatic x86/delta filter goes through —
+    /// the binaries the tier was measured on. A tier wired into only the
+    /// unfiltered path looks fine on text and does nothing on binaries, which
+    /// is what happened before the level lookup had a single owner.
+    #[test]
+    fn tier_reaches_the_filtered_parser() {
+        let _g = Guard;
+        let _serial = super::price_tier_lock().lock().expect("price tier lock");
+        let data = text_like();
+
+        set_price_tier_cut(None);
+        let default = encode_filtered(&data, 2);
+        set_price_tier_cut(Some(4));
+        let tier = encode_filtered(&data, 2);
+
+        assert_ne!(tier, default, "the filtered path ignored the tier switch");
         assert!(
             tier.len() >= default.len(),
             "a four-candidate budget beat the level's own: {} < {}",
