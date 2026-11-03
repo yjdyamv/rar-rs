@@ -11,8 +11,7 @@ use super::*;
 use super::super::{FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9};
 use super::emit::{encode_block, encode_empty_block};
 use super::parse::{
-    EMITTED_BLOCK_SIZE, OPTIMAL_PARSE_PASSES, find_block_end_adaptive, find_matches_optimal,
-    find_matches_with_tail,
+    EMITTED_BLOCK_SIZE, find_block_end_adaptive, find_matches_optimal, find_matches_with_tail,
 };
 use crate::codec::common::filters::apply_filter_encode;
 use crate::error::{RarError, RarResult};
@@ -152,7 +151,12 @@ pub fn encode_with_filters(
     //    persistent window, mirroring the unfiltered chunked path. The
     //    filter records lead the first chunk's symbol stream.
     let level = (method as usize).clamp(1, 5);
-    let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
+    let (_, lazy_thresh, max_match) = LEVEL_PARAMS[level];
+    // Same tier decision as the unfiltered path: filtered members are the
+    // ones with an automatic x86/delta filter, so a tier that only reached
+    // `encode_chunked_raw_inner` would silently skip exactly the binaries the
+    // tier was measured on.
+    let (chain_len, passes, miss_threshold) = super::parse_tier(method);
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
 
@@ -185,8 +189,8 @@ pub fn encode_with_filters(
                         variant,
                     },
                     chain_len,
-                    passes: OPTIMAL_PARSE_PASSES[level],
-                    miss_threshold: super::parse::COLLECT_MISS_THRESHOLD[level],
+                    passes,
+                    miss_threshold,
                     long_range,
                     lr_shared: None,
                     lr_anchor: 0,
