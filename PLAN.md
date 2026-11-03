@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-10-29 @ working tree；实现细节以源码为准。
+> 最后核对：2026-11-03 @ `fd8aedf`；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -71,20 +71,27 @@
 
 ## 下一步
 
-### 发布（暂缓：用户决定先不发 crates.io）
+### 发布 0.14.0（用户已同意发版，进行中）
 
 版本面已经收口：五处版本一致（三个 crate 的 `[package] version`、
 `crates/rar-napi/package.json`、根 `Cargo.toml` 的 workspace 依赖）、两个
-`Cargo.lock` 已刷新、`cargo package` 校验通过、三个 crate 的
-`readme` / `keywords` / `documentation` / `categories` 元数据已补齐、tag
-`v0.13.0` 已在。**发布本身按用户要求先不做**，恢复时只剩执行：
+`Cargo.lock` 已刷新、`cargo package -p rar-rs` 校验通过、三个 crate 的
+`readme` / `keywords` / `documentation` / `categories` 元数据已补齐。
+相对 v0.13.0 有 41 个提交，按功能变更取 **0.14.0**。剩下的是执行：
 
 - [ ] **`cargo publish` 按顺序**：`rar-rs` → `rar-cli` / `rar-rs-napi`
-      （后两者依赖 workspace 内的 `rar-rs`，必须先有前者）。
-- [ ] **照「发布清单」逐项过**（本文件末段；清单之外没有隐藏步骤）。
+      （后两者依赖 workspace 内的 `rar-rs`，必须先有前者；在此之前
+      `cargo package -p rar-cli` 会报找不到 `rar-rs`，属预期）。
+- [ ] **打 tag `v0.14.0`**（annotated，正文按 Library / CLI / Build 分组）。
 - [ ] **发布后做一遍下游实测**：从 crates.io 干净拉取 `rar-cli` 的临时工程，
       `cargo install rar-cli` 能跑；`rar-rs-napi` 的 `.node` 与 wasm 产物照 CI
       release job 的路径复核一次。
+
+发布闸门在本机的结果：`cargo test --workspace --all-features` 只余两个**环境性**
+失败（本机 `chcp` = 936 让 `unicode_archive_comment_matches_winrar` 读不到
+UTF-16LE；未开开发者模式让 `cli_directory_symlinks_are_stored_as_redirects` 报
+1314 拒绝访问），两者在 stash 掉本轮改动后同样失败，CI 上
+`lint-windows` 用标准代码页与符号链接权限覆盖。
 
 ### 文档人体工学（已做，保持即可）
 
