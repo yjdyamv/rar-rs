@@ -14,8 +14,7 @@
 - **RAR5 / RAR7**：创建与读取全功能对齐 WinRAR 7.23——压缩（m0–m5、DP
   最优解析）、 `-hp` 头加密、分卷、solid、内联恢复记录、`.rev`
   恢复卷、quick-open（默认按官方的自动阀值写，`-qo` / `-qo-` / `-qo+` 三档）、
-  NTFS ADS、三时间戳、owner、`-mt` 多线程、长距离匹配、v70
-  大字典。
+  NTFS ADS、三时间戳、owner、`-mt` 多线程、长距离匹配、v70 大字典。
 - **老容器族读取（RAR 1.3–4.x）**：三代解码器（RAR29/20/15）+ PPMd + 五大标准 VM
   过滤器 + 通用 RARVM 解释器，solid 链、分卷、`-hp`、各代数据解密。
 - **RAR4 创建全能力**：LZSS m1–m5 + PPMd + 六大标准 VM 过滤器 + `-hp` + 多卷 +
@@ -60,7 +59,8 @@
 - **主头 locator 与 QO 默认形态已对齐**：locator 偏移字段宽度按**输入总大小**
   分档（CLI 把文件大小求和后交给 `WriterOptions::estimated_size`），默认 QO
   按官方自动阀值（成员数据块 > 4096 字节）写，没挣到记录的卷仍预留 locator
-  （偏移 0），`-qo-` 才整条不写。契约 `locator_width_follows_official_size_tiers` /
+  （偏移 0），`-qo-` 才整条不写。契约
+  `locator_width_follows_official_size_tiers` /
   `quick_open_automatic_matches_official`。
 - **测试归档零提交**：legacy 套件（RAR 1.3–4.x、`.rev`、VM 过滤器、恢复记录）
   全部由 `.cache/winrar/` 的官方 `Rar.exe`
@@ -75,9 +75,9 @@
 
 版本面已经收口：五处版本一致（三个 crate 的 `[package] version`、
 `crates/rar-napi/package.json`、根 `Cargo.toml` 的 workspace 依赖）、两个
-`Cargo.lock` 已刷新、`cargo package -p rar-rs` 校验通过、三个 crate 的
-`readme` / `keywords` / `documentation` / `categories` 元数据已补齐。
-相对 v0.13.0 有 41 个提交，按功能变更取 **0.14.0**。剩下的是执行：
+`Cargo.lock` 已刷新、`cargo package -p rar-rs` 校验通过、三个 crate 的 `readme`
+/ `keywords` / `documentation` / `categories` 元数据已补齐。 相对 v0.13.0 有 41
+个提交，按功能变更取 **0.14.0**。剩下的是执行：
 
 - [ ] **`cargo publish` 按顺序**：`rar-rs` → `rar-cli` / `rar-rs-napi`
       （后两者依赖 workspace 内的 `rar-rs`，必须先有前者；在此之前
@@ -90,8 +90,8 @@
 发布闸门在本机的结果：`cargo test --workspace --all-features` 只余两个**环境性**
 失败（本机 `chcp` = 936 让 `unicode_archive_comment_matches_winrar` 读不到
 UTF-16LE；未开开发者模式让 `cli_directory_symlinks_are_stored_as_redirects` 报
-1314 拒绝访问），两者在 stash 掉本轮改动后同样失败，CI 上
-`lint-windows` 用标准代码页与符号链接权限覆盖。
+1314 拒绝访问），两者在 stash 掉本轮改动后同样失败，CI 上 `lint-windows`
+用标准代码页与符号链接权限覆盖。
 
 ### 文档人体工学（已做，保持即可）
 
@@ -138,13 +138,13 @@ UTF-16LE；未开开发者模式让 `cli_directory_symlinks_are_stored_as_redire
 
 - [ ] **`-qo` + 分卷的 8 字节零尾**：布局已追平（每卷各一个 QO 服务块 +
       每卷主头的 `LOCATOR` 记录，条目 `rel` 按「本卷 QO 块 → 本卷分片头」
-      重算，已实现并有官方 `UnRAR` 对拍），只剩官方每卷 ENDARC 后留的
-      8 字节零尾：我们填满不留，两边都能被官方 `t`/`x` 接受，属“有意不追平”。
+      重算，已实现并有官方 `UnRAR` 对拍），只剩官方每卷 ENDARC 后留的 8
+      字节零尾：我们填满不留，两边都能被官方 `t`/`x` 接受，属“有意不追平”。
       事实与实测数字见 [`docs/PITFALLS.md`](docs/PITFALLS.md) 的 QO 段。
 - [ ] **`-rr` + `-v` 的零尾**：官方按预留量写记录再补 0 填满卷，
-      松弛量实测不规则（32 KiB 卷 `-rr1%`/`3%`/`5%`/`20%` 都是 7 字节，
-      `-rr10%` 是 393 字节，256 KiB 卷 5 字节），两边分块因此差这几字节。
-      官方 `t`/`rc` 两边都接受，`.rev` 本体逐字节相同，属于“有意不追平”。
+      松弛量实测不规则（32 KiB 卷 `-rr1%`/`3%`/`5%`/`20%` 都是 7 字节， `-rr10%`
+      是 393 字节，256 KiB 卷 5 字节），两边分块因此差这几字节。 官方 `t`/`rc`
+      两边都接受，`.rev` 本体逐字节相同，属于“有意不追平”。
 
 ### 性能（已 park，未关闭议题）
 
@@ -152,8 +152,13 @@ UTF-16LE；未开开发者模式让 `cli_directory_symlinks_are_stored_as_redire
       5.9x，瓶颈是 BT4
       下降步数（结构锁定：`HASH_BITS`、dict-log、提交阈值、近/远带宽四个旋钮已验证弹回）。
 - [ ] **issue 15 — 价格驱动解析提速**（2026-09-18
-      立项）：目标是**压缩速度**——给解析器补中间档，把每位置代价从更深的搜索换成更省的价格计算。杠杆 3 的「DP 块顺延价格表」已落地（第 17 项，MT 比率白送 0.1–0.8pp）；seq 的 `-m1`/`-m2` 断崖已于 2026-11-01
-      定位并做完（结论：断崖在**收集器预算**上，不在定价上；中间档 = 小 cut + 一次定价，梯度光滑，开关 `RAR_RS_SEQ_PRICE_TIER` 默认关闭）。**待决策：是否提升为文档化档（`-m1.5` ?）**。四个杠杆、上游事实、验收判据与全部实测数字见
+      立项）：目标是**压缩速度**——给解析器补中间档，把每位置代价从更深的搜索换成更省的价格计算。杠杆
+      3 的「DP 块顺延价格表」已落地（第 17 项，MT 比率白送 0.1–0.8pp）；seq 的
+      `-m1`/`-m2` 断崖已于 2026-11-01
+      定位并做完（结论：断崖在**收集器预算**上，不在定价上；中间档 = 小 cut +
+      一次定价，梯度光滑，开关 `RAR_RS_SEQ_PRICE_TIER`
+      默认关闭）。**待决策：是否提升为文档化档（`-m1.5`
+      ?）**。四个杠杆、上游事实、验收判据与全部实测数字见
       [`docs/issues/compression-perf/15-fl2-zstd-parser-tiers.md`](docs/issues/compression-perf/15-fl2-zstd-parser-tiers.md)。
 - [ ] **issue 04 — MT 随机数据窗口级不可压缩跳过**：成员级 STORE
       兜底已让随机数据领先 WinRAR 10–80x；窗口级跳过有把边界成员从压缩翻成 STORE
@@ -164,95 +169,105 @@ UTF-16LE；未开开发者模式让 `cli_directory_symlinks_are_stored_as_redire
 - **比率是契约**：任何提速必须让标准语料（text / mixed / xml / sparse +
   random）的 packed 字节不变或变小。
 - **优先字节相同的快路径**，而不是启发式。
-- **先测再优化**：`mtprobe` / `ratiocheck` 示例是回归闸门，热点需先由探针确认；`ratiocheck` 现在同时打印 packed 流的 FNV 指纹，用来证明「字节相同」而不只是「大小相同」。
+- **先测再优化**：`mtprobe` / `ratiocheck`
+  示例是回归闸门，热点需先由探针确认；`ratiocheck` 现在同时打印 packed 流的 FNV
+  指纹，用来证明「字节相同」而不只是「大小相同」。
 - **发射块策略只有一个 owner**：`EMITTED_BLOCK_SIZE` + `find_block_end_adaptive`
   在 `codec/modern/lzss_huff/encoder/parse/block.rs`。
 - **`-mt` 低步数搜索是已接受的取舍**（ratio 换速度），不是待修的 bug。
 
 **已否决方向（实测为负或结构不可行，别重试）**
 
-| #  | 方向                                | 判决                                                                       |
-| -- | ----------------------------------- | -------------------------------------------------------------------------- |
-| 07 | 字面量密集块跳过重定价              | 否决：闸门只在解析本来就很便宜处触发，却改变了 DLL 字节                    |
-| 10 | 2–3 字节短匹配                      | 否决：短匹配槽码长依赖频率 bootstrap，两遍定价无法安全复现，各变体都掉比率 |
-| 14 | 两制近存（近带 L3 驻留 + 远树重插） | 实测为负（seq −75%、mt8 −98%），废弃                                       |
-| 06 | 成员级 solid MT                     | 结构不可行（无法跨成员并行共享窗口）；chunk 级 MT 已落地                   |
-| 09 | BT4 字节级流水                      | 已到顶（首步 value-carry −3.6% 即全量）；再降步数只剩显式取舍项            |
-| 13 | 远带候选预算（原 `RAR_RS_FAR_BAND`） | 仅 seq opt-in 有效（−9% @ +0.22pp），非 mt8 解药；已删除，不留开关         |
+| #  | 方向                                                  | 判决                                                                                                                                                                                                                        |
+| -- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 07 | 字面量密集块跳过重定价                                | 否决：闸门只在解析本来就很便宜处触发，却改变了 DLL 字节                                                                                                                                                                     |
+| 10 | 2–3 字节短匹配                                        | 否决：短匹配槽码长依赖频率 bootstrap，两遍定价无法安全复现，各变体都掉比率                                                                                                                                                  |
+| 14 | 两制近存（近带 L3 驻留 + 远树重插）                   | 实测为负（seq −75%、mt8 −98%），废弃                                                                                                                                                                                        |
+| 06 | 成员级 solid MT                                       | 结构不可行（无法跨成员并行共享窗口）；chunk 级 MT 已落地                                                                                                                                                                    |
+| 09 | BT4 字节级流水                                        | 已到顶（首步 value-carry −3.6% 即全量）；再降步数只剩显式取舍项                                                                                                                                                             |
+| 13 | 远带候选预算（原 `RAR_RS_FAR_BAND`）                  | 仅 seq opt-in 有效（−9% @ +0.22pp），非 mt8 解药；已删除，不留开关                                                                                                                                                          |
 | 15 | 行索引替 BT4 / 砍步数预算 / 砍近窗（都是给 seq 提速） | 否决：`RowIndex` 单测全位置 collect 在 depth ≥ 16 时比树慢（437–904 vs 166–362 ns/位置）；`MAX_PARSE_STEPS_PER_POSITION` 12→4 在 `ntoskrnl` 上时间与比率都不动；近窗 w4/w2/w1 掉 0.6–1.6pp 且 `mixed` 更慢。数字见 issue 15 |
 
 已落地（别再重新论证）：01 matchless-block DP 快路径（字节相同）、02 collector
 fast-mode 门（`longest==0`，阈值 256）、03 delta 候选通道 + 采样预门、05
 流式路径 auto delta/x86、08 持久树跨 chunk 增长的损坏修复、11 BT4 首步
 value-carry（−3.6%）、 12 MT 近窗对齐（已被 13 取代）、 16 哈希链走查预取
-（`match_finder.rs`：提前载入下一候选并 `prefetch` 比较字节，字节相同，
-RAR4 `-m5` −26%、RAR5 `-m5` −18%，solid 持平——候选已并行、带宽吃满）、
-17 MT 的 DP 块顺延价格表（`windowed_priced_parse` 把上一块的码长表交给下一块首次
-定价，替代「多跑一遍重定价」，text l3 −0.51pp / 30 MB 文本 −0.6~0.8pp，耗时持平；
-MT 本来就是已接受的字节分歧，packed 只变小）、18 RAR5 解码热路径
-（`BitReader` 移位寄存器、`DecodeTable::quick` 单装载、`copy_match` 分块 memmove、
-`append_output_into` 免中转；`ntoskrnl` m5 提取 47 → 60 MB/s，字节不变）、
-19 符号流的两笔结构账（`SymbolReader::next` 改返回两字宽的 `Option<Symbol>`，错误走
-`take_error()`；热路径六个函数强制 `#[inline(always)]`、`decode_non_literal` 强制外联；
-`consumed_bits()` 替掉每符号的除余。同机交替 A/B：`decode_bench` 总体 +9%，
-`ntoskrnl` 无过滤 m5 −17%、text 13 MiB −15%，字节不变）；另加一项 20「`next_symbol`
-不再外联」（`read_block_header` 改 `#[inline(never)]`，每符号一次的函数调用消失，
-`run_engine` 里的 `callq next_symbol` 归零；`decode_bench` 三语料中位数 +6~7%，
-真实 m5 归档 −1~2% 在噪声内——asm 判据与实测口径见 `docs/PITFALLS.md` 第 ⑧ 条）、
-21 `copy_match` 的自我重叠走**倍增**（`dist < len` 时先搬一个周期再翻倍搬运，
-memmove 次数从 `len/dist` 降到 `log2(len/dist)`；真实归档无变化——重叠仅 0.26%——
+（`match_finder.rs`：提前载入下一候选并 `prefetch` 比较字节，字节相同， RAR4
+`-m5` −26%、RAR5 `-m5` −18%，solid 持平——候选已并行、带宽吃满）、 17 MT 的 DP
+块顺延价格表（`windowed_priced_parse` 把上一块的码长表交给下一块首次
+定价，替代「多跑一遍重定价」，text l3 −0.51pp / 30 MB 文本
+−0.6~0.8pp，耗时持平； MT 本来就是已接受的字节分歧，packed 只变小）、18 RAR5
+解码热路径 （`BitReader` 移位寄存器、`DecodeTable::quick` 单装载、`copy_match`
+分块 memmove、 `append_output_into` 免中转；`ntoskrnl` m5 提取 47 → 60
+MB/s，字节不变）、 19 符号流的两笔结构账（`SymbolReader::next` 改返回两字宽的
+`Option<Symbol>`，错误走 `take_error()`；热路径六个函数强制
+`#[inline(always)]`、`decode_non_literal` 强制外联； `consumed_bits()`
+替掉每符号的除余。同机交替 A/B：`decode_bench` 总体 +9%， `ntoskrnl` 无过滤 m5
+−17%、text 13 MiB −15%，字节不变）；另加一项 20「`next_symbol`
+不再外联」（`read_block_header` 改
+`#[inline(never)]`，每符号一次的函数调用消失， `run_engine` 里的
+`callq next_symbol` 归零；`decode_bench` 三语料中位数 +6~7%， 真实 m5 归档 −1~2%
+在噪声内——asm 判据与实测口径见 `docs/PITFALLS.md` 第 ⑧ 条）、 21 `copy_match`
+的自我重叠走**倍增**（`dist < len` 时先搬一个周期再翻倍搬运， memmove 次数从
+`len/dist` 降到 `log2(len/dist)`；真实归档无变化——重叠仅 0.26%——
 但长游程极端输入：13 MB 全零 0.106→0.047 s（−56%）、13 MB `abcd` 重复 −25%）、
-22 **创建侧 DP 的两笔账**（`same_price_run_end` 直接用 `plan` 已算好的缓存/加成，
-不再每步回扫 `state.reps`；重定价收敛即早退。字节相同，同机交替 A/B：`ntoskrnl`
-m5/m3 `-mt1`、30 MB 文本 m5、`-mt16` 全部 −4.5~−8.9%，20 组归档 sha256 全等；
+22 **创建侧 DP 的两笔账**（`same_price_run_end` 直接用 `plan`
+已算好的缓存/加成， 不再每步回扫
+`state.reps`；重定价收敛即早退。字节相同，同机交替 A/B：`ntoskrnl` m5/m3
+`-mt1`、30 MB 文本 m5、`-mt16` 全部 −4.5~−8.9%，20 组归档 sha256 全等；
 收敛早退只在二进制上触发。已否决的后续尝试与实测口径见 `docs/PITFALLS.md` 的
-「DP 解析的两笔账」条）、
-23 **槽步进定价的融合**（一个 run 的距离侧（缓存槽码长 / 新鲜距离的槽 + 额外位、
-长度加成、哪个长度走 repeat）对 run 里每个长度都相同，`SlotPricer::for_run` 一次
-分类好；`step` 每步只剩一次 `ilog2`、一次移位和两次查表，替掉原来每步的
-`MatchShape` 解析 + `encode_length_slot` + `distance_bits`。唯一例外是 repeat 截断的
-边界长度（可能落在更靠后的槽），每 run 预解一次。字节逐位相同：4 语料 × 3 档 packed
-流 FNV 全等（`examples/ratiocheck.rs` 的 hash 列），`slot_pricer_tests` 把融合版与保留为
-`#[cfg(test)]` 的参考实现逐长度对拍。同机交替 A/B：DP 阶段 −9.4%（wordtext m3）/
-−9.6%（m5），端到端 wordtext m3 −8%、xml −6.4%、dll-like −6.3%、x86syn −3.0%、
-text −1.4%、mixed/random 持平。边界与「别改回去」见 `docs/PITFALLS.md`
-「槽步进定价的融合版」条）。
+「DP 解析的两笔账」条）、 23 **槽步进定价的融合**（一个 run 的距离侧（缓存槽码长
+/ 新鲜距离的槽 + 额外位、 长度加成、哪个长度走 repeat）对 run
+里每个长度都相同，`SlotPricer::for_run` 一次 分类好；`step` 每步只剩一次
+`ilog2`、一次移位和两次查表，替掉原来每步的 `MatchShape` 解析 +
+`encode_length_slot` + `distance_bits`。唯一例外是 repeat 截断的
+边界长度（可能落在更靠后的槽），每 run 预解一次。字节逐位相同：4 语料 × 3 档
+packed 流 FNV 全等（`examples/ratiocheck.rs` 的 hash 列），`slot_pricer_tests`
+把融合版与保留为 `#[cfg(test)]` 的参考实现逐长度对拍。同机交替 A/B：DP 阶段
+−9.4%（wordtext m3）/ −9.6%（m5），端到端 wordtext m3 −8%、xml −6.4%、dll-like
+−6.3%、x86syn −3.0%、 text −1.4%、mixed/random 持平。边界与「别改回去」见
+`docs/PITFALLS.md` 「槽步进定价的融合版」条）。
 
-**解压基线**（`cargo run --release --example decode_bench`，自建语料，packed 比例
-29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74 MB/s，
-总体约 81 MB/s。同一批归档交给官方 `UnRAR.exe` 并扣掉其 0.10 s 进程启动：
-150 / 340 / 165 MB/s——即**纯解码**我们落后 1.9–3.7×。端到端的 `x`/`t` 对比没有意义
-（官方那 0.10 s 常数比 8 MiB 的解码时间还长），看进度只能看这个进程内基线。
+**解压基线**（`cargo run --release --example decode_bench`，自建语料，packed
+比例 29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74
+MB/s， 总体约 81 MB/s。同一批归档交给官方 `UnRAR.exe` 并扣掉其 0.10 s 进程启动：
+150 / 340 / 165 MB/s——即**纯解码**我们落后 1.9–3.7×。端到端的 `x`/`t`
+对比没有意义 （官方那 0.10 s 常数比 8 MiB
+的解码时间还长），看进度只能看这个进程内基线。
 
-**当前基线**（创建侧为第 22 项落地后，`ntoskrnl.exe` 12.5 MiB、`-ma5`、本机 16 核、
-release，每档两次取最快；「MT」= 默认线程、「seq」= `-mt1`。比率列与提速前逐位相同）
+**当前基线**（创建侧为第 22 项落地后，`ntoskrnl.exe` 12.5 MiB、`-ma5`、本机 16
+核、 release，每档两次取最快；「MT」= 默认线程、「seq」=
+`-mt1`。比率列与提速前逐位相同）
 
-| `-m` | 我们 MT      | 我们 seq     | 官方 7.23    | MT 相对官方 |
-| ---- | ------------ | ------------ | ------------ | ----------- |
-| 1    | 2.0 s 45.25% | 1.5 s 51.47% | 0.3 s 55.00% | −9.8pp      |
+| `-m` | 我们 MT      | 我们 seq      | 官方 7.23    | MT 相对官方 |
+| ---- | ------------ | ------------- | ------------ | ----------- |
+| 1    | 2.0 s 45.25% | 1.5 s 51.47%  | 0.3 s 55.00% | −9.8pp      |
 | 2    | 2.9 s 44.85% | 10.1 s 44.09% | 0.5 s 47.16% | −2.3pp      |
 | 3    | 3.2 s 44.55% | 10.6 s 43.88% | 0.7 s 43.03% | +1.5pp      |
 | 4    | 4.0 s 44.35% | 14.3 s 43.80% | 0.9 s 42.90% | +1.4pp      |
 | 5    | 4.5 s 44.19% | 15.3 s 43.77% | 0.8 s 42.85% | +1.3pp      |
 
-`-m1`/`-m2` 我们**比官方小**（官方的这两档是「尽量快」的弱解析，我们最低档也跑 DP），
-`-m3..-m5` 差 1.3–1.5pp；`-mt1` 能把差距收到 0.85–0.95pp，代价是 10–15 s。**速度仍是主要差距**：MT 比官方慢 5–6×、seq 慢 15–21×
-（issue 09 的结论：再降步数只剩显式取舍，流水化原型已实测为负）。
+`-m1`/`-m2` 我们**比官方小**（官方的这两档是「尽量快」的弱解析，我们最低档也跑
+DP）， `-m3..-m5` 差 1.3–1.5pp；`-mt1` 能把差距收到 0.85–0.95pp，代价是 10–15
+s。**速度仍是主要差距**：MT 比官方慢 5–6×、seq 慢 15–21× （issue 09
+的结论：再降步数只剩显式取舍，流水化原型已实测为负）。
 
 **剩余公开差距**：DLL 单线程解析约 5–6 s vs WinRAR 1.8 s（其中 mt8 7.5×，见
 issue 09）；xml m2/m3 +1.5%（解析差距，非块开销）；text64 MT 片间分歧（6554 vs
 seq 6058 B）。各日期、各口径的实测表是**过程记录**，需要时
 `git log -- docs/issues/compression-perf/` 找回。
 
-DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 + 计数器量出，未留在代码里）：
-collect 38%、DP 55%、convert 2%、emit 1%；DP 内部每位置约 170 ns（4 遍重定价下
-每位置 4.4 个长度槽步、1.44 个候选），其中**两笔重复距离探测占 27%**（每位置两次
+DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
+计数器量出，未留在代码里）： collect 38%、DP 55%、convert 2%、emit 1%；DP
+内部每位置约 170 ns（4 遍重定价下 每位置 4.4 个长度槽步、1.44
+个候选），其中**两笔重复距离探测占 27%**（每位置两次
 远地址读，几乎是纯缓存缺失），把这两次探测拿掉会掉 0.3pp 比率，所以只能减少不能
-删除。想把它们并到缓存或预取里都实测为负（见 `docs/PITFALLS.md`「DP 解析的两笔账」）。
+删除。想把它们并到缓存或预取里都实测为负（见 `docs/PITFALLS.md`「DP
+解析的两笔账」）。
 
 二进制语料上（`ntoskrnl` m2/m3、BT4 cut 16 + 两 pass）比例反过来：**collect 占
-55–60%**、dp + passes 约 36%，且 collect 吞吐随尾部窗口增长而恶化（每 chunk
-8.06 → 5.69 → 4.32 MiB/s @ cut4，166 → 362 ns/位置 @ cut64）——这就是 issue 15
+55–60%**、dp + passes 约 36%，且 collect 吞吐随尾部窗口增长而恶化（每 chunk 8.06
+→ 5.69 → 4.32 MiB/s @ cut4，166 → 362 ns/位置 @ cut64）——这就是 issue 15
 把中间档的旋钮定在**收集预算**而不足定价上的原因。
 
 ### 功能缺口（按需，不阻塞发布）
@@ -262,8 +277,8 @@ collect 38%、DP 55%、convert 2%、emit 1%；DP 内部每位置约 170 ns（4 �
       试压）对它都只读，所以候选之间可以并行、胜负仍按串行顺序裁决，字节不变
       （2026-10-27 已实现，`search_solid_member_parallel`，契约
       `solid_search_parallel_matches_serial`）。30 MB 文本 solid m5：23.2 s →
-      14–17 s（16 核）；剩下的差距在 match finder
-      本身（官方 1.0 s），不是并行度。
+      14–17 s（16 核）；剩下的差距在 match finder 本身（官方 1.0
+      s），不是并行度。
 - [ ] **逐文件与上游对拍**：`rars` 移植的出处目前是 in-tree claim（每个文件头 +
       inventory 表），尚未与上游 diff。不影响已定的许可表达式。
 
@@ -273,7 +288,8 @@ collect 38%、DP 55%、convert 2%、emit 1%；DP 内部每位置约 170 ns（4 �
   顺序写位流」 的骨架，但需要每窗口独立的 match finder
   状态与确定性窗口边界才能保证字节一致，收益仅「老格式大成员的创建速度」（官方
   7.23 已移除 `-ma4`）；v15 另受自适应表限制。
-- **PPMd 块级MT**：单自适应模型，切块会改变输出（结构上不可行）；成员级并行已有。
+- **PPMd
+  块级MT**：单自适应模型，切块会改变输出（结构上不可行）；成员级并行已有。
 - **RAR13 非 solid 成员级 batch**：成本低但价值最低（DOS 时代格式）。
 - **把容器族 / recovery 做成编译期 feature**：不把 legacy 族（`codec/legacy` +
   `format/{rar13,rar4}`，21,000 行 ≈ 29%）或 recovery（`.rev`/RR，7,037 行 ≈
@@ -316,8 +332,8 @@ collect 38%、DP 55%、convert 2%、emit 1%；DP 内部每位置约 170 ns（4 �
 - **`lb` 分片成员**：官方 `Rar.exe lb` 对跨卷成员不打印该成员名，官方
   `UnRAR.exe lb` 与我们一致；我们随 UnRAR。
 - **同一次 `a` 里的重复成员**：同一个文件既当显式参数、又落在目录参数里时，
-  官方按 `-o+` 的覆盖语义把它挪到末尾，我们保留原位（其余排序规则已对齐，
-  见 [`docs/PITFALLS.md`](docs/PITFALLS.md)「solid 成员的顺序」）。
+  官方按 `-o+` 的覆盖语义把它挪到末尾，我们保留原位（其余排序规则已对齐， 见
+  [`docs/PITFALLS.md`](docs/PITFALLS.md)「solid 成员的顺序」）。
 - **`-ts` 的「字母+数字」组合**、**`-rr<N>%` 取整**、**`rar rr` 恒 3%**、
   **`rar r` 不写 `fixed.<name>`**、**无控制台时的覆盖询问**：口径与理由见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。

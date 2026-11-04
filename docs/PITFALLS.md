@@ -20,13 +20,12 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   先写头后回填，故更宽）。契约 `member_size_fields_use_a_two_byte_minimum` /
   `stream_block_size_fields_use_the_reserved_width`。
 - **成员头的 `data_size`/`unpacked_size` 宽度按成员总大小分档预留**：
-  成员总大小超过阈值后官方不再写最小宽度，而是**预留**（实测 7.23：
-  < 7 680 → 最小宽度（下限 2 字节）、7 680–1 048 063 → 3 字节、
-  1 048 064–1 048 575 → 4 字节、1 048 576–8 388 607 → 5 字节、
-  ≥8 388 608 → 6 字节，256 MiB 仍是 6）。3 字节那一档最容易漏（阈值
-  `2^13 - 512`）：7.5 KiB 的成员头因此比按值算宽 2 字节，后面每个成员都偏移，
-  分卷归档会整体错位。规律按成员 **unpacked** 总大小跳档（8 MiB 成员压到
-  4 MiB 仍预留 6 字节），
+  成员总大小超过阈值后官方不再写最小宽度，而是**预留**（实测 7.23： < 7 680 →
+  最小宽度（下限 2 字节）、7 680–1 048 063 → 3 字节、 1 048 064–1 048 575 → 4
+  字节、1 048 576–8 388 607 → 5 字节、 ≥8 388 608 → 6 字节，256 MiB 仍是 6）。3
+  字节那一档最容易漏（阈值 `2^13 - 512`）：7.5 KiB 的成员头因此比按值算宽 2
+  字节，后面每个成员都偏移， 分卷归档会整体错位。规律按成员 **unpacked**
+  总大小跳档（8 MiB 成员压到 4 MiB 仍预留 6 字节），
   且**单卷成员同样预留**；分卷时每个卷都重复成员总大小，两个尺寸字段共用这一个
   宽度（而不是本卷数据块自己的宽度：200 000 字节成员按 32 KiB 分卷，末卷 3 793
   字节的数据块仍写在 3 字节里），按本卷大小写最小宽度会让头短 1 字节。契约
@@ -36,8 +35,8 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **主头 locator：默认（automatic）模式总会预留，只有 `-qo-` 才整条不写**。
   官方默认（不带 `-qo`）的主头**始终**带 `LOCATOR` 记录：没有 QO 记录时两个
   偏移都写 0（3 字节字段，`05 01 01 80 80 00`），而 `-qo-` 的主头缩到
-  `type/flags/归档 flags` 三个字节。我们按「`quick_open`（含 automatic）或
-  `-rr` 才写 locator」实现。写了 locator 时 QO 标志先置、偏移写 0 占位，关闭时
+  `type/flags/归档 flags` 三个字节。我们按「`quick_open`（含 automatic）或 `-rr`
+  才写 locator」实现。写了 locator 时 QO 标志先置、偏移写 0 占位，关闭时
   回填。**有 QO 与实际偏移无关的判断只看偏移非零，不看标志位**（只看标志会凭空
   重建 QO 记录、破坏前缀逐字节不变）。契约
   `locator_is_present_with_a_zero_qo_placeholder` /
@@ -73,39 +72,40 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `edits_do_not_invent_a_quick_open_record`。注意我们总是缓存**全部**成员头，
   而官方默认只缓存相对大的文件，故编辑官方归档后记录会变大（合法但有别）。
 - **`-qo` 裸写法＝官方默认的自动规则**：成员数据块 > 4096 字节才写 QO 记录
-  （实测 4096 不写、4097 写），`-qo+` 强制每卷都写、`-qo-` 关掉。CLI 把裸
-  `-qo` 映射成 `--quick-open-auto`、`-qo+` 映射成 `--quick-open`；
+  （实测 4096 不写、4097 写），`-qo+` 强制每卷都写、`-qo-` 关掉。CLI 把裸 `-qo`
+  映射成 `--quick-open-auto`、`-qo+` 映射成 `--quick-open`；
   `WriterOptions::quick_open(true)` 对应 `-qo+`，与官方对拍时必须让官方也带
   `-qo+`，否则官方在几十 KB 的归档上根本不写 QO 记录。自动模式下主头仍预留
-  locator（偏移 0），所以「小归档没有记录但有 locator」是正常形态。
-  RAR4/RAR13 只能报错（`-ma4 -qo` 走 `quick_open || quick_open_auto` 的矩阵被
+  locator（偏移 0），所以「小归档没有记录但有 locator」是正常形态。 RAR4/RAR13
+  只能报错（`-ma4 -qo` 走 `quick_open || quick_open_auto` 的矩阵被
   `validate_rar4_only` 拒掉）。
 - **自动规则要在每条发射路径上打点**：RAR5 有三处把成员数据写进当前卷，每处都
   必须先调 `mark_quick_open_data`（`emit::write_file_entry` 的单卷分支、
-  `emit::write_split_member` 的每块预算之前、`stream::write_streamed_payload`
-  的 STORE 单卷分支），漏一处就出现「CLI 建出来有 QO 记录、库 API 建出来没有」
-  这种同参数不同字节的诡异现象（STORE 走的是 `stream` 而不是 `emit`，最容易漏）。
-  分卷路径要在 `volume_tail_reserve` 之前打点，否则挣来的记录没进卷预算、
-  写完才溢出。契约 `quick_open_automatic_matches_official`。
+  `emit::write_split_member` 的每块预算之前、`stream::write_streamed_payload` 的
+  STORE 单卷分支），漏一处就出现「CLI 建出来有 QO 记录、库 API 建出来没有」
+  这种同参数不同字节的诡异现象（STORE 走的是 `stream` 而不是
+  `emit`，最容易漏）。 分卷路径要在 `volume_tail_reserve`
+  之前打点，否则挣来的记录没进卷预算、 写完才溢出。契约
+  `quick_open_automatic_matches_official`。
 - **`-qo` + 分卷：每卷各带一份目录**。官方 7.23 跑 `-ma5 -m0 -v32k -qo+`
-  时**每卷各写一个 QO 服务块**（紧贴 ENDARC 之前，单成员时头 14 字节 +
-  载荷 50 字节），并在**每卷主头**的 extra 区加一条 `LOCATOR`
-  记录；`-qo-` 两样都没有。条目布局与单卷完全一致，`rel`
-  仍是「从本卷 QO 块起点回退到本卷那份分片头」的距离（实测 part1 =
-  32683−25 = 32658，part2 = 32683−26 = 32657），即分卷里每个分片头各自
+  时**每卷各写一个 QO 服务块**（紧贴 ENDARC 之前，单成员时头 14 字节 + 载荷 50
+  字节），并在**每卷主头**的 extra 区加一条 `LOCATOR` 记录；`-qo-`
+  两样都没有。条目布局与单卷完全一致，`rel` 仍是「从本卷 QO
+  块起点回退到本卷那份分片头」的距离（实测 part1 = 32683−25 = 32658，part2 =
+  32683−26 = 32657），即分卷里每个分片头各自
   生成一条条目，而不是全档共用一个绝对偏移。**我们照这个布局写**：
   `record_quick_open_entry` 在每卷写头时就地记下该头相对本卷 QO 位置的
   距离，卷尾 `write_quick_open_record` 打包；跨卷成员在下一卷开新头的
-  情形（同一卷里两个分片头）自然得到两条条目。预算上，卷尾要把
-  `ENDARC` + QO 块的最大长度一起算进 `quick_open_volume_reserve`，
-  并在 QO 放不下时整卷不写 QO（宁可少一份目录也不溢出）。契约
+  情形（同一卷里两个分片头）自然得到两条条目。预算上，卷尾要把 `ENDARC` + QO
+  块的最大长度一起算进 `quick_open_volume_reserve`， 并在 QO 放不下时整卷不写
+  QO（宁可少一份目录也不溢出）。契约
   `quick_open_volumes_cache_each_volume_headers_in_that_volume`、
-  `official_unrar_validates_quick_open_volumes`。官方每卷在 ENDARC 后还留
-  8 字节零尾（与 `-rr` + `-v` 同一类松弛），我们填满不留，两种都能被
-  官方 `t`/`x` 接受。
+  `official_unrar_validates_quick_open_volumes`。官方每卷在 ENDARC 后还留 8
+  字节零尾（与 `-rr` + `-v` 同一类松弛），我们填满不留，两种都能被 官方 `t`/`x`
+  接受。
 - **`quick_open` + `volume_size` 不再互斥**：`validate_combinations` 里原先
-  的拒绝项已删除，`header_encrypted` + `quick_open` 仍然互斥（`-hp`
-  没有主头可放 locator）。
+  的拒绝项已删除，`header_encrypted` + `quick_open` 仍然互斥（`-hp` 没有主头可放
+  locator）。
 - **RAR5 时间载体二选一**：头内 4 字节 mtime（`FILE_FLAG_TIME_UNIX`）**或**
   FILE_TIME extra 记录，绝不同时写；有记录就清头内标志（redirect
   与多卷分片头同规则）。契约
@@ -145,29 +145,30 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **`-rr` 三种形式**：裸 `-rr<N>` 是 legacy RAR4 的 parity **扇区数**，`-rr<N>%`
   是受保护前缀的百分比，裸 `-rr` 是官方默认 3%。RAR5
   记录只按百分比定尺，故裸数字在 RAR5 上按百分比解释。
-- **RAR5 的 parity 按 64 KiB 分块写，每块各带一个完整头**：一个 recovery
-  shard 的奇偶数据不是一整块，而是切成 `blocks = ceil(group_count / 65536)`
+- **RAR5 的 parity 按 64 KiB 分块写，每块各带一个完整头**：一个 recovery shard
+  的奇偶数据不是一整块，而是切成 `blocks = ceil(group_count / 65536)`
   个块，**每块各写一条 `{RB}` 头**（`header_size` 字节，含它自己那份
   `data_shard_states` 表），块内 `0x16` 字段是该块在 shard 内的字节偏移、
   末块的数据长度按真实末 shard 长度 clamp。故
   `shard_size = group_count + blocks * header_size`（不是
-  `header_size + group_count`）。少分块会让 WinRAR 把记录长度算错：3.5 GB
-  归档 5% 记录被显示成 `Recovery record 395 TB`，官方 `rar r`
-  报 `cannot recover data`；官方 `t` 仍能通过，所以只有修复路径能暴露。
-- **`data_shard_states` 是逐块算的，不是逐 shard**：第 `b` 块的 `state[i]`
-  = `crc64(prefix[i*gc + b*65536 .. min(i*gc + (b+1)*65536, (i+1)*gc, prot)])`，
+  `header_size + group_count`）。少分块会让 WinRAR 把记录长度算错：3.5 GB 归档
+  5% 记录被显示成 `Recovery record 395 TB`，官方 `rar r` 报
+  `cannot recover data`；官方 `t` 仍能通过，所以只有修复路径能暴露。
+- **`data_shard_states` 是逐块算的，不是逐 shard**：第 `b` 块的 `state[i]` =
+  `crc64(prefix[i*gc + b*65536 .. min(i*gc + (b+1)*65536, (i+1)*gc, prot)])`，
   **init 为 0、块间不链式**、末 shard 按 `protected_size` 截断（不补零）。
   每个块只能写自己那 64 KiB 切片的表；把整 shard 的 CRC 抄进每个块，
   头部长度仍对但官方修复会退化（`0 blocks are recovered`）。历史上的单块旧
-  布局（一块覆盖整个 shard）仍可读，解析侧以 `legacy_whole_shard`
-  分支兼容。头里 `0x680` 的 `final_state` 官方语义未破解，我们写 parity
-  首 shard 的 CRC，官方不据此拒绝。
+  布局（一块覆盖整个 shard）仍可读，解析侧以 `legacy_whole_shard` 分支兼容。头里
+  `0x680` 的 `final_state` 官方语义未破解，我们写 parity 首 shard 的
+  CRC，官方不据此拒绝。
 - **`-rr` 配 `-v` 时每卷各带一份内联记录**，每卷只保护自己的前缀；卷预算按
   `recovery_volume_reserve(prefix_len)`
   的几何长度做**候选前缀二分**（直接按最大记录收窄每卷会白扔约 2 KB）。
   预算里还得算上成员头**按大小分档预留的尺寸字段**：跨 1 MiB 档的成员每卷多 3
   字节头，漏算就溢出一卷（`recovery_volume_budgets_count_the_reserved_size_fields`
-  用 1.5 MB 成员 + 256 KiB 卷钉住「非末卷恰好填满请求的尺寸」与 `data_width =
+  用 1.5 MB 成员 + 256 KiB 卷钉住「非末卷恰好填满请求的尺寸」与
+  `data_width =
   5`）。
 - **`rc` 重建卷沿用数据卷自己的零填充宽度**（`.rev`
   的宽度是恢复卷号，两者位数可不同），没有现存数据卷时才用 `layout.width` 兜底。
@@ -191,8 +192,8 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **`rar rr` 只在 3% 上写记录是官方缺陷**：6.23/7.23 无视
   `-rr10`/`-rr20`/已有记录一律写 3%。我们**显式强度照样生效**（与 `a`
   同一套单位），裸 `-rr` 才 3%。
-- **0% 等于「不写记录」，两条记录都没有 0 这个档位**：RAR5 至少一个 shard、
-  RAR4 至少两个扇区，把 0 传下去就会写出没人要的记录（1 KiB 归档凭空多 651
+- **0% 等于「不写记录」，两条记录都没有 0 这个档位**：RAR5 至少一个 shard、 RAR4
+  至少两个扇区，把 0 传下去就会写出没人要的记录（1 KiB 归档凭空多 651
   字节），超过 200 KiB 时还会因 shard 数算出 0 而在关闭时报
   `RAR 5 recovery shard count is invalid`。归一化点在
   `Archive::new_with_options`（所有写入口共用的漏斗），CLI 的
@@ -244,16 +245,16 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `SAMPLE_REPEAT_MIN_MATCH` 的远重复逃生口只在**抽样区间内**找重复）。两个方向
   各输一次，量级都在 3pp 以内；要改就得让逃生口扫全成员（多一遍 O(n) I/O），
   目前不动。
-- **RAR4 的 `-m5` 会比官方小一大截，这是对的**：6.23 的 RAR4 写入器根本
-  不产 PPMd，所以同为 `-m5`，30 MB 文本官方出 4 237 187 B（纯 LZ）、我们出
-  2 734 467 B（PPMd 胜）；纯 LZ 那条线双方同档（`-m3` 30 MB：5.7 s vs 5.9 s，
-  尺寸也只差几个百分点）。别把“和官方不一样”当 bug 去砍 PPMd——读取侧
-  6.23/7.23 都能解，这是 RAR4 唯一能拿到 PPMd 比率的路径
-  （见 `docs/rar4-creation-spec.md`）。代价是 PPMd 试压比 LZ 慢约 4 倍
-  （30 MB 文本、`-mt1`、匹配查找器优化后：18.9 s vs 5.0 s）。
-- **solid 成员的顺序是官方的分组规则，不是参数顺序**：`-s` 且压缩时（`-m0`
-  与 `-ds` 除外），官方先把成员按**扩展名**分组（大小写不敏感、无扩展名在前、
-  `a.` 这类尾点算无扩展名、`a.tar.gz` 取 `gz`），组内按**基本名**（不含目录
+- **RAR4 的 `-m5` 会比官方小一大截，这是对的**：6.23 的 RAR4 写入器根本 不产
+  PPMd，所以同为 `-m5`，30 MB 文本官方出 4 237 187 B（纯 LZ）、我们出 2 734 467
+  B（PPMd 胜）；纯 LZ 那条线双方同档（`-m3` 30 MB：5.7 s vs 5.9 s，
+  尺寸也只差几个百分点）。别把“和官方不一样”当 bug 去砍 PPMd——读取侧 6.23/7.23
+  都能解，这是 RAR4 唯一能拿到 PPMd 比率的路径 （见
+  `docs/rar4-creation-spec.md`）。代价是 PPMd 试压比 LZ 慢约 4 倍 （30 MB
+  文本、`-mt1`、匹配查找器优化后：18.9 s vs 5.0 s）。
+- **solid 成员的顺序是官方的分组规则，不是参数顺序**：`-s` 且压缩时（`-m0` 与
+  `-ds` 除外），官方先把成员按**扩展名**分组（大小写不敏感、无扩展名在前、 `a.`
+  这类尾点算无扩展名、`a.tar.gz` 取 `gz`），组内按**基本名**（不含目录
   前缀）升序、同基本名再按**大小**升序、最后按全名；目录条目全部排在文件之后，
   且**按深度降序**（`a/b/c` 在 `a/b` 之前，同深度仍按上面的键）。`update`/
   `freshen` 追加的成员同样按扩展名键排序（`-m0`、非 solid 也一样），但**不看
@@ -323,8 +324,8 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   创建时每卷的文件头密文按 16 字节对齐，而头部本身又按成员大小分档预留宽度，
   两个开销都要进卷预算（`header_encrypted_volumes_roundtrip_a_member_wider_than_a_size_tier`
   用 1.5 MB 成员 + 256 KiB 卷钔住「每卷不超过请求尺寸」，
-  `official_unrar_validates_header_encrypted_volumes_with_wide_headers`
-  让官方 UnRAR 解一遍）。
+  `official_unrar_validates_header_encrypted_volumes_with_wide_headers` 让官方
+  UnRAR 解一遍）。
 - **RAR4 `-hp` 编辑**：改名/注释/锁定逐卷重写，`-hp`
   档在同样加密下编辑（需要口令）；已有的逐卷 NEWSUB
   记录在重写时**按原强度重建**（丢弃旧记录再在末块前重发，否则 `rar r` 会用错
@@ -455,13 +456,64 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   options 值的两轮各自从 0 走到自己的 `total`。同理，`bytes_total`
   是**本轮将写的成员**之和：按 id 抽取 时是被选中的那些，否则过滤抽取永远走不到
   100%。
-- **RAR5 解码热路径的四个不变量**：解码速度靠四处结构，改动前先想清楚谁在付钱——①`BitReader` 是**移位寄存器**（`u64` 里高位是未消费比特，一次 8 字节大端装载能填进 7 个字节），所以 `peek_bits` 是一次移位、`skip_bits` 又是一次，别退回逐字节 `copy_from_slice`：那是每次 peek 拷 8 字节，实测约占总解码时间的四成；②`DecodeTable::quick` 把**码长和符号压进一个 `u32`**（高 16 位码长、低 16 位符号），一个 `QUICK_BITS` 前缀一次装载，拆回两个并行数组会让每个字面量多一次内存访问；③`SlidingWindow::copy_match` 在**源不跨环尾**时走 memmove：`dist >= len` 是一次 `copy_within`，`dist < len`（自我重叠）则先搬一个 `dist` 周期的前缀、然后**倍增**（`done = dist; while done < len { copy_within(dst..dst+n, dst+done); done += n }`），代价从 `len/dist` 次 memmove 降到 `log2(len/dist)` 次；只有源跨环尾（每绕一圈最多一次）才退逐字节——逐字节版每字节一次掩码，是仅次于 ① 的开销。别把倍增「简化」回「每次搬 `dist` 字节」：真实二进制里自我重叠只占 0.26%，看不出差别，但 13 MB 全零这种长游程（`dist=1`）会退化成上百万次单字节 memmove，端到端实测 **0.106 s → 0.047 s（−56%）**，13 MB 的 `abcd` 重复是 −25%。契约 `copy_match_overlapping_is_the_repeating_pattern`（`window.rs` 单元测试，扫 `dist∈{1,2,3,4,7}` × `len∈{1..4096}` 逐字节比对周期）；④`get_output` 只留给原地调用，流式路径用 `append_output_into` **直接追加到 staging**，少一次中间 `Vec` 和它的分配。⑤**`SymbolReader::next` 的返回类型只许两字宽**：`RarError` 是 88 字节，早先返回 `RarResult<Option<Symbol>>` 就是每个符号把这 88 字节压一遍栈（一颗 13 MiB 成员约 660 万次），实测占了符号流开销的一大半——现在错误装在 `SymbolReader::error` 里，由 `take_error()` 在循环结束后取，`fail()` 挂 `#[cold] #[inline(never)]`，热路径上只有两个字；⑥**热路径上的 `peek_bits`/`skip_bits`/`fill`/`decode_symbol`/`next`/`decode_symbol`（`symbols.rs` 那层）必须挂 `#[inline(always)]`，稀有半边（`decode_non_literal`）反而要 `#[inline(never)]`**：`#[inline]` 只是提示，实测 LLVM 会把 `huffman::decode_symbol` 留成外联调用，每个符号多吃一次调用和一次 24 字节 sret 返回，强制内联后同机交替 A/B 是 −10~−17%（`ntoskrnl` 无过滤 m5 0.221→0.195 s、text 13 MiB 0.084→0.072 s）。⑦`BitReader::consumed_bits()` 直接算 `pos*8 - bits`，别用 `byte_position()*8 + bit_position()`——后者每次带一次除法和一次取余，而块结束判断是**每个符号**都要问的；⑧**`next_symbol` 要小到能被内联，`read_block_header` 必须 `#[inline(never)]`**：块头里建霍夫曼表是几百条指令，一旦被内联进 `next_symbol`，它就长到 LLVM 不肯再往 `run_engine` 里塞——而 `next_symbol` 是**每符号一次**的调用点，这一层外联调用就是每个符号白付的调用+返回。判据不是看源码长短而是数汇编：`cargo rustc -p rar-rs --release --lib -- --emit asm` 之后在 `run_engine` 那一段里 `grep callq`，出现 `next_symbol` 就说明没内联、出现 `read_bits` 就说明位读取也被踢出局（修好后只剩 `read_block_header` 一次，那是每成员几次的量级）。收益要按场景说清楚：合成语料（`decode_bench` 三个语料的中位数）**+6~7%**，而 `ntoskrnl` 的 m5 真实归档只有 **−1~2%**（长匹配多、符号数相对少），别把前者当成后者的承诺。契约：库内 580 个单元测试中的往返类（`mt_tests::*`、`member_larger_than_shared_window_decodes`、`split_filter_records_decode_across_staging_boundaries`）覆盖正确性；性能对比必须用 `--release` 且**交替跑两个二进制取最小值**，同机上单次运行抖动可达 ±30%；仓库里能复现的解压基线是 `cargo run --release --example decode_bench`（自建语料、固定种子、打印 CRC32 与 packed 比例，`--keep` 会把归档留在临时目录好交给官方 `UnRAR` 对拍——官方的进程启动约 0.10 s，端到端比 `t`/`x` 必须扣掉这个常数，否则会得出「官方更慢」的假结论）。
+- **RAR5
+  解码热路径的四个不变量**：解码速度靠四处结构，改动前先想清楚谁在付钱——①`BitReader`
+  是**移位寄存器**（`u64` 里高位是未消费比特，一次 8 字节大端装载能填进 7
+  个字节），所以 `peek_bits` 是一次移位、`skip_bits` 又是一次，别退回逐字节
+  `copy_from_slice`：那是每次 peek 拷 8
+  字节，实测约占总解码时间的四成；②`DecodeTable::quick` 把**码长和符号压进一个
+  `u32`**（高 16 位码长、低 16 位符号），一个 `QUICK_BITS`
+  前缀一次装载，拆回两个并行数组会让每个字面量多一次内存访问；③`SlidingWindow::copy_match`
+  在**源不跨环尾**时走 memmove：`dist >= len` 是一次
+  `copy_within`，`dist < len`（自我重叠）则先搬一个 `dist`
+  周期的前缀、然后**倍增**（`done = dist; while done < len { copy_within(dst..dst+n, dst+done); done += n }`），代价从
+  `len/dist` 次 memmove 降到 `log2(len/dist)`
+  次；只有源跨环尾（每绕一圈最多一次）才退逐字节——逐字节版每字节一次掩码，是仅次于
+  ① 的开销。别把倍增「简化」回「每次搬 `dist` 字节」：真实二进制里自我重叠只占
+  0.26%，看不出差别，但 13 MB 全零这种长游程（`dist=1`）会退化成上百万次单字节
+  memmove，端到端实测 **0.106 s → 0.047 s（−56%）**，13 MB 的 `abcd` 重复是
+  −25%。契约 `copy_match_overlapping_is_the_repeating_pattern`（`window.rs`
+  单元测试，扫 `dist∈{1,2,3,4,7}` × `len∈{1..4096}`
+  逐字节比对周期）；④`get_output` 只留给原地调用，流式路径用
+  `append_output_into` **直接追加到 staging**，少一次中间 `Vec`
+  和它的分配。⑤**`SymbolReader::next` 的返回类型只许两字宽**：`RarError` 是 88
+  字节，早先返回 `RarResult<Option<Symbol>>` 就是每个符号把这 88
+  字节压一遍栈（一颗 13 MiB 成员约 660
+  万次），实测占了符号流开销的一大半——现在错误装在 `SymbolReader::error` 里，由
+  `take_error()` 在循环结束后取，`fail()` 挂
+  `#[cold] #[inline(never)]`，热路径上只有两个字；⑥**热路径上的
+  `peek_bits`/`skip_bits`/`fill`/`decode_symbol`/`next`/`decode_symbol`（`symbols.rs`
+  那层）必须挂 `#[inline(always)]`，稀有半边（`decode_non_literal`）反而要
+  `#[inline(never)]`**：`#[inline]` 只是提示，实测 LLVM 会把
+  `huffman::decode_symbol` 留成外联调用，每个符号多吃一次调用和一次 24 字节 sret
+  返回，强制内联后同机交替 A/B 是 −10~−17%（`ntoskrnl` 无过滤 m5 0.221→0.195
+  s、text 13 MiB 0.084→0.072 s）。⑦`BitReader::consumed_bits()` 直接算
+  `pos*8 - bits`，别用
+  `byte_position()*8 + bit_position()`——后者每次带一次除法和一次取余，而块结束判断是**每个符号**都要问的；⑧**`next_symbol`
+  要小到能被内联，`read_block_header` 必须 `#[inline(never)]`
+  **：块头里建霍夫曼表是几百条指令，一旦被内联进 `next_symbol`，它就长到 LLVM
+  不肯再往 `run_engine` 里塞——而 `next_symbol`
+  是**每符号一次**的调用点，这一层外联调用就是每个符号白付的调用+返回。判据不是看源码长短而是数汇编：`cargo rustc -p rar-rs --release --lib -- --emit asm`
+  之后在 `run_engine` 那一段里 `grep callq`，出现 `next_symbol`
+  就说明没内联、出现 `read_bits` 就说明位读取也被踢出局（修好后只剩
+  `read_block_header`
+  一次，那是每成员几次的量级）。收益要按场景说清楚：合成语料（`decode_bench`
+  三个语料的中位数）**+6~7%**，而 `ntoskrnl` 的 m5 真实归档只有
+  **−1~2%**（长匹配多、符号数相对少），别把前者当成后者的承诺。契约：库内 580
+  个单元测试中的往返类（`mt_tests::*`、`member_larger_than_shared_window_decodes`、`split_filter_records_decode_across_staging_boundaries`）覆盖正确性；性能对比必须用
+  `--release` 且**交替跑两个二进制取最小值**，同机上单次运行抖动可达
+  ±30%；仓库里能复现的解压基线是
+  `cargo run --release --example decode_bench`（自建语料、固定种子、打印 CRC32
+  与 packed 比例，`--keep` 会把归档留在临时目录好交给官方 `UnRAR`
+  对拍——官方的进程启动约 0.10 s，端到端比 `t`/`x`
+  必须扣掉这个常数，否则会得出「官方更慢」的假结论）。
 - **RAR4 solid 成员搜索可以并行，胜负必须串行裁决**：没开 `parallel` 时的
   `search_solid_member_serial` 是**参照序**，并行版只改“何时算”不改“谁赢”——每个
   候选（plain LZ、逐个 `-mc` 过滤候选、PPMd 试压）都只读进入该成员之前的链状态
-  （`history` 只借用、`levels` 各拿一份、被携带的 PPMd 模型克隆或新建），结果再按
-  串行顺序排名（最小者胜、平局留靠前、PPMd 严格更小才赢）。PPMd 试压因此可以
-  提前放弃：区间编码器只追加字节，超过当前 LZ 最优（并行时是所有 LZ 候选共享的
+  （`history` 只借用、`levels` 各拿一份、被携带的 PPMd
+  模型克隆或新建），结果再按 串行顺序排名（最小者胜、平局留靠前、PPMd
+  严格更小才赢）。PPMd 试压因此可以 提前放弃：区间编码器只追加字节，超过当前 LZ
+  最优（并行时是所有 LZ 候选共享的
   原子计数器）就必然输，放弃不可能改字节；并行版把 `limit` 换成那个活计数器，
   所以它**只能**让试压更早停，不能改判。成员超过
   `RAR29_PARALLEL_MEMBER_THRESHOLD` 时根本不进这条路（它自己的块级并行会把切片
@@ -472,44 +524,51 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   早先它每次都回头去扫 `state.reps` 找「该距离是否在缓存里」并重算
   `length_bonus`——这两件事 `EncoderMatchState::plan` 在同一个位置已经算过一遍
   （`plan.cache_index` 是否 `Some` 就是「在缓存里」，`plan.fresh.bonus` 就是那个
-  加成）。改成 `same_price_run_end(&plan, length, max_match)` 之后逐字节相同，同机
-  交替 A/B：`ntoskrnl` 12.5 MiB `-ma5 -m5 -mt1` 与 `-m3 -mt1`、30 MB 文本 `-m5`、
-  以及 `-mt16` 全部 **−4.5~−8.9%**（20 组归档 sha256 全等）。另一半是重定价的
-  不动点：`-m2..-m5` 会跑 `OPTIMAL_PARSE_PASSES` 次「按上一轮码长表重新定价」，
-  一旦某轮产出的 token 序列与上一轮完全相同，后面几轮必然产出同一个序列（价格只
-  由 token 序列决定），所以 `if repriced == tokens { break; }` 是白送的早退；实测只
+  加成）。改成 `same_price_run_end(&plan, length, max_match)`
+  之后逐字节相同，同机 交替 A/B：`ntoskrnl` 12.5 MiB `-ma5 -m5 -mt1` 与
+  `-m3 -mt1`、30 MB 文本 `-m5`、 以及 `-mt16` 全部 **−4.5~−8.9%**（20 组归档
+  sha256 全等）。另一半是重定价的 不动点：`-m2..-m5` 会跑 `OPTIMAL_PARSE_PASSES`
+  次「按上一轮码长表重新定价」， 一旦某轮产出的 token
+  序列与上一轮完全相同，后面几轮必然产出同一个序列（价格只 由 token
+  序列决定），所以 `if repriced == tokens { break; }` 是白送的早退；实测只
   在二进制数据上触发（`ntoskrnl` m5 601 次重定价里 39 次收敛、m3 201 次里 1 次，
-  4 MB 文本 0 次），文本类语料别指望它。**别试图把这两处再往前推**：按
-  (位置, 距离) 缓存重复距离探测结果（跨 pass 复用 `match_length_at`）实测无收益
+  4 MB 文本 0 次），文本类语料别指望它。**别试图把这两处再往前推**：按 (位置,
+  距离) 缓存重复距离探测结果（跨 pass 复用 `match_length_at`）实测无收益
   （每位置多 16 字节流式流量比省下的远地址读更贵），预取未来位置的两个重复距离
-  同样无收益（±13% 的机器抖动就能吃掉全部信号），把 `OPT_BLOCK_SIZE` 从 64 KiB 降
-  到 16 KiB 只换来 3.7% 且改变字节——**DP 的 55% 是远地址探测的缓存缺失加每步定价
+  同样无收益（±13% 的机器抖动就能吃掉全部信号），把 `OPT_BLOCK_SIZE` 从 64 KiB
+  降 到 16 KiB 只换来 3.7% 且改变字节——**DP 的 55%
+  是远地址探测的缓存缺失加每步定价
   本身，不是数组足迹**。做这类对比必须交替跑两个二进制取最小值：同机抖动可达
   ±30%，单跑一轮会得出反的结论。
 - **槽步进定价的融合版：一个 run 只解一次距离侧，参考实现必须留着当判据**：
-  `optimal_parse_tokens` 的每一步原本问两次——`same_price_run_end`（这个长度的价格
-  区间到哪结束）与 `match_cost`/`estimated_match_cost`（那个 reach 值多少）——两次都
-  从 `plan` 重新解一遍 `MatchShape`、一次 `encode_length_slot`（`leading_zeros`）、一次
-  `distance_bits` 查表。但一个 run 的**距离侧**（缓存槽的码长、新鲜距离的槽符号与额外
+  `optimal_parse_tokens`
+  的每一步原本问两次——`same_price_run_end`（这个长度的价格 区间到哪结束）与
+  `match_cost`/`estimated_match_cost`（那个 reach 值多少）——两次都 从 `plan`
+  重新解一遍 `MatchShape`、一次 `encode_length_slot`（`leading_zeros`）、一次
+  `distance_bits` 查表。但一个 run
+  的**距离侧**（缓存槽的码长、新鲜距离的槽符号与额外
   位、长度加成、以及哪个长度走 repeat）对 run 里每个长度都一样，于是
   `SlotPricer::for_run` 把它一次分类好，`step` 每步只解长度槽：
   `bits = value.ilog2() - 2`、`sub = (value >> bits) & 3`、`slot = 4 * (bits + 1) + sub`、
   `natural_end = (((value >> bits) + 1) << bits) - 1 + 2 + bonus`——**槽号不需要
   `encode_length_slot`，也不需要 `last_value`**（`last_value` 的 `ilog2` 恒为
-  `bits + 2`，sub 恒为同一次移位的结果）。
-  **唯一不能省的是 repeat 截断**：`reach = min(…, repeat_length - 1)` 落到的槽可能比
+  `bits + 2`，sub 恒为同一次移位的结果）。 **唯一不能省的是 repeat
+  截断**：`reach = min(…, repeat_length - 1)` 落到的槽可能比
   当前长度**更靠后**，那一格得按 `repeat_length - 1` 自己算，所以每 run 预解一次
-  `price_of_one(repeat_length - 1)`（`Option`，可能根本不可编码）当 `repeat_bound`；
-  `run_end` 截断则始终同槽，可以沿用本步价格。`same_price_run_end` / `match_cost` /
+  `price_of_one(repeat_length - 1)`（`Option`，可能根本不可编码）当
+  `repeat_bound`； `run_end`
+  截断则始终同槽，可以沿用本步价格。`same_price_run_end` / `match_cost` /
   `estimated_match_cost` / `shape` 全部保留为 `#[cfg(test)]` 的参照实现，
-  `slot_pricer_tests`（4000 组随机 `TokenPrices`/reps/last_length/距离/variant，逐长度
-  比对 reach、价格与 `None`）是这道口子的闸门——把 `if reach > bound` 改成
+  `slot_pricer_tests`（4000 组随机
+  `TokenPrices`/reps/last_length/距离/variant，逐长度 比对 reach、价格与
+  `None`）是这道口子的闸门——把 `if reach > bound` 改成
   `if false && reach > bound` 它会立刻报
   `V50: left (161, Some(14)) right (156, Some(14))`。同理**不许动步数预算记账**：
-  `MAX_PARSE_STEPS_PER_POSITION` 只数非最长者的步，reach 序列一变预算就变、字节就变。
-  实测：packed 字节逐位相同（4 语料 × 3 档的 packed 流 FNV 全等，`examples/ratiocheck.rs` 的 hash 列），
-  DP 阶段 −9.4%（wordtext m3）/ −9.6%（m5），端到端 wordtext m3 −8%、xml −6.4%、
-  dll-like −6.3%、x86syn −3.0%、text −1.4%、mixed/random 持平。
+  `MAX_PARSE_STEPS_PER_POSITION` 只数非最长者的步，reach
+  序列一变预算就变、字节就变。 实测：packed 字节逐位相同（4 语料 × 3 档的 packed
+  流 FNV 全等，`examples/ratiocheck.rs` 的 hash 列）， DP 阶段 −9.4%（wordtext
+  m3）/ −9.6%（m5），端到端 wordtext m3 −8%、xml −6.4%、 dll-like −6.3%、x86syn
+  −3.0%、text −1.4%、mixed/random 持平。
 - **并行提取必须给逐成员语义让路**：开了进度回调、或策略不是 `Abort` 时，
   `extract_all_parallel` 一律返回 `None`
   退回串行——它先把所有成员解码完，"在第一个失败处停下"根本无法实现，与其猜不如让路。改这些条件前先想清楚顺序语义。
