@@ -244,11 +244,11 @@ python3 scripts/fetch_winrar.py --check   # verify a cache, download nothing
 ```
 
 **Behind a proxy, pass it explicitly.** `urllib.request.getproxies()` returns
-`getproxies_environment() or getproxies_registry()` — one stray `*_PROXY` variable
-(the harness here exports `BILLION_CONTEXT_PROXY`) makes the environment result
-non-empty, so the Windows registry proxy is never consulted and every download
-goes straight out (3 MB took minutes, then failed). Set `HTTP_PROXY` /
-`HTTPS_PROXY` to the system proxy when running the script:
+`getproxies_environment() or getproxies_registry()` — one stray `*_PROXY`
+variable (the harness here exports `BILLION_CONTEXT_PROXY`) makes the
+environment result non-empty, so the Windows registry proxy is never consulted
+and every download goes straight out (3 MB took minutes, then failed). Set
+`HTTP_PROXY` / `HTTPS_PROXY` to the system proxy when running the script:
 
 ```sh
 HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897 \
