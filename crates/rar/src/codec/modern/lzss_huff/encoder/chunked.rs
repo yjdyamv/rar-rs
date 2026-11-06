@@ -234,7 +234,7 @@ fn encode_chunked_raw_inner(
     // of that jump is the collector, not the pricing. The decision itself
     // lives in `parse_tier` so the filtered path cannot drift from this one.
     let (chain_len, passes, miss_threshold) = super::parse_tier(method);
-    let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
+    let dict_size = super::dict_size_bytes(dict_size_log);
     // WinRAR applies the long range search to -m2..-m5 and ignores it
     // for -m1 (fastest); it is automatic (no -mcl switch needed) and
     // mandatory for v70 dictionaries.
@@ -427,7 +427,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
     } = spec;
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
-    let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
+    let dict_size = super::dict_size_bytes(dict_size_log);
     let long_range = level >= 2;
     // The row index's candidate depth is the MT tier's level dial (see
     // [`MT_ROW_INDEX_DEPTH`]); the chain budget above is the fallback tier's.

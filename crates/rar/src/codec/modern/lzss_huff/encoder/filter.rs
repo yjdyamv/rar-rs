@@ -157,7 +157,7 @@ pub fn encode_with_filters(
     // `encode_chunked_raw_inner` would silently skip exactly the binaries the
     // tier was measured on.
     let (chain_len, passes, miss_threshold) = super::parse_tier(method);
-    let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
+    let dict_size = super::dict_size_bytes(dict_size_log);
     let long_range = level >= 2;
 
     let mut state = EncoderState::default();

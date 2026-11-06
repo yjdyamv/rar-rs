@@ -18,9 +18,11 @@ pub(crate) use crate::codec::common::incompressible::{
 /// capped at twice the file size rounded down to a power of two, floored at
 /// 128 KiB, and clamped to the RAR5 range (128 KiB .. 4 GiB, log 0..15).
 fn dict_log_for(data_size: usize, requested: Option<u8>, _level: u8) -> u8 {
-    let base = 128 * 1024;
-    let file_pow2 = 1usize << (usize::BITS - 1 - data_size.max(1).leading_zeros());
-    let auto_cap = (file_pow2 * 2).max(base);
+    // Sizes and caps are computed in `u64`: on 32-bit hosts a multi-GiB
+    // `data_size` would overflow `usize` in the 2x cap.
+    let base = 128u64 * 1024;
+    let file_pow2 = 1u64 << (u64::BITS - 1 - (data_size as u64).max(1).leading_zeros());
+    let auto_cap = file_pow2.saturating_mul(2).max(base);
     let requested_bytes = requested.map_or(32 * 1024 * 1024, |log| base << log);
     let target = auto_cap.min(requested_bytes);
     let mut log = 0u8;
@@ -57,11 +59,11 @@ pub(crate) fn dict_params_for(
     let Some(requested) = requested_bytes else {
         return (dict_log_for(data_size, requested_log, level), None);
     };
-    let base = 128 * 1024;
-    let file_pow2 = 1usize << (usize::BITS - 1 - data_size.max(1).leading_zeros());
+    let base = 128u64 * 1024;
+    let file_pow2 = 1u64 << (u64::BITS - 1 - (data_size as u64).max(1).leading_zeros());
     let auto_cap = file_pow2.saturating_mul(2).max(base);
-    let capped = (requested as usize).min(auto_cap);
-    if force_v70 || capped as u64 > 4 * 1024 * 1024 * 1024u64 {
+    let capped = requested.min(auto_cap);
+    if force_v70 || capped > 4 * 1024 * 1024 * 1024u64 {
         // RAR7 (v70): the header declares the (capped) dictionary — floored
         // at 128 KiB, the smallest the 5+5-bit encoding can represent. The
         // encoder window follows the plain RAR5 selection rules but is
@@ -70,9 +72,9 @@ pub(crate) fn dict_params_for(
         // undecodable. (The > 4 GiB path never tripped this because the
         // RAR5 log ceiling of 4 GiB is already below any v70 dict; the
         // clamp matters for force_v70's small dicts.)
-        let declared = capped.max(base) as u64;
+        let declared = capped.max(base);
         let window_log = dict_log_for(data_size, requested_log, level)
-            .min((63 - (declared / base as u64).leading_zeros()) as u8);
+            .min((63 - (declared / base).leading_zeros()) as u8);
         (window_log, Some(declared))
     } else {
         // The 2x-file-size cap fell into the RAR5 range: plain v50 member
@@ -82,6 +84,30 @@ pub(crate) fn dict_params_for(
             log += 1;
         }
         (log, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dict_params_for;
+
+    /// A multi-GiB `-md` must not be truncated to the host word size: for a
+    /// 32 MiB member the 2x-file-size cap always lands at log 9 (64 MiB),
+    /// also on 32-bit targets where `requested as usize` would wrap.
+    #[test]
+    fn multi_gib_requests_are_capped_at_twice_the_member_size() {
+        let member = 32 * 1024 * 1024;
+        for requested in [
+            6 * 1024 * 1024 * 1024u64,
+            8 * 1024 * 1024 * 1024,
+            65 * 1024 * 1024 * 1024,
+        ] {
+            assert_eq!(
+                dict_params_for(member, None, Some(requested), 5, false),
+                (9, None),
+                "requested {requested}"
+            );
+        }
     }
 }
 

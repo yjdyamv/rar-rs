@@ -115,6 +115,11 @@ pub(crate) fn set_price_tier_cut(cut: Option<usize>) {
     );
 }
 
+/// Dictionary size in bytes; saturates where `usize` is too narrow (32-bit).
+fn dict_size_bytes(dict_size_log: u8) -> usize {
+    usize::try_from((128u64 * 1024) << dict_size_log as u32).unwrap_or(usize::MAX)
+}
+
 /// Parse tier for a level: `(chain_len, passes, miss_threshold)`.
 ///
 /// Both parser entry points — the buffered chunked path and the filtered one
