@@ -15,15 +15,24 @@ use crate::version::ArchiveVersion;
 fn checked_dict_size_accepts_range_and_rejects_larger() {
     assert_eq!(checked_dict_size(0, None).unwrap(), 128 * 1024);
     assert_eq!(checked_dict_size(13, None).unwrap(), 1024 * 1024 * 1024);
-    assert_eq!(checked_dict_size(15, None).unwrap(), 4 * 1024 * 1024 * 1024);
     let err = checked_dict_size(16, None).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("maximum 15"), "{msg}");
-    // RAR7: byte count, non-power-of-two rounds the window up.
-    assert_eq!(
-        checked_dict_size(0, Some(6 * 1024 * 1024 * 1024)).unwrap(),
-        8 * 1024 * 1024 * 1024
-    );
+    // Sizes that exceed the host address space are rejected; only 64-bit
+    // targets can represent the full RAR5 4 GiB and RAR7 8 GiB ceilings.
+    let rar5_max = 4u64 * 1024 * 1024 * 1024;
+    let rar7_rounded = 8u64 * 1024 * 1024 * 1024;
+    if cfg!(target_pointer_width = "64") {
+        assert_eq!(checked_dict_size(15, None).unwrap() as u64, rar5_max);
+        // RAR7: byte count, non-power-of-two rounds the window up.
+        assert_eq!(
+            checked_dict_size(0, Some(6 * 1024 * 1024 * 1024)).unwrap() as u64,
+            rar7_rounded
+        );
+    } else {
+        assert!(checked_dict_size(15, None).is_err());
+        assert!(checked_dict_size(0, Some(6 * 1024 * 1024 * 1024)).is_err());
+    }
 }
 
 /// Fuzz regression: block flags with the reserved bit 5 set previously
