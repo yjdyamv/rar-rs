@@ -249,7 +249,7 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
             let data_start = start + on_disk_header;
             let data_end = start + total;
             if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512
-                != (data_end - data_start) as u64
+                != data_end.checked_sub(data_start).unwrap_or(usize::MAX) as u64
             {
                 return Err(RarError::format(
                     "RAR4: recovery data size does not match header",
@@ -291,7 +291,7 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
                 let data_start = start + on_disk_header;
                 let data_end = start + total;
                 if u64::from(total_blocks) * 2 + u64::from(rec_sectors) * 512
-                    != (data_end - data_start) as u64
+                    != data_end.checked_sub(data_start).unwrap_or(usize::MAX) as u64
                 {
                     return Err(RarError::format(
                         "RAR4: recovery data size does not match header",
