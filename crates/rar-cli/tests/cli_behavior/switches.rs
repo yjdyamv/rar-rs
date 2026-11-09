@@ -326,6 +326,108 @@ fn cli_exit_codes_distinguish_failure_categories() {
     assert_eq!(status.code(), Some(10), "missing archive must exit 10");
 }
 
+/// `-idq` keeps error messages on stderr, `-inul` suppresses *every* message
+/// while still setting the exit code (official `-inul` = "disable all
+/// messages"). A CRC-broken member must therefore stream to stdout on `p`
+/// and exit 3 with a clean stderr under `-inul` — the property `rarfile`'s
+/// `rar3_decompress` relies on when it synthesizes a temp archive for a
+/// 16-bit-CRC RAR 1.5/2.0 comment and reads the decompressed bytes back.
+#[cfg(any(unix, windows))]
+#[test]
+fn cli_inul_suppresses_messages_but_keeps_exit_codes() {
+    let dir = make_temp_dir();
+
+    let damaged = dir.path().join("crc.rar");
+    let payload = b"known payload for the inul damage test".to_vec();
+    let mut writer = rar_rs::ArchiveWriter::create(&damaged).unwrap();
+    writer
+        .add_bytes(
+            "d.bin",
+            &payload,
+            EntryWriteOptions::new().compression_level(CompressionLevel::STORE),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    let mut bytes = std::fs::read(&damaged).unwrap();
+    let pos = bytes
+        .windows(payload.len())
+        .position(|window| window == payload.as_slice())
+        .expect("payload bytes in archive");
+    bytes[pos] ^= 0xFF;
+    std::fs::write(&damaged, &bytes).unwrap();
+
+    // -inul: no message on either stream, data still streamed, exit 3.
+    let silent = std::process::Command::new(UNRAR_CLI)
+        .args(["p", "-inul"])
+        .arg(&damaged)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(silent.status.code(), Some(3), "-inul keeps the CRC exit code");
+    assert!(
+        silent.stderr.is_empty(),
+        "-inul must not print the error, got: {}",
+        String::from_utf8_lossy(&silent.stderr)
+    );
+    assert_eq!(
+        silent.stdout.len(),
+        payload.len(),
+        "-inul `p` must still stream the (corrupted) member data on stdout"
+    );
+
+    // The long form behaves the same as -inul.
+    let silent_long = std::process::Command::new(UNRAR_CLI)
+        .args(["p", "--silent"])
+        .arg(&damaged)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        silent_long.status.code(),
+        Some(3),
+        "--silent keeps the CRC exit code"
+    );
+    assert!(!silent_long.stdout.is_empty());
+    assert!(silent_long.stderr.is_empty());
+
+    // -idq: informational messages go, errors stay on stderr.
+    let quiet = std::process::Command::new(UNRAR_CLI)
+        .args(["p", "-idq"])
+        .arg(&damaged)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(quiet.status.code(), Some(3));
+    assert_eq!(
+        quiet.stdout.len(),
+        payload.len(),
+        "-idq must still stream the member data on stdout"
+    );
+    assert!(
+        String::from_utf8_lossy(&quiet.stderr).contains("CRC mismatch"),
+        "-idq must keep the error on stderr, got: {}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+
+    // The rar binary honors -inul for its errors too.
+    let rar_silent = std::process::Command::new(RAR_CLI)
+        .args(["t", "-inul"])
+        .arg(&damaged)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        rar_silent.status.code(),
+        Some(3),
+        "rar -inul keeps the CRC exit code"
+    );
+    assert!(
+        rar_silent.stderr.is_empty(),
+        "rar -inul must be silent, got: {}",
+        String::from_utf8_lossy(&rar_silent.stderr)
+    );
+}
+
 /// WinRAR's exit codes for a bad command line: an unknown switch and an
 /// unknown command are both 7 (`unknown option`), while a missing archive is
 /// 10 (`no files found`). Clap defaults to 2, which the official tools never

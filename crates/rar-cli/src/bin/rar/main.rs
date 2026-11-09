@@ -83,7 +83,8 @@ fn main() {
         return;
     }
     let cli = error::parse_args::<Cli>(std::iter::once("rar".to_string()).chain(args));
-    output::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
+    output::QUIET.store(cli.quiet || cli.silent, std::sync::atomic::Ordering::Relaxed);
+    output::SILENT.store(cli.silent, std::sync::atomic::Ordering::Relaxed);
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
     if let Some(dir) = &cli.work_dir {
         // WinRAR's `-w<p>` only selects the directory used for temporary
@@ -109,8 +110,11 @@ fn main() {
             process::exit(error::EXIT_TIMEOUT);
         }
         // A silent outcome (exit code only) was already reported on stdout.
+        // `-inul` drops even the error message while keeping the exit code.
         if !e.message().is_empty() {
-            eprintln!("rar: {e}");
+            if !output::silent() {
+                eprintln!("rar: {e}");
+            }
             if let Some(log) = &log_errors {
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
