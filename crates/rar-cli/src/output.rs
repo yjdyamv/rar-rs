@@ -2,6 +2,9 @@
 
 /// Suppresses informational messages when `-idq` / `-inul` is given.
 pub static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Suppresses *all* messages, errors included, when `-inul` is given
+/// (official `-inul` = "disable all messages"; `-idq` keeps errors).
+pub static SILENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Sends informational messages to stderr instead of stdout when `-ierr`
 /// is given.
@@ -92,6 +95,12 @@ pub type OverwriteAllState = std::sync::atomic::AtomicU8;
 /// Whether `-idq` / `-inul` (or `-inul`) suppressed informational output.
 pub fn quiet() -> bool {
     QUIET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether `-inul` suppressed even error messages (official behavior: the
+/// exit code is still set, only the message is dropped).
+pub fn silent() -> bool {
+    SILENT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether a prompt may be asked on the console: stdin is a terminal. A test

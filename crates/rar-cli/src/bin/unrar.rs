@@ -39,6 +39,10 @@ struct Cli {
     /// Quiet mode: suppress informational messages (like `-idq` / `-inul`)
     #[arg(long, global = true)]
     quiet: bool,
+    /// Full mute: suppress every message, errors included (like `-inul`).
+    /// The exit code still reflects the outcome.
+    #[arg(long, global = true)]
+    silent: bool,
     /// Send informational messages to stderr (like `-ierr`)
     #[arg(long, global = true)]
     err: bool,
@@ -272,11 +276,13 @@ fn main() {
         return;
     }
     let cli = error::parse_args::<Cli>(std::iter::once("unrar".to_string()).chain(args));
-    output::QUIET.store(cli.quiet, std::sync::atomic::Ordering::Relaxed);
+    output::QUIET.store(cli.quiet || cli.silent, std::sync::atomic::Ordering::Relaxed);
+    output::SILENT.store(cli.silent, std::sync::atomic::Ordering::Relaxed);
     output::ERR.store(cli.err, std::sync::atomic::Ordering::Relaxed);
     if let Err(e) = run(cli, command.as_deref()) {
         // A silent outcome (exit code only) was already reported on stdout.
-        if !e.message().is_empty() {
+        // `-inul` drops even the error message while keeping the exit code.
+        if !e.message().is_empty() && !output::silent() {
             eprintln!("unrar: {e}");
         }
         process::exit(e.exit_code());
