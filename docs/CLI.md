@@ -67,7 +67,9 @@ both tools.
 
 Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
 `--work-dir <path>` (`-w<path>`; the directory WinRAR uses for temporary files —
-it must exist and never changes where outputs are written).
+it must exist and never changes where outputs are written). `--help` (`-h`, and
+WinRAR's `-?`) prints the command/switch help and exits 0; `-iver` prints the
+version.
 
 Quiet mode follows each official tool: `rar -idq` answers its own prompts with
 Yes (an existing destination is replaced without asking), while `unrar -idq`
