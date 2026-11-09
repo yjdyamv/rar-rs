@@ -20,6 +20,10 @@ pub(crate) struct Cli {
     /// Quiet mode: suppress informational messages (like `-idq` / `-inul`)
     #[arg(long, global = true)]
     pub(crate) quiet: bool,
+    /// Full mute: suppress every message, errors included (like `-inul`).
+    /// The exit code still reflects the outcome.
+    #[arg(long, global = true)]
+    pub(crate) silent: bool,
     /// Send informational messages to stderr (like `-ierr`)
     #[arg(long, global = true)]
     pub(crate) err: bool,

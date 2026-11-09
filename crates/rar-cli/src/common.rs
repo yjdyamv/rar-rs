@@ -677,8 +677,9 @@ pub struct MiscSwitches {
 /// Used only by the `rar` binary.
 #[allow(dead_code)]
 /// Exact rar switch spellings and the clap long option they map to. A long
-/// value may already carry its own `=value` (`-ad1`, `-o+`), and `-idq` /
-/// `-inul` share `--quiet`.
+/// value may already carry its own `=value` (`-ad1`, `-o+`), `-idq` maps to
+/// `--quiet` (informational messages only) and `-inul` to `--silent` (every
+/// message, errors included, matching the official switch).
 const EXACT_SWITCHES: &[(&str, &str)] = &[
     ("-da", "--delete-archive"),
     ("-df", "--delete-after"),
@@ -719,7 +720,7 @@ const EXACT_SWITCHES: &[(&str, &str)] = &[
     ("-cu", "--uppercase"),
     ("-y", "--yes"),
     ("-idq", "--quiet"),
-    ("-inul", "--quiet"),
+    ("-inul", "--silent"),
     ("-ierr", "--err"),
     ("-iver", "--version-info"),
     ("-cfg-", "--no-config"),

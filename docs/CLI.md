@@ -65,11 +65,21 @@ stream. UnRAR differs: only its `lta`/`vta` list streams (also with the EOF
 marker), while `lt`/`vt` and the single-line modes stay stream-free — we match
 both tools.
 
-Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--err` (`-ierr`),
-`--work-dir <path>` (`-w<path>`; the directory WinRAR uses for temporary files —
-it must exist and never changes where outputs are written). `--help` (`-h`, and
-WinRAR's `-?`) prints the command/switch help and exits 0; `-iver` prints the
-version.
+Global flags: `-y` (assume yes), `--quiet` (`-idq`), `--silent` (`-inul`),
+`--err` (`-ierr`), `--work-dir <path>` (`-w<path>`; the directory WinRAR uses
+for temporary files — it must exist and never changes where outputs are
+written). `--help` (`-h`, and WinRAR's `-?`) prints the command/switch help and
+exits 0; `-iver` prints the version.
+
+`-idq` and `-inul` are not the same switch. `-idq` suppresses informational
+output but keeps errors on stderr; `-inul` disables _every_ message, errors
+included, while the exit code still reports the outcome — WinRAR's "Disable all
+messages". Callers that read data back from stdout depend on the difference:
+`unrar p -inul` on a member whose CRC does not match still streams the bytes and
+exits 3 with an empty stderr, which is how rarfile recovers the old-style
+comment of a RAR 1.5/2.0 archive (those members carry a 16-bit header CRC and
+always end in a CRC error). `-idq` would leave `unrar: <member>: CRC mismatch …`
+on stderr and corrupt the stream.
 
 Quiet mode follows each official tool: `rar -idq` answers its own prompts with
 Yes (an existing destination is replaced without asking), while `unrar -idq`
