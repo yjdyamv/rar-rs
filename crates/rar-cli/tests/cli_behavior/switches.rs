@@ -2121,3 +2121,47 @@ fn cli_library_error_categories_reach_the_exit_code() {
         "c on a locked archive must be exit 4"
     );
 }
+
+/// `-?` is the help alias shared with the official tools: it prints the same
+/// pages as `--help` and exits 0, with or without a subcommand, in both
+/// binaries. WinRAR's manual documents `-?` as "display help on commands and
+/// switches", which clap already renders for `--help`, so `-?` is translated
+/// onto it.
+#[test]
+fn cli_question_mark_prints_help_like_dash_dash_help() {
+    let run_output =
+        |bin: &str, args: &[&str]| std::process::Command::new(bin).args(args).output().unwrap();
+
+    for (bin, label) in [(RAR_CLI, "rar"), (UNRAR_CLI, "unrar")] {
+        let root = run_output(bin, &["--help"]);
+        assert_eq!(root.status.code(), Some(0), "{label} --help exits 0");
+
+        // Bare `-?`, no subcommand: full root help, exit 0, identical to
+        // `--help`.
+        let bare = run_output(bin, &["-?"]);
+        assert_eq!(bare.status.code(), Some(0), "{label} -? exits 0");
+        assert_eq!(bare.stdout, root.stdout, "{label} -? == --help");
+
+        // `-?` before a subcommand stays at root scope and prints the root
+        // help (clap's help has priority over the command).
+        let before = run_output(bin, &["-?", "l"]);
+        assert_eq!(before.status.code(), Some(0), "{label} -? l exits 0");
+        assert_eq!(before.stdout, root.stdout, "{label} -? l == --help");
+
+        // After a subcommand, `-?` reaches clap (it is never dropped like an
+        // undeclared option) and prints the subcommand's help, matching
+        // `--help` and `-h`.
+        let sub = run_output(bin, &["l", "-?"]);
+        assert_eq!(sub.status.code(), Some(0), "{label} l -? exits 0");
+        assert_eq!(
+            sub.stdout,
+            run_output(bin, &["l", "--help"]).stdout,
+            "{label} l -? == l --help"
+        );
+        assert_eq!(
+            sub.stdout,
+            run_output(bin, &["l", "-h"]).stdout,
+            "{label} l -? == l -h"
+        );
+    }
+}
