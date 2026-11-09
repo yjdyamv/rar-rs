@@ -216,10 +216,16 @@ pub fn switches_after_command(args: Vec<String>, cmd: &clap::Command) -> Vec<Str
 /// The reordering half of [`switches_after_command`].
 fn reorder_switches(args: Vec<String>, cmd: &clap::Command) -> Vec<String> {
     let value_options = value_options(cmd);
-    let root: HashSet<String> = cmd
+    let mut root: HashSet<String> = cmd
         .get_arguments()
         .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
         .collect();
+    // Clap auto-adds `--help` to every command, so it is a root-level option
+    // even though it does not show up in `get_arguments` on the un-built
+    // surface. Keeping it in the root prefix makes `unrar --help x arc`
+    // print help instead of being moved behind the command (where the
+    // help-first pass would still work, but from the subcommand's page).
+    root.insert("--help".to_string());
     let Some(index) = command_index(&args, &value_options) else {
         return args;
     };
@@ -304,6 +310,10 @@ fn drop_undeclared(args: Vec<String>, cmd: &clap::Command) -> Vec<String> {
     // refuse an unencrypted archive. Clap has no such option, so it must not
     // be filtered away.
     allowed.insert("--password-prompt".to_string());
+    // Clap auto-adds `--help` to every subcommand, so it can never be an
+    // undeclared option. Without this, `l --help` was silently dropped and
+    // the list ran (or failed on a missing archive) instead of showing help.
+    allowed.insert("--help".to_string());
 
     // Everything up to and including the command token is already legal where
     // it sits (a root option written before its subcommand); only the block
@@ -777,6 +787,13 @@ const PREFIX_SWITCHES: &[(&str, &str)] = &[
 /// binary.
 #[allow(dead_code)]
 pub fn normalize_switch(arg: &str) -> String {
+    // Official `rar`/`unrar` answer `-?` with the command and switch help —
+    // the same display clap renders for `--help` — so translate the WinRAR
+    // spelling onto it. `--help` is already a clap flag everywhere (root and
+    // subcommands), so this works with and without a command and exits 0.
+    if arg == "-?" {
+        return "--help".into();
+    }
     // `-s=<mode>` maps one letter to a full long; `-qo` distinguishes `-`;
     // and `-rr` mixes a percent (`-rr10%`, bare `-rr`/`-rr%` = 3%) with a
     // legacy RAR4 parity-sector count (`-rr10`), which `create` turns into a
