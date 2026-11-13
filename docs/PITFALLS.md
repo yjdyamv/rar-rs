@@ -320,7 +320,10 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **RAR5 `-hp` 编辑**：重写头走 `write_block_header`
   重加密，多卷重写首卷补发明文 ENCR 头；注释块只返回头 frame、payload
   单独写（`-hp` 下加密 data area 是 bug）。`-hp`
-  与内联恢复记录**可以共存**（记录重建，`.rev` 可选），`-k`（锁定档）仍拒绝。
+  与内联恢复记录**可以共存**（记录重建，`.rev` 可选），`-k`（锁定档）先把整档重写（新 IV 重加密 main header），因此 main header
+  的 flags vint 变宽也能锁。重读 `-hp` 首块时**必须按明文读**（第一个
+  块是无密钥的明文 ENCR 头）：已打开的归档再用档案密钥读它会解密密文
+  失败、报 `CRC mismatch in block header`。
   创建时每卷的文件头密文按 16 字节对齐，而头部本身又按成员大小分档预留宽度，
   两个开销都要进卷预算（`header_encrypted_volumes_roundtrip_a_member_wider_than_a_size_tier`
   用 1.5 MB 成员 + 256 KiB 卷钔住「每卷不超过请求尺寸」，

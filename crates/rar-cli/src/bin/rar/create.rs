@@ -123,15 +123,12 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 .into(),
         );
     }
-    // `-k`/`--lock` stays refused for header-encrypted (`-hp`) RAR5 archives:
-    // locking grows the archive flags field, which the fixed-size encrypted
-    // main-header patch cannot accommodate. RAR 1.3/1.4 rejects `-hp`; the
-    // RAR4 editor supports `-hp` comments. `-z`/`--comment-file` is supported
-    // for `-hp` (the comment is attached after creation through the editor).
-    if header_encrypt && !version.is_legacy() && !version.is_rar13() && misc.lock {
-        return Err("-k/--lock is not supported for header-encrypted (RAR5 -hp) archives".into());
-    }
-    // The version table is the single write knob: `-ma4` selects v29 (the
+    // `-k`/`--lock` on header-encrypted (`-hp`) RAR5 archives is supported:
+    // the lock patch stages the archive with a freshly encrypted main header,
+    // so unlike an in-place fixed-size patch it can grow. RAR 1.3/1.4 rejects
+    // `-hp`; the RAR4 editor supports `-hp` comments. `-z`/`--comment-file` is
+    // supported for `-hp` (the comment is attached after creation through the
+    // editor).    // The version table is the single write knob: `-ma4` selects v29 (the
     // legacy RAR4 pipeline), `-ma7` v70 (every member v70, 32 MiB default
     // dictionary), and `-ma5`/default v50 — a > 4 GiB `-md` keeps the
     // legacy auto mode (v70 members only when a member's effective

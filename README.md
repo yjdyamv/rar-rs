@@ -116,11 +116,12 @@ Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   surgically rewrites non-solid ones
   ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)). Multi-volume `d` / `a`
   and appending to any multi-volume set are refused, as the official `rar` does.
-- **RAR5 header-encrypted (`-hp`) sets**: rename, `ch`, archive comments and
-  delete (single- and multi-volume) all work — rewritten headers are
-  re-encrypted and the comment rides as a plaintext data area. Inline recovery
-  records may be combined with `-hp` (they are rebuilt on every edit), but
-  `-k`/lock stays refused until the encrypted main-header patch can grow.
+- **RAR5 header-encrypted (`-hp`) sets**: rename, `ch`, archive comments,
+  delete (single- and multi-volume) and `-k`/lock all work — rewritten headers
+  are re-encrypted and the comment rides as a plaintext data area. Inline
+  recovery records may be combined with `-hp` (they are rebuilt on every
+  edit), and the lock patch stages a full rewrite with a freshly encrypted
+  main header, so the flags vint may grow.
 - **RAR4 solid chains** stay sequential; only RAR5 gets chunk-level MT.
 - Filter types 4–7 are rejected; KDF strength is capped at 2²⁴ iterations
   (default 2¹⁵).

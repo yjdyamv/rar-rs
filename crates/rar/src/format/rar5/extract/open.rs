@@ -280,11 +280,12 @@ pub(crate) fn read_main_header<R: Read + Seek>(
         cx.sfx_offset() + RAR5_SIGNATURE.len() as u64,
     ))?;
     let missing = || RarError::format("archive is missing the main header");
-    let first = crate::format::rar5::headers::read_block(
-        reader,
-        crate::format::rar5::extract::verify::archive_block_key(cx)?.as_ref(),
-    )?
-    .ok_or_else(missing)?;
+    // The leading block is always plaintext: an `-hp` archive starts with a
+    // plaintext ENCR header (it carries the salt the key is derived from),
+    // followed by the encrypted main header. Reading it with a key that an
+    // earlier open already derived (e.g. when `lock()` re-reads the header)
+    // would decrypt plaintext bytes and fail the header CRC.
+    let first = crate::format::rar5::headers::read_block(reader, None)?.ok_or_else(missing)?;
     match first.block_type {
         BLOCK_TYPE_ENCRYPT_HEADER => {
             let params = crate::format::rar5::headers::parse_archive_encrypt_header(&first.raw)?;

@@ -1944,6 +1944,59 @@ fn official_unrar_validates_rar4_appends() {
     assert_eq!(std::fs::read(&fixed).unwrap(), bytes);
 }
 
+/// The official tool validates a header-encrypted archive locked by the
+/// editor: `lock()` stages a full rewrite and re-encrypts the main header
+/// with a fresh IV, so `LOCKED | ENCRYPTED_HEADERS` coexist and members stay
+/// readable.
+#[test]
+fn official_unrar_validates_header_encrypted_lock() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let dir = make_temp_dir();
+    let path = dir.path().join("hp-lock.rar");
+    let payload: Vec<u8> = b"header-encrypted lock payload\n".repeat(2_000);
+    {
+        let mut writer = rar_rs::ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::default()
+                .password("pw")
+                .encrypt_headers(true),
+        )
+        .unwrap();
+        writer
+            .add_bytes("a.txt", &payload, EntryWriteOptions::default())
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    {
+        let mut editor = rar_rs::ArchiveEditor::open_with_password(&path, "pw").unwrap();
+        editor.lock().unwrap();
+    }
+    // Locking is final for our editor too.
+    let mut editor = rar_rs::ArchiveEditor::open_with_password(&path, "pw").unwrap();
+    let a = editor.unique_entry("a.txt").unwrap();
+    assert!(matches!(
+        editor.delete_entries(&[a]),
+        Err(rar_rs::RarError::ArchiveLocked)
+    ));
+    let out = std::process::Command::new(&unrar)
+        .args(["t", "-ppw", "-idq"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "unrar rejected a locked -hp archive:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut reader =
+        ArchiveReader::open_with(&path, rar_rs::OpenOptions::default().password("pw")).unwrap();
+    let a = reader.unique_entry("a.txt").unwrap();
+    assert_eq!(reader.read_entry(a).unwrap(), payload);
+}
+
 /// WinRAR 6.23 validates a solid RAR4 archive after our stage-C repack
 /// (member deletion re-encodes the whole chain).
 #[test]
