@@ -4,12 +4,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Strip a trailing `.rar` or `.rev` extension (ASCII case-insensitive).
-/// ASCII lowering preserves byte offsets, so the returned slice is valid
-/// for the original name (a Unicode `to_lowercase` can expand characters).
+/// Strip a trailing `.rar`, `.rev` or `.exe` extension (ASCII
+/// case-insensitive). `.exe` covers WinRAR's SFX first volume
+/// (`{base}.part1.exe`). ASCII lowering preserves byte offsets, so the
+/// returned slice is valid for the original name (a Unicode `to_lowercase`
+/// can expand characters).
 fn strip_archive_extension(name: &str) -> Option<&str> {
     let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".rar") || lower.ends_with(".rev") {
+    if lower.ends_with(".rar") || lower.ends_with(".rev") || lower.ends_with(".exe") {
         Some(&name[..name.len() - 4])
     } else {
         None
@@ -128,11 +130,14 @@ pub(crate) fn volume_path_padded(
     parent.join(format!("{base}.part{part_num:0width$}.rar"))
 }
 
-/// Base name of a `{base}.partN.rar` volume file, if the name parses as one.
+/// Base name of a `{base}.partN.rar` (or SFX `.part1.exe`) volume file, if
+/// the name parses as one.
 fn part_volume_base(name: &str) -> Option<&str> {
     let stem = name
         .strip_suffix(".rar")
-        .or_else(|| name.strip_suffix(".RAR"))?;
+        .or_else(|| name.strip_suffix(".RAR"))
+        .or_else(|| name.strip_suffix(".exe"))
+        .or_else(|| name.strip_suffix(".EXE"))?;
     split_part_stem(stem).map(|(base, _)| base)
 }
 
@@ -250,6 +255,16 @@ mod tests {
         assert_eq!(super::extract_volume_base("my.partition.rar"), None);
         assert_eq!(super::extract_volume_base("archive.rar"), None);
         assert_eq!(super::extract_volume_base("archive.r00"), None);
+        assert_eq!(super::extract_volume_base("archive.exe"), None);
+        // SFX first volume: WinRAR names it `{base}.part1.exe`.
+        assert_eq!(
+            super::extract_volume_base("set.part1.exe"),
+            Some(("set".to_string(), 1))
+        );
+        assert_eq!(
+            super::extract_volume_base("set.part01.exe"),
+            Some(("set".to_string(), 2))
+        );
         assert_eq!(
             super::legacy_volume_base("archive.rar").as_deref(),
             Some("archive")
@@ -280,6 +295,12 @@ mod tests {
             super::volume_base_of(Path::new("dir/archive.r00")),
             "archive.r00"
         );
+        // An SFX set's first volume is `{base}.part1.exe`.
+        assert_eq!(super::volume_base_of(Path::new("dir/set.part1.exe")), "set");
+        assert_eq!(
+            super::volume_base_of(Path::new("dir/set.part01.exe")),
+            "set"
+        );
     }
 
     #[test]
@@ -298,6 +319,25 @@ mod tests {
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["set.part02.rar"]);
+    }
+
+    #[test]
+    fn stale_scan_matches_an_sfx_first_volume_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        // A WinRAR SFX set names its first volume `.part1.exe`; an
+        // overwrite must retire it even though the new first volume is a
+        // plain `.part1.rar`.
+        std::fs::write(parent.join("set.part1.exe"), b"stub").unwrap();
+        std::fs::write(parent.join("set.part2.rar"), b"old").unwrap();
+
+        let keep = vec![parent.join("set.part1.rar")];
+        let stale = stale_volume_paths(parent, "set", false, &keep, &no_legacy_rev);
+        let names: Vec<String> = stale
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["set.part1.exe", "set.part2.rar"]);
     }
 
     #[test]

@@ -341,8 +341,10 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   逐卷回填 QO/RR/ENDARC 并整体换卷。两个坑：跨 10 卷时 `part1` → `part01`
   重命名，调用方必须在 `{base}.rar` 上重新 `discover_volumes`（旧首卷路径已不存在）；
   `discover_volumes` 对不存在的输入会回退成单元素，不能拿它判断“有没有卷集”。
-  追加成员另起非固实链（合法，且不需要旧链窗口）；多卷 SFX 与已有卷集的 `-v`
-  仍拒绝。
+  追加成员另起非固实链（合法，且不需要旧链窗口）；多卷 SFX 的编辑/append 与已有卷集的 `-v`
+  仍拒绝。**`-sfx` 创建的卷集首卷命名对齐 WinRAR**：单卷为 `{base}.exe`，卷集为
+  `{base}.part1.exe`，其余卷保持 `{base}.partN.rar`；`discover_volumes` 把
+  `.part1.exe` 当作第 1 卷（从任意后续卷或 base 名都能解析整套）。
 - **PROTECT_HEAD（RAR 2.5 时代记录）可编辑/追加/重打包**：布局扫描越过
   ENDARC 继续找记录（首字节 3 位类型探测，不把尾部杂字节当格式错），删除/追加
   把 0x78 记录按原 `rec_sectors` 强度重建为 NEWSUB `Protect+`（官方 `rar r`

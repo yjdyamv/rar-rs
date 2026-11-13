@@ -122,14 +122,17 @@ fn part_volume_base(name: &OsStr) -> Option<(OsString, usize)> {
         .map(|(base, width)| (OsString::from(base), width))
 }
 
-/// Strip a trailing `.rar` or `.rev` extension (ASCII case-insensitive) from
-/// raw bytes.
+/// Strip a trailing `.rar`, `.rev` or `.exe` extension (ASCII
+/// case-insensitive) from raw bytes. `.exe` is WinRAR's SFX first volume
+/// (`{base}.part1.exe`).
 #[cfg(unix)]
 fn strip_archive_extension_bytes(name: &[u8]) -> Option<&[u8]> {
     let stem_len = name.len().checked_sub(4)?;
     let extension = &name[stem_len..];
-    (extension.eq_ignore_ascii_case(b".rar") || extension.eq_ignore_ascii_case(b".rev"))
-        .then(|| &name[..stem_len])
+    (extension.eq_ignore_ascii_case(b".rar")
+        || extension.eq_ignore_ascii_case(b".rev")
+        || extension.eq_ignore_ascii_case(b".exe"))
+    .then(|| &name[..stem_len])
 }
 
 /// Legacy volume base (`x.rar` / `x.r00` / `x.s37`) from raw Unix bytes.
@@ -204,13 +207,31 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
     };
     let index = SiblingIndex::new(scan_dir);
 
-    // Match .partN.rar naming (zero-padded or not).
+    // Match .partN.rar naming (zero-padded or not). An SFX set keeps the
+    // module on its first volume, which WinRAR names `{base}.part1.exe`;
+    // that spelling is used for part 1 whenever the plain `.part1.rar` is
+    // absent, so any starting volume (and the base name) resolves the set.
     if let Some((base, width)) = part_volume_base(file_name) {
+        let first_volume = |width: usize| -> Option<PathBuf> {
+            let rar = part_volume_path(parent, &base, 1, width);
+            if let Some(volume) = index.resolve(&rar) {
+                return Some(volume);
+            }
+            let exe = parent.join(with_name_suffix(
+                &base,
+                &format!(".part{:0width$}.exe", 1, width = width),
+            ));
+            index.resolve(&exe)
+        };
         let mut volumes = Vec::new();
         let mut n = 1u64;
         loop {
-            let vol = part_volume_path(parent, &base, n, width);
-            if let Some(vol) = index.resolve(&vol) {
+            let vol = if n == 1 {
+                first_volume(width)
+            } else {
+                index.resolve(&part_volume_path(parent, &base, n, width))
+            };
+            if let Some(vol) = vol {
                 volumes.push(vol);
                 n += 1;
             } else {
@@ -223,8 +244,12 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
         // Fall back to the unpadded enumeration (mixed/odd sets).
         let mut n = 1u64;
         loop {
-            let vol = part_volume_path(parent, &base, n, 1);
-            if let Some(vol) = index.resolve(&vol) {
+            let vol = if n == 1 {
+                first_volume(1)
+            } else {
+                index.resolve(&part_volume_path(parent, &base, n, 1))
+            };
+            if let Some(vol) = vol {
                 volumes.push(vol);
                 n += 1;
             } else {
@@ -269,10 +294,19 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
         }
     }
 
-    // Check if path itself names a single-volume file that has a .part1.rar sibling
+    // Check if path itself names a single-volume file that has a .part1.rar
+    // sibling
     if let Some(stem) = path.file_stem() {
         let part1 = parent.join(with_name_suffix(stem, ".part1.rar"));
         if let Some(part1) = index.resolve(&part1)
+            && part1 != path
+        {
+            return discover_volumes(&part1);
+        }
+        // An SFX set's first volume is `{base}.part1.exe`; a caller naming
+        // the base (`set.rar`) must still find it.
+        let part1_exe = parent.join(with_name_suffix(stem, ".part1.exe"));
+        if let Some(part1) = index.resolve(&part1_exe)
             && part1 != path
         {
             return discover_volumes(&part1);
@@ -288,8 +322,51 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
             {
                 return discover_volumes(&probe);
             }
+            let exe_suffix = format!(".part{:0width$}.exe", 1, width = width);
+            let probe = parent.join(with_name_suffix(stem, &exe_suffix));
+            if let Some(probe) = index.resolve(&probe)
+                && probe != path
+            {
+                return discover_volumes(&probe);
+            }
         }
     }
 
     vec![path.to_path_buf()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::discover_volumes;
+
+    fn names(path: &std::path::Path) -> Vec<String> {
+        discover_volumes(path)
+            .iter()
+            .map(|volume| volume.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn sfx_first_volume_exe_is_discovered_from_every_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["set.part1.exe", "set.part2.rar", "set.part3.rar"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let expected = ["set.part1.exe", "set.part2.rar", "set.part3.rar"];
+        for start in ["set.part1.exe", "set.part2.rar", "set.rar"] {
+            assert_eq!(names(&dir.path().join(start)), expected, "{start}");
+        }
+    }
+
+    #[test]
+    fn padded_sfx_first_volume_exe_is_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["set.part01.exe", "set.part02.rar", "set.part03.rar"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let expected = ["set.part01.exe", "set.part02.rar", "set.part03.rar"];
+        for start in ["set.part01.exe", "set.part02.rar", "set.rar"] {
+            assert_eq!(names(&dir.path().join(start)), expected, "{start}");
+        }
+    }
 }
