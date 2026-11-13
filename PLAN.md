@@ -229,17 +229,18 @@ packed 流 FNV 全等（`examples/ratiocheck.rs` 的 hash 列），`slot_pricer_
 −6.3%、x86syn −3.0%、 text −1.4%、mixed/random 持平。边界与「别改回去」见
 `docs/PITFALLS.md` 「槽步进定价的融合版」条）。
 
-24 **并行校验**（`t` 走新的 `verify_indices_parallel`：RAR5、非固实、单块成员、
-≥4 成员、≥8 MiB 解压量、无进度回调、packed+unpacked ≤256 MiB 时，先在串行
-`Engine` 游标上把所有成员负载读出解密，再交给 Rayon 并行解码+校验，解码结果
-算完 CRC/Blake 立即丢弃；逐成员错误仍按目录顺序汇总。8 个 System32 DLL、87 MB、
-`-m3 -mc-`：`t -idq` 327 ms → 205 ms，同批 `UnRAR.exe t` 317 ms；带滤波器语料
-同口径 327 → 205 ms。`parallel` 特性下生效，`cargo test --features parallel`
-覆盖；资格门槛与顺序语义见 `docs/PITFALLS.md`「并行校验的资格门槛」条。整档
-`x` 改成**解码与落盘流水线**：工作线程解码，主线程按目录顺序做 `-o-`/`-kb`/
-覆盖裁决并写盘（有界 sync_channel + 小重排窗，资格条件不变），同一 DLL 档
-384 ms → 306 ms，同批 `UnRAR x` 343 ms。多块成员（`chunks.len() != 1`）仍走
-串行流式（内存/顺序语义不值得为它冒风险）。
+24 **并行校验/解压**（`t` 走 `verify_indices_parallel`：RAR5 与 RAR4（RAR 1.3/1.4
+除外）的非固实成员、≥4 成员、≥8 MiB 解压量、无进度回调、packed+unpacked
+≤256 MiB 时，RAR5 先在串行 `Engine` 游标上读出并解密全部负载，再交给 Rayon
+并行解码+校验；RAR4 由工作线程各自打开卷句柄读取，因此分卷/跨卷成员同样并行。
+解码结果算完 CRC/Blake 立即丢弃，逐成员错误仍按目录顺序汇总。8 个 System32
+DLL、87 MB、`-m3`：RAR5 `t -idq` 327 ms → 205 ms（官方 317 ms）；RAR4 单卷
+~400 ms → 300 ms（官方 402 ms），RAR4 15 卷 332 ms（官方 406 ms）。整档 `x`
+是**解码与落盘流水线**：工作线程解码，主线程按目录顺序做 `-o-`/`-kb`/覆盖裁决
+并写盘（有界 sync_channel + 小重排窗，资格条件同上），RAR5 384 → 306 ms
+（官方 343 ms），RAR4 单卷 337–375 ms（官方 430 ms），RAR4 多卷 382 ms。
+`parallel` 特性下生效，`cargo test --features parallel` 覆盖（含 RAR4 分卷
+verify/extract）；门槛与顺序语义见 `docs/PITFALLS.md`「并行校验的资格门槛」条。
 
 **解压基线**（`cargo run --release --example decode_bench`，自建语料，packed
 比例 29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74

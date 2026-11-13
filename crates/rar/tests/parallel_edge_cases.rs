@@ -611,3 +611,96 @@ mod parallel_verify {
         assert_eq!(report.passed(), MEMBERS - 1);
     }
 }
+
+mod parallel_legacy {
+    #![cfg(feature = "parallel")]
+    //! RAR4 shares the parallel paths: a non-solid legacy member decodes
+    //! independently from the worker's own volume handle, so whole-volume
+    //! archives (including split members and volume sets) engage the same
+    //! Rayon pipeline as RAR5.
+
+    #[allow(unused_imports)]
+    use super::*;
+
+    use rar_rs::{ArchiveReader, ArchiveVersion, ArchiveWriter, EntryWriteOptions, ExtractOptions};
+
+    const MEMBERS: usize = 5;
+    const MEMBER_BYTES: usize = 4 * 1024 * 1024;
+
+    fn noise(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn build(path: &std::path::Path, volume_size: Option<u64>) -> Vec<Vec<u8>> {
+        let mut options = rar_rs::WriterOptions::default().compression(ArchiveVersion::V29);
+        if let Some(bytes) = volume_size {
+            options = options.volume_size(bytes);
+        }
+        let mut writer = ArchiveWriter::create_with(path, options).expect("create archive");
+        let payloads: Vec<Vec<u8>> = (0..MEMBERS)
+            .map(|i| noise(0x91AB_3C02 + i as u64, MEMBER_BYTES))
+            .collect();
+        for (i, payload) in payloads.iter().enumerate() {
+            let name = format!("v{i}.bin");
+            writer
+                .add_bytes(&name, payload, EntryWriteOptions::default())
+                .expect("add member");
+        }
+        writer.finish().expect("finish archive");
+        payloads
+    }
+
+    #[test]
+    fn legacy_parallel_verify_checks_every_member() {
+        let dir = make_temp_dir();
+        let path = dir.path().join("v29.rar");
+        build(&path, None);
+
+        let mut reader = ArchiveReader::open(&path).expect("open");
+        let report = reader
+            .verify_with_options(ExtractOptions::default())
+            .expect("verify");
+        assert_eq!(report.checked(), MEMBERS);
+        assert!(report.is_ok(), "{report:?}");
+        assert_eq!(report.passed(), MEMBERS);
+    }
+
+    #[test]
+    fn legacy_parallel_extracts_volume_set() {
+        let dir = make_temp_dir();
+        let path = dir.path().join("split.rar");
+        let payloads = build(&path, Some(1024 * 1024));
+        assert!(
+            rar_rs::discover_volumes(&path).len() > 1,
+            "the set must span several volumes"
+        );
+
+        let volume = rar_rs::discover_volumes(&path).remove(0);
+        let mut reader = ArchiveReader::open(&volume).expect("open set");
+        let report = reader
+            .verify_with_options(ExtractOptions::default())
+            .expect("verify");
+        assert_eq!(report.checked(), MEMBERS);
+        assert!(report.is_ok(), "{report:?}");
+
+        let mut reader = ArchiveReader::open(&volume).expect("reopen set");
+        let out = dir.path().join("out");
+        let report = reader
+            .extract_all_with_options(&out, ExtractOptions::default())
+            .expect("extract");
+        assert_eq!(report.written_count(), MEMBERS);
+        for (i, payload) in payloads.iter().enumerate() {
+            let name = format!("v{i}.bin");
+            let bytes = std::fs::read(out.join(&name)).expect("read extracted member");
+            assert_eq!(&bytes, payload, "member {name} must round-trip");
+        }
+    }
+}

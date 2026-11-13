@@ -51,12 +51,17 @@ pub(crate) fn check_chunk_cap(count: usize, max: usize, member: &str) -> RarResu
     Ok(())
 }
 
-/// Whether the parallel extraction path may decode this archive. The
-/// parallel phase decodes with the RAR5 codec and uses the RAR5 solid
-/// rule, so legacy families always stream sequentially.
+/// Whether the parallel extraction path may decode this archive.
+///
+/// Both container families qualify: RAR5 members are decoded from
+/// pre-read payloads, legacy members decode independently through their
+/// own file handle (non-solid only — the caller excludes solid chains).
+/// RAR 1.3/1.4 keeps the streaming path: its rolling 16-bit checksum is
+/// produced by the streaming decoder and is not recomputable from the
+/// decoded bytes.
 #[cfg(feature = "parallel")]
 pub(crate) fn supports_parallel_extract(cx: &dyn Engine) -> bool {
-    !cx.is_legacy()
+    !cx.is_rar13()
 }
 
 /// Maximum packed bytes accepted when the payload must be aggregated in
@@ -117,7 +122,7 @@ mod tests {
     use crate::format::shared::extract::supports_parallel_extract;
 
     #[test]
-    fn parallel_extraction_is_rar5_only() {
+    fn parallel_extraction_covers_both_container_families() {
         let dir = tempfile::tempdir().unwrap();
 
         let legacy = dir.path().join("v29.rar");
@@ -132,7 +137,7 @@ mod tests {
         archive.add_bytes("a.txt", b"legacy data", 0).unwrap();
         archive.close().unwrap();
         let legacy = RarArchive::open(&legacy).unwrap();
-        assert!(!supports_parallel_extract(&legacy));
+        assert!(supports_parallel_extract(&legacy));
 
         let modern = dir.path().join("v50.rar");
         let mut archive =
