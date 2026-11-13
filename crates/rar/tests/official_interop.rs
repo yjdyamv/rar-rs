@@ -2352,3 +2352,94 @@ fn official_unrar_validates_rar4_multivolume_delete() {
     let c = reader.unique_entry("c.bin").unwrap();
     assert_eq!(reader.read_entry(c).unwrap(), p3);
 }
+
+/// RAR5 multi-volume append: the set is repacked whole, and WinRAR must
+/// still validate it and read every member. The comment comes from an
+/// official `rar a -z` set, so the rewrite has to re-emit a comment our own
+/// writer cannot create.
+#[test]
+fn official_unrar_validates_rar5_multivolume_append() {
+    let rar = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let dir = make_temp_dir();
+    let base = dir.path().join("r5mv.rar");
+    let noise = |len: usize, seed: u64| -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    };
+    let p1 = noise(120_000, 0x71);
+    let p2 = noise(90_000, 0x72);
+    let p3 = noise(70_000, 0x73);
+    std::fs::write(dir.path().join("a.bin"), &p1).unwrap();
+    std::fs::write(dir.path().join("b.bin"), &p2).unwrap();
+    std::fs::write(dir.path().join("c.bin"), &p3).unwrap();
+    std::fs::write(dir.path().join("comment.txt"), b"official set comment\n").unwrap();
+    let status = std::process::Command::new(&rar)
+        .args([
+            "a",
+            "-ma5",
+            "-v32k",
+            "-zcomment.txt",
+            "-idq",
+            "r5mv.rar",
+            "a.bin",
+            "b.bin",
+        ])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "official rar could not create the fixture set"
+    );
+
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "precondition: {volumes:?}");
+    {
+        let mut writer = rar_rs::ArchiveWriter::append(&volumes[0]).unwrap();
+        writer
+            .add_bytes("c.bin", &p3, EntryWriteOptions::default())
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    let after = rar_rs::discover_volumes(&base);
+    assert!(
+        after.len() > 1,
+        "the set stopped being multi-volume: {after:?}"
+    );
+    let out = std::process::Command::new(&unrar)
+        .args(["t", "-idq"])
+        .arg(&after[0])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "unrar rejected the RAR5 volume set:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut reader = ArchiveReader::open(&after[0]).unwrap();
+    assert_eq!(
+        reader.comment().unwrap().as_deref(),
+        Some(&b"official set comment\n"[..])
+    );
+    let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(names, ["a.bin", "b.bin", "c.bin"]);
+    for (name, expected) in [("a.bin", &p1), ("b.bin", &p2), ("c.bin", &p3)] {
+        let id = reader.unique_entry(name).unwrap();
+        assert_eq!(&reader.read_entry(id).unwrap(), expected, "{name}");
+    }
+}

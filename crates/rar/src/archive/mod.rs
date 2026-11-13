@@ -311,6 +311,7 @@ impl RarArchive {
         self.recovery_volumes_count = None;
         self.recovery_percent = None;
         if let Some(write) = self.write.as_mut() {
+            write.output.recovery_ratio = None;
             // A deferred solid append must not repack on the abort path.
             write.rar4.solid_append = false;
             write.rar4.multivolume_append = false;
@@ -534,9 +535,24 @@ impl RarArchive {
             return Ok(());
         }
         if self.volume_paths.len() > 1 {
-            return Err(RarError::unsupported(
-                "appending to multi-volume archives is not supported (the official rar refuses too)",
-            ));
+            // A volume set cannot be appended to in place: the new members
+            // would need a fresh volume plus a rebuilt quick-open record and
+            // recovery record per volume. Rebuild the whole set instead, the
+            // same model the multi-volume editor uses: every existing member
+            // is copied verbatim into a staged set and the appended members
+            // stream into its last volume. The official rar refuses this; we
+            // follow the whole-set rebuild model.
+            if self.sfx_offset != 0 {
+                return Err(RarError::unsupported(
+                    "appending to a multi-volume self-extracting archive is not supported",
+                ));
+            }
+            if self.main_header_is_locked()? {
+                return Err(RarError::ArchiveLocked);
+            }
+            self.carry_multivolume_recovery(None)?;
+            self.stage_multivolume_append()?;
+            return Ok(());
         }
         let path = self.path.clone();
         let mut reader = File::open(&path)?;
@@ -885,6 +901,7 @@ impl RarArchive {
                 output: OutputState {
                     pending: None,
                     volume_size: opts.volume_size,
+                    recovery_ratio: None,
                     old_numbering: opts.old_numbering,
                     current_volume: 0,
                     bytes_written: 0,

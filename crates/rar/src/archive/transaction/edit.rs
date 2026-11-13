@@ -198,7 +198,7 @@ impl RarArchive {
     /// preserved, so editing a protected set rebuilds its records instead of
     /// silently dropping them (the same advantage the single-volume path has;
     /// the official `rar` CLI drops the record unless `-rr` is repeated).
-    fn carry_multivolume_recovery(&mut self, force_rr: Option<u8>) -> RarResult<()> {
+    pub(crate) fn carry_multivolume_recovery(&mut self, force_rr: Option<u8>) -> RarResult<()> {
         self.recovery_percent = match force_rr {
             Some(percent) => Some(percent),
             None => self.volume_recovery_percent()?,

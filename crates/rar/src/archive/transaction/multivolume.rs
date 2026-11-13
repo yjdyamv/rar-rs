@@ -82,6 +82,25 @@ fn rev_params_from_file(path: &Path) -> RarResult<(u32, u32)> {
     Ok((rec_count, data_count))
 }
 
+/// Read the protection ratio carried by an existing set's `.rev` files
+/// (`(recovery volumes, data volumes)`), or `None` when the set has no
+/// parity. Shared by the rewrite and the deferred multi-volume append so both
+/// rescale regenerated recovery volumes to the new data-volume count.
+fn existing_recovery_volume_params(
+    orig_volumes: &[PathBuf],
+    parent: &Path,
+    base: &str,
+) -> RarResult<Option<(u32, u32)>> {
+    let orig_width = crate::fs::volume::volume_part_width(&orig_volumes[0]).max(1);
+    for w in [orig_width, 1, 2, 3, 4] {
+        let probe = parent.join(format!("{base}.part{:0w$}.rev", 1, w = w));
+        if probe.exists() {
+            return Ok(Some(rev_params_from_file(&probe)?));
+        }
+    }
+    Ok(None)
+}
+
 impl RarArchive {
     /// Re-emit every "STM" stream record owned by kept member `idx` after its
     /// rebuilt block. Payloads are decoded through the original volumes
@@ -182,6 +201,7 @@ impl RarArchive {
             &tmp_base,
             &tmp_base_path,
             &saved_path,
+            false,
         );
         if result.is_err() {
             // A failed rewrite must leave the original set exactly as it was.
@@ -199,6 +219,76 @@ impl RarArchive {
             remove_staged_volume_set(&parent, &tmp_base);
         }
         result
+    }
+
+    /// Stage a whole-set rewrite for a deferred multi-volume append: copy
+    /// every existing member into a fresh staged set and leave the last
+    /// volume open so the caller can stream the appended members into it.
+    ///
+    /// The live set is untouched; [`RarArchive::close`] finishes the staged
+    /// volumes, rebuilds each volume's recovery record and regenerates the
+    /// `.rev` set (rescaled from the ratio recorded here) in one journaled
+    /// commit. Appended members start a fresh, non-solid chain, which is a
+    /// legal solid archive shape and avoids needing the previous chain's
+    /// window.
+    pub(crate) fn stage_multivolume_append(&mut self) -> RarResult<()> {
+        let comment = self.get_comment()?;
+        let orig_volumes = self.volume_paths.clone();
+        let mut vol_sizes = Vec::with_capacity(orig_volumes.len());
+        for vol in &orig_volumes {
+            vol_sizes.push(fs::metadata(vol)?.len());
+        }
+        // Every volume except the last is exactly the size limit.
+        let volume_size = *vol_sizes[..vol_sizes.len() - 1]
+            .iter()
+            .min()
+            .unwrap_or(&vol_sizes[0]);
+        if volume_size == 0 {
+            return Err(RarError::format("cannot append: volume size is zero"));
+        }
+
+        let base = volume_base_of(&self.path);
+        let parent = parent_dir(&self.path);
+        crate::fs::atomic::recover_interrupted_commit(&parent, &base)?;
+        let tmp_base = format!(".{base}.rar5tmp-{}", temp_suffix());
+        let tmp_base_path = parent.join(&tmp_base);
+        let saved_path = self.path.clone();
+        let deleted = vec![false; self.entries.len()];
+
+        let result = self.write_staged_volume_set(
+            &deleted,
+            &[],
+            None,
+            &comment,
+            &orig_volumes,
+            volume_size,
+            &base,
+            &parent,
+            &tmp_base,
+            &tmp_base_path,
+            &saved_path,
+            true,
+        );
+        if result.is_err() {
+            // Leave the original set exactly as it was: disarm the staged set
+            // and drop everything written so far (the caller aborts too, but
+            // the staged base must go now — `close` must never install it).
+            self.stream = None;
+            self.write_ctx_mut().output.pending = None;
+            self.write_ctx_mut().output.volume_size = None;
+            self.path = saved_path;
+            self.volume_paths = orig_volumes;
+            remove_staged_volume_set(&parent, &tmp_base);
+            return result;
+        }
+        // Preserve the set's `.rev` protection ratio across the rewrite; a
+        // larger set must scale it like the RAR4 set rewriter does.
+        if let Some((rec_count, data_count)) =
+            existing_recovery_volume_params(&orig_volumes, &parent, &base)?
+        {
+            self.write_ctx_mut().output.recovery_ratio = Some((rec_count, data_count));
+        }
+        Ok(())
     }
 
     /// The staged half of [`Self::rewrite_multivolume`]: arm the pending
@@ -219,6 +309,7 @@ impl RarArchive {
         tmp_base: &str,
         tmp_base_path: &Path,
         saved_path: &Path,
+        defer_close: bool,
     ) -> RarResult<()> {
         // Write the new volume set. Swapping `self.path` makes the
         // streamed payload spill file land next to the temporary volumes;
@@ -377,6 +468,14 @@ impl RarArchive {
         if self.progress.is_some() {
             self.report_progress(processed, total_bytes);
         }
+        if defer_close {
+            // Deferred multi-volume append: keep the staged last volume open
+            // so the caller can stream the appended members into it. The
+            // stream stays redirected (`self.path` is still the staged base)
+            // and `close` finishes the set, rescales the `.rev` protection and
+            // installs every volume through `commit_pending`.
+            return Ok(());
+        }
         // The last volume finishes like every other one: its per-volume
         // recovery record (when the set carries one) is written here.
         self.finish_volume(false)?;
@@ -447,17 +546,9 @@ impl RarArchive {
             // files with the volume set's own padding (`part01.rev` for a
             // padded set), so probe the whole family like
             // `rev50::rebuild_missing_volumes` does.
-            let orig_width = crate::fs::volume::volume_part_width(&orig_volumes[0]).max(1);
-            let mut rev_probe: Option<PathBuf> = None;
-            for w in [orig_width, 1, 2, 3, 4] {
-                let probe = parent.join(format!("{base}.part{:0w$}.rev", 1, w = w));
-                if probe.exists() {
-                    rev_probe = Some(probe);
-                    break;
-                }
-            }
-            if let Some(rev) = rev_probe {
-                let (rec_count, _data_count) = rev_params_from_file(&rev)?;
+            if let Some((rec_count, _data_count)) =
+                existing_recovery_volume_params(orig_volumes, parent, base)?
+            {
                 let staged_data: Vec<PathBuf> =
                     install.iter().map(|(staged, _)| staged.clone()).collect();
                 let rec_count = (rec_count as usize).min(staged_data.len());

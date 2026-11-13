@@ -377,6 +377,11 @@ pub(crate) struct OutputState {
     pub pending: Option<PendingCommit>,
     /// Volume size limit for multi-volume creation (None = single volume).
     pub volume_size: Option<u64>,
+    /// RAR5 only: the `.rev` protection ratio carried over by a deferred
+    /// multi-volume append as `(recovery volumes, data volumes)`. Used at
+    /// close to rescale the regenerated recovery set to the new volume count
+    /// instead of dropping it (or keeping the old, now-wrong count).
+    pub recovery_ratio: Option<(u32, u32)>,
     /// RAR4 only (WinRAR `-vn`): name the volume set the old way —
     /// `{base}.rar`/`{base}.rNN` instead of the zero-padded
     /// `{base}.partNN.rar` — and leave `MHD_NEWNUMBERING` clear. RAR 1.3/1.4
