@@ -27,6 +27,20 @@ pub(crate) fn allocate_catalog_token() -> RarResult<u64> {
         .map_err(|_| RarError::invalid_state("archive reader ID space is exhausted"))
 }
 
+/// Strength of an archive's inline recovery record.
+///
+/// RAR5 records are sized as a percentage of the protected prefix; legacy
+/// (RAR 1.5–4.x) records are sized in 512-byte parity sectors. The variants
+/// match the units [`ArchiveEditor`](crate::ArchiveEditor)'s recovery edits
+/// take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryRecord {
+    /// RAR5: percentage of the protected prefix covered by parity.
+    Percent(u8),
+    /// RAR 1.5–4.x: number of 512-byte parity sectors.
+    Sectors(u32),
+}
+
 /// Controls how an [`ArchiveReader`] discovers archive entries while opening.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -647,6 +661,41 @@ impl ArchiveReader {
     /// the archive carries no comment.
     pub fn comment(&mut self) -> RarResult<Option<Vec<u8>>> {
         self.archive.get_comment()
+    }
+
+    /// Whether the archive's headers are encrypted (`-hp`).
+    ///
+    /// The catalog scan clears the cached encryption state after reading, so
+    /// fall back to probing the container start: an `-hp` RAR5 archive always
+    /// begins with a plaintext `ENCR` block. Legacy archives report `false`.
+    pub fn headers_encrypted(&self) -> bool {
+        if self.archive.header_encryption {
+            return true;
+        }
+        if self.archive.is_legacy() || self.archive.is_rar13() {
+            return false;
+        }
+        use std::io::{Seek, SeekFrom};
+        let Ok(mut file) = std::fs::File::open(&self.archive.path) else {
+            return false;
+        };
+        let start = self.archive.sfx_offset + crate::format::rar5::RAR5_SIGNATURE.len() as u64;
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return false;
+        }
+        matches!(
+            crate::format::rar5::headers::read_block(&mut file, None),
+            Ok(Some(meta)) if meta.block_type == crate::format::rar5::BLOCK_TYPE_ENCRYPT_HEADER
+        )
+    }
+
+    /// Strength of the archive's inline recovery record, if it carries one.
+    ///
+    /// `None` means the archive has no record (or RAR 1.3/1.4, which cannot
+    /// carry one). The scan reads only block headers, so a multi-GiB archive
+    /// is inspected with bounded memory.
+    pub fn recovery_record(&mut self) -> RarResult<Option<RecoveryRecord>> {
+        self.archive.inline_recovery_record()
     }
 
     /// Extract all archive entries with safe default options.

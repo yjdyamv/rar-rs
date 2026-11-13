@@ -345,6 +345,13 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   仍拒绝。**`-sfx` 创建的卷集首卷命名对齐 WinRAR**：单卷为 `{base}.exe`，卷集为
   `{base}.part1.exe`，其余卷保持 `{base}.partN.rar`；`discover_volumes` 把
   `.part1.exe` 当作第 1 卷（从任意后续卷或 base 名都能解析整套）。
+- **删光成员后的重建保留档级元数据**：`a` 替换全部成员时 staging 档会被抹掉，
+  `create` 必须把原档的格式（RAR4/RAR5）、卷大小、固实标志、注释、`-hp` 和 RR
+  重新写回，否则会塌缩成单卷或静默丢注释/加密。`-hp` 重建还要关掉 quick-open
+  （二者互斥）；`headers_encrypted()` 不能只读缓存状态（目录扫描会清掉缓存），
+  需要探测首块 `ENCR`。RAR5 卷集注释自此也可编辑（`rewrite_multivolume`
+  接受新注释），并且 `write_archive_header_vol` 会把固实标志写进每卷主头——
+  此前 RAR5 卷集的主头根本没有 solid 位，读取端一律当非固实处理。
 - **PROTECT_HEAD（RAR 2.5 时代记录）可编辑/追加/重打包**：布局扫描越过
   ENDARC 继续找记录（首字节 3 位类型探测，不把尾部杂字节当格式错），删除/追加
   把 0x78 记录按原 `rec_sectors` 强度重建为 NEWSUB `Protect+`（官方 `rar r`

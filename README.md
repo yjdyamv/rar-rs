@@ -119,7 +119,10 @@ Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   the numbering, solid flag, comment and per-volume recovery records. Appending
   (`a`/`u`/`f`) takes the same whole-set repack for both RAR4 and RAR5 sets, so a
   set grows while keeping its shape, and an explicit recovery-strength change (`rar rr`, `-rr<N>`)
-  rebuilds every volume's record and the `.rev` volumes; an explicit
+  rebuilds every volume's record and the `.rev` volumes; replacing every member
+  recreates the archive from the surviving metadata (format, volume size, solid
+  flag, comment, header encryption and recovery record) instead of collapsing or
+  dropping them, and RAR5 volume-set comments are editable too. An explicit
   volume-size change (`-v` on an existing archive) is still refused.
 - **RAR5 header-encrypted (`-hp`) sets**: rename, `ch`, archive comments,
   delete (single- and multi-volume) and `-k`/lock all work — rewritten headers

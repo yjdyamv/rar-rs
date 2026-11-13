@@ -66,8 +66,8 @@ pub(crate) use crate::fs::volume::{
 };
 pub use editor::{ArchiveEditor, EditOp, EditPlan, EditReport};
 pub use reader::{
-    ArchiveReader, Entries, EntryId, EntryMatches, EntryRef, OpenOptions, ScanStrategy,
-    VerificationFailure, VerificationReport,
+    ArchiveReader, Entries, EntryId, EntryMatches, EntryRef, OpenOptions, RecoveryRecord,
+    ScanStrategy, VerificationFailure, VerificationReport,
 };
 pub use reconstruct::{ReconstructReport, reconstruct_archive_path};
 pub use writer::{
@@ -464,6 +464,45 @@ impl RarArchive {
             return Err(error);
         }
         Ok(archive)
+    }
+
+    /// Inline recovery-record strength of the opened archive, for the
+    /// recreate paths that rebuild an archive from scratch (`rar a` replacing
+    /// its last member). The scan reads block headers only.
+    pub(crate) fn inline_recovery_record(&mut self) -> RarResult<Option<RecoveryRecord>> {
+        if self.is_rar13() {
+            return Ok(None);
+        }
+        if self.is_legacy() {
+            let password = self.password.as_deref().filter(|pw| !pw.is_empty());
+            let scan = crate::recovery::legacy_rr::scan_protect_file(
+                &self.path,
+                password.map(str::as_bytes),
+            )?;
+            return Ok(scan
+                .protect
+                .map(|protect| RecoveryRecord::Sectors(protect.rec_sectors)));
+        }
+        let mut reader = File::open(&self.path).map_err(RarError::Io)?;
+        let file_len = reader.metadata().map_err(RarError::Io)?.len();
+        crate::format::rar5::extract::open::read_main_header(self, &mut reader)?;
+        let mut blocks = BlockCursor::new(
+            file_len,
+            crate::format::rar5::extract::verify::archive_block_key(self)?,
+        );
+        while let Some(meta) = blocks.next(&mut reader)? {
+            if meta.block_type == BLOCK_TYPE_SERVICE_HEADER {
+                let name = parse_service_block_name(&meta.raw.header_data)?;
+                if name.as_deref() == Some("RR") {
+                    return Ok(parse_service_recovery_percent(&meta.raw.header_data)
+                        .map(RecoveryRecord::Percent));
+                }
+            }
+            if meta.block_type == BLOCK_TYPE_END_ARCHIVE {
+                break;
+            }
+        }
+        Ok(None)
     }
 
     /// Prepare an archive for appending: verify it is modifiable, capture

@@ -290,3 +290,64 @@ fn chain_range_walks_across_a_non_solid_directory() {
         "the walk must cross the non-solid directory to the real chain head"
     );
 }
+
+/// Changing the comment of a multi-volume set is supported on RAR5 too: the
+/// rewrite re-emits the CMT block and keeps the archive-level solid flag on
+/// every volume's main header.
+#[test]
+fn multivolume_comment_change_rewrites_the_set() {
+    use crate::archive::{ArchiveEditor, ArchiveWriter, discover_volumes};
+    use crate::{CompressionLevel, EditPlan, EntryWriteOptions, WriterOptions};
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("mv-cmt-change.rar");
+    {
+        let stored = || EntryWriteOptions::new().compression_level(CompressionLevel::STORE);
+        let mut writer = ArchiveWriter::create_with(
+            &base,
+            WriterOptions::new()
+                .volume_size(32 * 1024)
+                .solid_mode(crate::SolidMode::Continuous),
+        )
+        .unwrap();
+        writer
+            .add_bytes("a.bin", &vec![7u8; 100 * 1024], stored())
+            .unwrap();
+        writer
+            .add_bytes("b.bin", &vec![8u8; 16 * 1024], stored())
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    let volumes = discover_volumes(&base);
+    assert!(volumes.len() > 1, "precondition: multi-volume set");
+    for volume in &volumes {
+        assert!(
+            RarArchive::open(volume).unwrap().archive_solid,
+            "every volume's main header must carry the solid flag"
+        );
+    }
+
+    let mut editor = ArchiveEditor::open(&volumes[0]).unwrap();
+    editor
+        .apply(EditPlan::new().set_comment(b"new comment".to_vec()))
+        .unwrap();
+    drop(editor);
+
+    let after = discover_volumes(&base);
+    for volume in &after {
+        assert!(
+            RarArchive::open(volume).unwrap().archive_solid,
+            "the comment rewrite must keep the solid flag"
+        );
+    }
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive.get_comment().unwrap().as_deref(),
+        Some(b"new comment".as_slice())
+    );
+    assert_eq!(
+        archive.test().unwrap().1,
+        0,
+        "the rewritten set must verify"
+    );
+}

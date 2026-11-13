@@ -44,11 +44,6 @@ impl RarArchive {
                 "recovery percent must be in 0..=100",
             ));
         }
-        if self.volume_paths.len() > 1 && comment.is_some() {
-            return Err(RarError::unsupported(
-                "comment changes are not supported for multi-volume archives",
-            ));
-        }
         self.ensure_write_ctx();
         if (!renames.is_empty() || !versions.is_empty() || force_rr.is_some() || comment.is_some())
             && self.main_header_is_locked()?
@@ -256,12 +251,6 @@ impl RarArchive {
     ) -> RarResult<()> {
         let rename_map = (!map.is_empty()).then_some(map);
         let version_map = (!versions.is_empty()).then_some(versions);
-        // Comment changes are validated out of the multi-volume path above
-        // (`rewrite_multivolume` cannot carry them).
-        debug_assert!(
-            self.volume_paths.len() <= 1 || comment.is_none(),
-            "comment edits must be single-volume"
-        );
         if self.volume_paths.len() > 1 {
             // The volume-set rewriter carries renames but not version
             // records (official RAR refuses to modify volume sets at all).
@@ -279,7 +268,7 @@ impl RarArchive {
                 return Err(RarError::ArchiveLocked);
             }
             self.carry_multivolume_recovery(force_rr)?;
-            self.rewrite_multivolume(&deleted, chains, rename_map)?;
+            self.rewrite_multivolume(&deleted, chains, rename_map, comment)?;
         } else {
             let src_path = self.path.clone();
             let (mut staged, file) = crate::fs::atomic::StagedFile::create(&src_path)?;
