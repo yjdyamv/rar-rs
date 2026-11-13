@@ -27,12 +27,16 @@ use crate::parallel::extraction_pool;
 /// path; larger archives stream sequentially to stay bounded.
 #[cfg(feature = "parallel")]
 const PARALLEL_BUFFER_LIMIT: u64 = 256 * 1024 * 1024;
+/// Per-member verify outcome keyed by catalog index.
+#[cfg(feature = "parallel")]
+type VerifyBatch = Vec<(usize, RarResult<()>)>;
+
 /// Parallel extraction only engages for at least this many members...
 #[cfg(feature = "parallel")]
 const PARALLEL_MIN_MEMBERS: usize = 4;
 /// ...and at least this much total unpacked data (Rayon overhead amortized).
 #[cfg(feature = "parallel")]
-const PARALLEL_MIN_UNPACKED: u64 = 64 * 1024 * 1024;
+const PARALLEL_MIN_UNPACKED: u64 = 8 * 1024 * 1024;
 
 /// Destination resolution outcome for one member; the serial and parallel
 /// extraction paths share it so `-e`, `-o-` and `-or` behave identically.
@@ -711,6 +715,135 @@ fn extract_all_parallel(
         finish_member(cx, idx, &entry, dest_path, &mut report)?;
     }
     Ok(Some(report))
+}
+
+/// Verify the listed catalog indices in parallel, or `None` when the
+/// archive is not eligible (callers then take the serial path).
+///
+/// The gates mirror [`extract_all_parallel`]: RAR5, at least
+/// [`PARALLEL_MIN_MEMBERS`] members, single-chunk non-solid members, no
+/// progress callback (progress is per-member and ordered), and a bounded
+/// in-memory budget. Packed payloads are read sequentially because a single
+/// `Engine` cursor cannot be shared across workers; decoding and integrity
+/// checking — the CPU-bound part — then runs on the Rayon pool.
+///
+/// Results are returned in the caller's index order with the decoded bytes
+/// discarded, so a `t` run holds at most the packed payloads plus the
+/// largest member buffer per worker.
+#[cfg(feature = "parallel")]
+pub(crate) fn verify_indices_parallel(
+    cx: &mut dyn Engine,
+    indices: &[usize],
+    opts: &crate::options::ExtractOptions,
+) -> RarResult<Option<VerifyBatch>> {
+    use rayon::prelude::*;
+
+    if !crate::format::shared::extract::supports_parallel_extract(cx)
+        || indices.len() < PARALLEL_MIN_MEMBERS
+        || cx.progress_slot().is_some()
+        || opts.on_progress.is_some()
+    {
+        return Ok(None);
+    }
+    if opts.prompt_overwrite {
+        return Ok(None);
+    }
+    let mut total_packed = 0u64;
+    let mut total_unpacked = 0u64;
+    for &idx in indices {
+        let Some(entry) = cx.entries().get(idx) else {
+            return Ok(None);
+        };
+        if crate::format::rar5::extract::solid::is_solid_chain_member(cx, idx) {
+            return Ok(None);
+        }
+        total_packed = total_packed.saturating_add(entry.header.packed_size);
+        total_unpacked = total_unpacked.saturating_add(entry.header.unpacked_size);
+        if total_packed > PARALLEL_BUFFER_LIMIT || total_unpacked > PARALLEL_BUFFER_LIMIT {
+            return Ok(None);
+        }
+    }
+    if total_unpacked < PARALLEL_MIN_UNPACKED {
+        return Ok(None);
+    }
+    if let Some(limit) = opts.max_total_unpacked_bytes
+        && total_unpacked > limit
+    {
+        return Err(RarError::limit_exceeded(
+            limit,
+            "total unpacked size exceeds limit",
+        ));
+    }
+
+    // Phase 1: read + decrypt payloads through the single engine cursor.
+    let mut payloads = Vec::with_capacity(indices.len());
+    for &idx in indices {
+        cx.check_cancel()?;
+        payloads.push((
+            idx,
+            crate::format::rar5::extract::decode::read_packed_data(cx, idx)?,
+        ));
+    }
+    let headers: Vec<FileHeader> = payloads
+        .iter()
+        .map(|(idx, _)| cx.entries()[*idx].header.clone())
+        .collect();
+
+    // Phase 2: decode + integrity-check in parallel. Every worker owns its
+    // header/payload and drops the decoded bytes as soon as the hashes are
+    // computed.
+    let results = extraction_pool(opts.threads).install(|| {
+        payloads
+            .into_par_iter()
+            .enumerate()
+            .map(|(slot, (idx, payload))| {
+                let hdr = &headers[slot];
+                let outcome = (|| -> RarResult<()> {
+                    if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
+                        return Err(RarError::limit_exceeded(
+                            MAX_DICT_SIZE_LOG as u64,
+                            format!(
+                                "{}: dictionary size log {} exceeds supported maximum {}",
+                                hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
+                            ),
+                        ));
+                    }
+                    let _ = capped_dict_bytes(hdr, opts.max_dict_size)?;
+                    if let Some(limit) = opts.max_unpacked_bytes
+                        && hdr.unpacked_size > limit
+                    {
+                        return Err(RarError::limit_exceeded(
+                            limit,
+                            format!(
+                                "{}: unpacked size {} exceeds limit",
+                                hdr.name, hdr.unpacked_size
+                            ),
+                        ));
+                    }
+                    let mut data = Vec::new();
+                    if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
+                        crate::format::rar5::payload::decode_member(
+                            hdr, &payload, None, &mut data,
+                        )?;
+                    }
+                    let crc = crc32fast::hash(&data);
+                    let blake = hdr
+                        .hash_value
+                        .map(|_| crate::format::rar5::blake2sp::hash(&data));
+                    verify_integrity_for(
+                        hdr,
+                        crc,
+                        blake,
+                        payload.params.as_ref(),
+                        payload.keys.as_ref(),
+                    )
+                })();
+                (idx, outcome)
+            })
+            .collect()
+    });
+    cx.check_cancel()?;
+    Ok(Some(results))
 }
 
 /// Extract an entry selected by its archive-order catalog index.

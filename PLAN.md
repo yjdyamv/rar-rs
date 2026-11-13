@@ -229,12 +229,23 @@ packed 流 FNV 全等（`examples/ratiocheck.rs` 的 hash 列），`slot_pricer_
 −6.3%、x86syn −3.0%、 text −1.4%、mixed/random 持平。边界与「别改回去」见
 `docs/PITFALLS.md` 「槽步进定价的融合版」条）。
 
+24 **并行校验**（`t` 走新的 `verify_indices_parallel`：RAR5、非固实、单块成员、
+≥4 成员、≥8 MiB 解压量、无进度回调、packed+unpacked ≤256 MiB 时，先在串行
+`Engine` 游标上把所有成员负载读出解密，再交给 Rayon 并行解码+校验，解码结果
+算完 CRC/Blake 立即丢弃；逐成员错误仍按目录顺序汇总。8 个 System32 DLL、87 MB、
+`-m3 -mc-`：`t -idq` 327 ms → 205 ms，同批 `UnRAR.exe t` 317 ms；带滤波器语料
+同口径 327 → 205 ms。`parallel` 特性下生效，`cargo test --features parallel`
+覆盖；资格门槛与顺序语义见 `docs/PITFALLS.md`「并行校验的资格门槛」条。整档
+`x` 的旧并行路径仍保留 `chunks.len() == 1` 限制——多块大成员并行读入再落盘
+实测反而慢 3%（写盘是瓶颈）。
+
 **解压基线**（`cargo run --release --example decode_bench`，自建语料，packed
 比例 29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74
 MB/s， 总体约 81 MB/s。同一批归档交给官方 `UnRAR.exe` 并扣掉其 0.10 s 进程启动：
 150 / 340 / 165 MB/s——即**纯解码**我们落后 1.9–3.7×。端到端的 `x`/`t`
 对比没有意义 （官方那 0.10 s 常数比 8 MiB
-的解码时间还长），看进度只能看这个进程内基线。
+的解码时间还长），看进度只能看这个进程内基线。当前本机（第 1–24 项落地后）：
+text 315 / mixed 336 / code-ish 266 MB/s，总体约 300 MB/s（同上三语料、release）。
 
 **当前基线**（创建侧为第 22 项落地后，`ntoskrnl.exe` 12.5 MiB、`-ma5`、本机 16
 核、 release，每档两次取最快；「MT」= 默认线程、「seq」=

@@ -525,3 +525,89 @@ mod parallel_extract_options {
         }
     }
 }
+
+mod parallel_verify {
+    #![cfg(feature = "parallel")]
+    //! `t` runs go through the parallel verifier for eligible RAR5 sets:
+    //! payloads are read on the serial engine cursor, then decoded and
+    //! integrity-checked on the Rayon pool. It must report exactly the same
+    //! outcome as the serial per-member loop, including a single corrupt
+    //! member among healthy ones.
+
+    #[allow(unused_imports)]
+    use super::*;
+
+    use rar_rs::{ArchiveReader, ArchiveWriter, EntryWriteOptions, ExtractOptions};
+
+    const MEMBERS: usize = 5;
+    // 4 MiB each: 20 MiB total crosses the parallel gate while staying far
+    // below the packed+unpacked memory budget.
+    const MEMBER_BYTES: usize = 4 * 1024 * 1024;
+
+    fn noise(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn build(path: &std::path::Path) -> Vec<Vec<u8>> {
+        let mut writer = ArchiveWriter::create_with(path, rar_rs::WriterOptions::default())
+            .expect("create archive");
+        let payloads: Vec<Vec<u8>> = (0..MEMBERS)
+            .map(|i| noise(0x51ED_2701 + i as u64, MEMBER_BYTES))
+            .collect();
+        for (i, payload) in payloads.iter().enumerate() {
+            let name = format!("m{i}.bin");
+            writer
+                .add_bytes(&name, payload, EntryWriteOptions::default())
+                .expect("add member");
+        }
+        writer.finish().expect("finish archive");
+        payloads
+    }
+
+    #[test]
+    fn parallel_verify_checks_every_member() {
+        let dir = make_temp_dir();
+        let path = dir.path().join("verify.rar");
+        build(&path);
+
+        let mut reader = ArchiveReader::open(&path).expect("open");
+        let report = reader
+            .verify_with_options(ExtractOptions::default())
+            .expect("verify");
+        assert_eq!(report.checked(), MEMBERS);
+        assert!(report.is_ok(), "{report:?}");
+        assert_eq!(report.passed(), MEMBERS);
+    }
+
+    #[test]
+    fn parallel_verify_reports_a_corrupt_member() {
+        let dir = make_temp_dir();
+        let path = dir.path().join("verify-bad.rar");
+        build(&path);
+
+        // Flip one payload byte inside `m2.bin`'s data block. The block CRC
+        // (not the header CRC) fails, so the member decodes and then fails
+        // verification, exactly like the serial loop.
+        let mut bytes = std::fs::read(&path).expect("read");
+        let (start, end) = support::file_block_span(&bytes, "m2.bin");
+        assert!(end - start > 1024, "member span {start}..{end}");
+        bytes[(start + end) / 2] ^= 0xFF;
+        std::fs::write(&path, &bytes).expect("write");
+
+        let mut reader = ArchiveReader::open(&path).expect("open");
+        let report = reader
+            .verify_with_options(ExtractOptions::default())
+            .expect("verify");
+        assert_eq!(report.checked(), MEMBERS);
+        assert_eq!(report.failed(), 1, "{report:?}");
+        assert_eq!(report.passed(), MEMBERS - 1);
+    }
+}

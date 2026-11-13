@@ -635,6 +635,52 @@ impl ArchiveReader {
         }
 
         let mut failures = Vec::new();
+
+        // The parallel verifier decodes members on the Rayon pool after
+        // reading their payloads through the single engine cursor. It
+        // reports `None` for ineligible archives (solid chains, progress
+        // callbacks, oversized sets) and the serial loop below handles those
+        // unchanged, including the cancellation behaviour.
+        #[cfg(feature = "parallel")]
+        {
+            let resolved: Option<Vec<usize>> =
+                ids.iter().map(|id| self.resolve_id(*id).ok()).collect();
+            if let Some(indices) = resolved
+                && indices.len() == ids.len()
+                && let Some(results) =
+                    crate::format::shared::extract::members::verify_indices_parallel(
+                        &mut self.archive,
+                        &indices,
+                        &options,
+                    )?
+            {
+                for (idx, result) in results {
+                    if let Err(error) = result {
+                        if matches!(error, RarError::Cancelled) {
+                            return Err(error);
+                        }
+                        let id = indices
+                            .iter()
+                            .position(|candidate| *candidate == idx)
+                            .map(|slot| ids[slot])
+                            .ok_or_else(|| {
+                                RarError::invalid_state(
+                                    "parallel verification reported an unknown member",
+                                )
+                            })?;
+                        failures.push(VerificationFailure {
+                            entry_id: id,
+                            error,
+                        });
+                    }
+                }
+                return Ok(VerificationReport {
+                    checked: ids.len(),
+                    failures,
+                });
+            }
+        }
+
         let mut sink = std::io::sink();
 
         for &id in ids {

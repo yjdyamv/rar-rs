@@ -14,7 +14,7 @@ RAR/UNRAR binary is required at runtime.
   read / extract; RAR 1.3 / 1.4 / 1.5 / 2.x / 4.x creation (`-ma13` / `-ma14` /
   `-ma15` / `-ma2` / `-ma4`), including legacy codecs, solid chains and volumes.
 - **Compression** — native LZSS+Huffman and PPMd, levels 0–5, dictionary
-  controls, delta/x86 filters, solid archives, parallel compression.
+  controls, delta/x86 filters, solid archives, parallel compression and verification.
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
   comments, SFX handling, string search, symlinks and hardlinks.
 - **Encryption** — file-level AES-256 with a chained HMAC-SHA256 KDF, plus
