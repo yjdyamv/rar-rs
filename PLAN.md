@@ -247,6 +247,18 @@ verify/extract）；门槛与顺序语义见 `docs/PITFALLS.md`「并行校验�
 官方 UnRAR 1080 ms；`x` 1196 ms（官方 1208 ms，写盘受限）。8×90 MB / 200 MB
 packed 的档预算只够 3 路并发，`t` 1358 ms（串行口径）→ 1245 ms，官方 1964 ms。
 
+25 **固实档滤波**（`-ma5 -s`）：成员在共享 LZ 窗口里照常整员试 Delta→E8E9，
+命中后把滤波记录写到该成员数据前部，链状态继续（解码端按
+`block_start - member_start` 还原成员内坐标，分块/跨卷也成立）。探测在改动共享
+`EncoderState` 之前完成——落选方案无法从链里回滚；`-mc-`/`-mcd-`/`-mce-` 与
+`-mcd<N>+` 均生效（`solid_filter_specs` 读 `FilterOptions`）。87 MB 的 8 个
+System32 DLL、`-m3`：`-s` 26,918,320 → 24,631,445 B（−8.5%），同语料非固实
+24,261,788 B，官方固实 22,934,902 B。回归
+`rar5_solid_filters::solid_archive_filters_are_applied_and_roundtrip`。注意
+`add_bytes`（内存 API）仍不跑滤波，只有文件路径会试；官方 RAR 7 的固实压缩
+本身多线程（mt8 1.73 s / mt1 7.74 s，体积仅差 0.006%），我们的链仍逐成员串行，
+分段并行是后续项。
+
 **解压基线**（`cargo run --release --example decode_bench`，自建语料，packed
 比例 29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74
 MB/s， 总体约 81 MB/s。同一批归档交给官方 `UnRAR.exe` 并扣掉其 0.10 s 进程启动：

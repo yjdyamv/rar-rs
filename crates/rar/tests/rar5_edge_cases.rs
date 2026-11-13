@@ -1213,3 +1213,103 @@ mod model_api_compat {
         assert_eq!(chunk.packed_size, 23);
     }
 }
+
+mod rar5_solid_filters {
+    //! Solid RAR5 archives filter every member against one shared LZ window;
+    //! the filter records must stay decodable by our own reader and by
+    //! official UnRAR, and `-mc-` must still turn filtering off.
+
+    #[allow(unused_imports)] // the merged modules share the parent's support import
+    use super::*;
+
+    use rar_rs::{
+        ArchiveReader, ArchiveVersion, ArchiveWriter, CompressionLevel, EntryWriteOptions,
+        FilterMode, FilterOptions, SolidMode, WriterOptions,
+    };
+
+    /// x86-ish call sites with varying absolute targets: E8-filtering turns
+    /// the rel32 operands into near-constant values, so the archive gets
+    /// clearly smaller.
+    fn x86ish(len: usize, seed: u32) -> Vec<u8> {
+        let mut data = Vec::with_capacity(len + 16);
+        let mut address = 0x0040_0000u32.wrapping_add(seed);
+        while data.len() < len {
+            data.push(0xE8);
+            data.extend_from_slice(&address.to_le_bytes());
+            address = address.wrapping_add(0x10);
+            data.extend(std::iter::repeat_n(0x90, 11));
+        }
+        data.truncate(len);
+        data
+    }
+
+    fn build(
+        dir: &std::path::Path,
+        path: &std::path::Path,
+        payload: &[Vec<u8>],
+        filters: FilterOptions,
+    ) -> u64 {
+        let mut writer = ArchiveWriter::create_with(
+            path,
+            WriterOptions::new()
+                .compression(ArchiveVersion::V50)
+                .solid_mode(SolidMode::Continuous)
+                .filters(filters),
+        )
+        .unwrap();
+        for (index, data) in payload.iter().enumerate() {
+            let source = dir.join(format!("source{index}.bin"));
+            std::fs::write(&source, data).unwrap();
+            writer
+                .add_path(
+                    &source,
+                    EntryWriteOptions::new().compression_level(CompressionLevel::NORMAL),
+                )
+                .unwrap();
+        }
+        writer.finish().unwrap();
+        std::fs::metadata(path).unwrap().len()
+    }
+
+    #[test]
+    fn solid_archive_filters_are_applied_and_roundtrip() {
+        let dir = make_temp_dir();
+        let payload: Vec<Vec<u8>> = (0..3).map(|i| x86ish(300_000, i * 0x1000)).collect();
+        let filtered_path = dir.path().join("solid-filtered.rar");
+        let plain_path = dir.path().join("solid-plain.rar");
+        let filtered = build(
+            dir.path(),
+            &filtered_path,
+            &payload,
+            FilterOptions::default(),
+        );
+        let plain = build(
+            dir.path(),
+            &plain_path,
+            &payload,
+            FilterOptions {
+                delta: FilterMode::Disabled,
+                x86: FilterMode::Disabled,
+                delta_channels: None,
+            },
+        );
+        assert!(
+            filtered < plain,
+            "solid filtering should shrink the archive: {filtered} vs {plain}"
+        );
+        let mut reader = ArchiveReader::open(&filtered_path).unwrap();
+        assert!(reader.is_solid());
+        for (index, data) in payload.iter().enumerate() {
+            let entry = reader.unique_entry(&format!("source{index}.bin")).unwrap();
+            assert_eq!(reader.read_entry(entry).unwrap(), *data);
+        }
+        let mut plain_reader = ArchiveReader::open(&plain_path).unwrap();
+        assert!(plain_reader.is_solid());
+        let plain_ids: Vec<_> = plain_reader.entries().map(|entry| entry.id()).collect();
+        let mut plain_total = 0u64;
+        for id in plain_ids {
+            plain_total += plain_reader.read_entry(id).unwrap().len() as u64;
+        }
+        assert_eq!(plain_total, payload.iter().map(|d| d.len() as u64).sum());
+    }
+}

@@ -31,11 +31,13 @@ pub use chunked::{
 };
 pub use filter::{
     FILTER_PROBE_LEN, FilterProbe, MAX_FILTER_BLOCK_LENGTH, encode_with_auto_delta_filter,
-    encode_with_auto_x86_filter, encode_with_filters, encode_with_filters_mt,
-    filter_transform_wins, forced_combined_specs, member_filter_probes, pick_delta_channel,
+    encode_with_auto_x86_filter, encode_with_filters, encode_with_filters_continue,
+    encode_with_filters_mt, filter_transform_wins, forced_combined_specs, member_filter_probes,
+    pick_delta_channel,
 };
 pub(crate) use filter::{
-    delta_stream_window, forced_combined_stream_window, merge_ranges, x86_stream_window,
+    delta_stream_window, forced_combined_stream_window, merge_ranges, solid_filter_specs,
+    x86_stream_window,
 };
 #[cfg(test)]
 pub(crate) use parse::set_fast_path_enabled;

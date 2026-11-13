@@ -112,6 +112,25 @@ pub fn encode_with_filters(
     filters: &[FilterSpec],
     variant: ArchiveVersion,
 ) -> RarResult<Vec<u8>> {
+    let mut state = EncoderState::default();
+    encode_with_filters_into(data, method, dict_size_log, filters, variant, &mut state)
+}
+
+/// Like [`encode_with_filters`] but continues an existing solid chain.
+///
+/// `state` carries the shared LZ window, long-range history and repeat
+/// distances across member boundaries, exactly like the unfiltered solid
+/// path. Filter records stay member-relative; the decoder adds the member
+/// start when it sees them, so a filtered member can sit anywhere in a
+/// solid chain (that is how WinRAR writes solid archives).
+pub fn encode_with_filters_into(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    filters: &[FilterSpec],
+    variant: ArchiveVersion,
+    state: &mut EncoderState,
+) -> RarResult<Vec<u8>> {
     validate_filter_specs(data.len(), filters)?;
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
@@ -122,7 +141,7 @@ pub fn encode_with_filters(
             method,
             dict_size_log,
             DEFAULT_CHUNK_SIZE,
-            None,
+            Some(&mut *state),
             true,
             None,
             variant,
@@ -160,7 +179,6 @@ pub fn encode_with_filters(
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
 
-    let mut state = EncoderState::default();
     let mut filter_symbols: Vec<Symbol> = specs
         .iter()
         .map(|f| Symbol::Filter {
@@ -180,7 +198,7 @@ pub fn encode_with_filters(
         // Levels 2-5 use the optimal parse, like the unfiltered path.
         let mut symbols = if level >= 2 {
             find_matches_optimal(
-                &mut state,
+                &mut *state,
                 chunk,
                 super::parse::SequentialSearch {
                     limits: super::parse::MatchLimits {
@@ -199,7 +217,7 @@ pub fn encode_with_filters(
             )
         } else {
             find_matches_with_tail(
-                &mut state,
+                &mut *state,
                 chunk,
                 chain_len,
                 lazy_thresh,
@@ -237,6 +255,179 @@ pub fn encode_with_filters(
         chunk_start = chunk_end;
     }
     Ok(output)
+}
+
+/// Multi-threaded [`encode_with_filters_into`]: the transform runs first,
+/// then the transformed member is encoded across the pool while `state`
+/// carries the solid chain.
+#[cfg(not(feature = "parallel"))]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_with_filters_continue(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    filters: &[FilterSpec],
+    variant: ArchiveVersion,
+    _threads: usize,
+    state: &mut EncoderState,
+    _cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> RarResult<Vec<u8>> {
+    encode_with_filters_into(data, method, dict_size_log, filters, variant, state)
+}
+
+/// Multi-threaded [`encode_with_filters_into`]: the transform runs first,
+/// then the transformed member is encoded across the pool while `state`
+/// carries the solid chain.
+#[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_with_filters_continue(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    filters: &[FilterSpec],
+    variant: ArchiveVersion,
+    threads: usize,
+    state: &mut EncoderState,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> RarResult<Vec<u8>> {
+    if threads <= 1 || filters.is_empty() {
+        return encode_with_filters_into(data, method, dict_size_log, filters, variant, state);
+    }
+    validate_filter_specs(data.len(), filters)?;
+    if data.is_empty() {
+        return Ok(encode_empty_block(variant));
+    }
+    let mut specs: Vec<FilterSpec> = Vec::new();
+    for f in filters {
+        let mut start = f.block_start;
+        let mut remaining = f.block_length;
+        while remaining > 0 {
+            let len = remaining.min(MAX_FILTER_BLOCK_LENGTH);
+            specs.push(FilterSpec::new(f.filter_type, f.channels, start, len));
+            start = start.saturating_add(len);
+            remaining = remaining.saturating_sub(len);
+        }
+    }
+    let transformed = forward_transform(data, &specs);
+    let lead: Vec<Symbol> = specs
+        .iter()
+        .map(|f| Symbol::Filter {
+            block_start: f.block_start,
+            block_length: f.block_length,
+            filter_type: f.filter_type,
+            channels: f.channels,
+        })
+        .collect();
+    encode_chunked_mt_with_progress(
+        &transformed,
+        EncodeSpec {
+            method,
+            dict_size_log,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            is_final: true,
+            variant,
+            lead: Some(&lead),
+        },
+        state,
+        threads,
+        None,
+        cancel,
+    )
+}
+
+/// Filter specs for a member that will continue a solid chain.
+///
+/// The whole-member probes decide before the shared encoder state is
+/// touched, because a losing candidate cannot be "un-encoded" from a solid
+/// chain. Delta is probed first (correlated audio/raw data), then x86 — the
+/// same order as the standalone path — and a winner is emitted as one
+/// member-wide record (split into legal 256 KiB pieces by the encoder). The
+/// x86 transform is applied to the whole member rather than to detected code
+/// ranges; the probes' 1% margin keeps that from losing to plain LZSS.
+pub(crate) fn solid_filter_specs(
+    data: &[u8],
+    method: u8,
+    dict_size_log: u8,
+    variant: ArchiveVersion,
+    policy: &crate::options::FilterOptions,
+) -> RarResult<Option<Vec<FilterSpec>>> {
+    use crate::options::FilterMode;
+    if data.len() <= 5 || data.len() > u32::MAX as usize {
+        return Ok(None);
+    }
+    if policy.delta == FilterMode::Disabled && policy.x86 == FilterMode::Disabled {
+        return Ok(None);
+    }
+    let probes = member_filter_probes(data);
+    if probes.is_empty() {
+        return Ok(None);
+    }
+    // A forced delta filter applies to the whole member without a probe.
+    if policy.delta == FilterMode::Forced {
+        let channels = match policy.delta_channels {
+            Some(channels) => channels,
+            None => pick_delta_channel(data, method, dict_size_log, variant)?.unwrap_or(4),
+        };
+        return Ok(Some(vec![FilterSpec::new(
+            FILTER_DELTA,
+            channels,
+            0,
+            data.len() as u32,
+        )]));
+    }
+    if policy.delta == FilterMode::Auto
+        && let Some(channels) = pick_delta_channel(data, method, dict_size_log, variant)?
+        && filter_transform_wins(&probes, method, dict_size_log, variant, |bytes, offset| {
+            delta_stream_window(bytes, offset, channels).0
+        })?
+        .is_some()
+    {
+        return Ok(Some(vec![FilterSpec::new(
+            FILTER_DELTA,
+            channels,
+            0,
+            data.len() as u32,
+        )]));
+    }
+    if policy.x86 == FilterMode::Disabled {
+        return Ok(None);
+    }
+    // A forced x86 filter applies to the whole member without a probe.
+    if policy.x86 == FilterMode::Forced {
+        return Ok(Some(vec![FilterSpec::new(
+            FILTER_E8E9,
+            0,
+            0,
+            data.len() as u32,
+        )]));
+    }
+    let mut ranges = crate::codec::common::filters::auto_x86_filter_ranges(data, true);
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+    merge_ranges(&mut ranges);
+    let wins = filter_transform_wins(&probes, method, dict_size_log, variant, |bytes, offset| {
+        let mut buffer = bytes.to_vec();
+        let piece = apply_filter_encode(FILTER_E8E9, &mut buffer, 0, offset);
+        buffer.copy_from_slice(&piece);
+        buffer
+    })?;
+    if wins.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(
+        ranges
+            .iter()
+            .map(|range| {
+                FilterSpec::new(
+                    FILTER_E8E9,
+                    0,
+                    range.start.min(u32::MAX as usize) as u32,
+                    range.len().min(u32::MAX as usize) as u32,
+                )
+            })
+            .collect(),
+    ))
 }
 
 /// Forward-transform `data` per filter spec, in place on a copy. Regions

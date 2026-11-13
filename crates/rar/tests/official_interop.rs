@@ -2498,3 +2498,63 @@ fn official_unrar_validates_rar5_multivolume_append() {
         assert_eq!(&reader.read_entry(id).unwrap(), expected, "{name}");
     }
 }
+
+/// Solid archives carry filter records inside the shared LZ window; official
+/// UnRAR must decode them and return the same bytes.
+#[test]
+fn official_unrar_validates_rar5_solid_filters() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let dir = make_temp_dir();
+    let path = dir.path().join("solid-filters.rar");
+    let x86ish = |seed: u32| -> Vec<u8> {
+        let mut data = Vec::with_capacity(301_000);
+        let mut address = 0x0040_0000u32.wrapping_add(seed);
+        while data.len() < 300_000 {
+            data.push(0xE8);
+            data.extend_from_slice(&address.to_le_bytes());
+            address = address.wrapping_add(0x10);
+            data.extend(std::iter::repeat_n(0x90, 11));
+        }
+        data.truncate(300_000);
+        data
+    };
+    let payload: Vec<Vec<u8>> = (0..3).map(|i| x86ish(i * 0x1000)).collect();
+    let mut writer = rar_rs::ArchiveWriter::create_with(
+        &path,
+        rar_rs::WriterOptions::new()
+            .compression(rar_rs::ArchiveVersion::V50)
+            .solid_mode(rar_rs::SolidMode::Continuous),
+    )
+    .unwrap();
+    for (index, data) in payload.iter().enumerate() {
+        let source = dir.path().join(format!("source{index}.bin"));
+        std::fs::write(&source, data).unwrap();
+        writer
+            .add_path(
+                &source,
+                rar_rs::EntryWriteOptions::new()
+                    .compression_level(rar_rs::CompressionLevel::NORMAL),
+            )
+            .unwrap();
+    }
+    writer.finish().unwrap();
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg("-idq")
+        .arg(&path)
+        .status()
+        .expect("failed to run official unrar");
+    assert!(
+        status.success(),
+        "official unrar rejected a solid archive with filter records"
+    );
+    let mut reader = rar_rs::ArchiveReader::open(&path).unwrap();
+    assert!(reader.is_solid());
+    for (index, data) in payload.iter().enumerate() {
+        let entry = reader.unique_entry(&format!("source{index}.bin")).unwrap();
+        assert_eq!(reader.read_entry(entry).unwrap(), *data);
+    }
+}
