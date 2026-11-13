@@ -481,11 +481,16 @@ pub(crate) fn edit_rar4(
 
     // Multi-volume sets: official `rar` supports the header-level edits on a
     // volume set (rewriting each volume without rebalancing) but refuses
-    // member delete/append ("Cannot modify volume"). Ours mirrors that:
-    // renames are handled per volume; delete and the not-yet-supported
-    // comment/recovery changes are refused clearly.
+    // member delete/append ("Cannot modify volume"). Ours mirrors that for
+    // renames and the archive comment, which stay byte-surgical per volume;
+    // anything that changes member data or the per-volume record strength
+    // (delete, member comment, explicit `-rr`) repacks the whole set.
     if archive.volume_paths.len() > 1 || layout.main_flags & MHD_VOLUME != 0 {
-        if deleted_count > 0 {
+        let whole_set = deleted_count > 0
+            || force_rr.is_some()
+            || force_sectors.is_some()
+            || !member_comments.is_empty();
+        if whole_set {
             let (rename_map, renamed) =
                 crate::archive::rename::build_rename_map(&archive.entries, renames)?;
             return repack_multivolume_archive(
@@ -501,11 +506,6 @@ pub(crate) fn edit_rar4(
                 layout.main_flags & MHD_SOLID != 0,
                 layout.main_flags & MHD_NEWNUMBERING == 0,
             );
-        }
-        if force_rr.is_some() || force_sectors.is_some() || !member_comments.is_empty() {
-            return Err(RarError::unsupported(
-                "recovery-record and per-member-comment edits on multi-volume RAR4 archives are not supported (a volume set uses .rev recovery volumes)",
-            ));
         }
         let (rename_map, _) = crate::archive::rename::build_rename_map(&archive.entries, renames)?;
         return apply_multivolume_edits(archive, &rename_map, comment);

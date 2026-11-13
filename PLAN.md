@@ -329,8 +329,10 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
   时每卷各带一份记录，`.rev` 可同时用（RAR5 与 legacy RAR4
   同形）；编辑一个**已带记录**的卷集时按原强度重建记录，不是拒绝项。
 - **在 RAR4 卷集上显式改变恢复强度**（`rar rr <set> 20`、`-rr10`
-  配已有卷集）：我们拒绝并提示「分卷用 `.rev` 恢复卷」。官方对自己的卷集一律
-  `Cannot modify volume`，连逐卷记录都不重建，所以这里没有可对齐的行为。
+  配已有卷集）：**已实现**——与分卷删除/append 共用整集重打包，按新强度逐卷
+  重建记录（`-rr<N>` 每卷 N 个 parity 扇区，`-rr<N>%` 按每卷比例），并同步重建
+  `.rev`；官方对自己的卷集一律 `Cannot modify volume`，所以这是超出官方的行为，
+  测试 `multivolume_rr_*`。
 - **PROTECT_HEAD（RAR 2.5 时代）记录**：已支持就地编辑/追加/重打包，按原强度
   重建为 NEWSUB `Protect+`（见 [`docs/PITFALLS.md`](docs/PITFALLS.md)）。
 

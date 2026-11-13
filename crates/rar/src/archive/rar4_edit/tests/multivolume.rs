@@ -543,3 +543,250 @@ fn multivolume_append_keeps_header_encryption() {
         );
     }
 }
+
+/// An explicit recovery strength on a volume set repacks the whole set: every
+/// volume carries the new strength and every payload survives.
+#[test]
+fn multivolume_rr_strength_change_rebuilds_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rr-change.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                volume_size: Some(32 * 1024),
+                recovery_percent: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive
+            .add_bytes("a.bin", &patterned(120_000, 251), 0)
+            .unwrap();
+        archive
+            .add_bytes("b.bin", &patterned(100_000, 253), 0)
+            .unwrap();
+        archive.close().unwrap();
+    }
+    let before = discover_volumes(&base);
+    assert!(before.len() > 1);
+    let before_max = before
+        .iter()
+        .filter_map(|volume| {
+            crate::recovery::legacy_rr::scan_protect_file(volume, None)
+                .unwrap()
+                .protect
+                .map(|protect| protect.rec_sectors)
+        })
+        .max()
+        .unwrap();
+
+    let mut editor = ArchiveEditor::open(&before[0]).unwrap();
+    editor.apply(EditPlan::new().set_recovery(20)).unwrap();
+    drop(editor);
+
+    let after = discover_volumes(&base);
+    assert!(after.len() > 1, "the set stopped being multi-volume");
+    let mut after_max = 0u32;
+    for volume in &after {
+        let protect = crate::recovery::legacy_rr::scan_protect_file(volume, None)
+            .unwrap()
+            .protect
+            .unwrap_or_else(|| panic!("{} lost its recovery record", volume.display()));
+        after_max = after_max.max(protect.rec_sectors);
+    }
+    assert!(
+        after_max >= 8 && after_max > before_max,
+        "20% should be much stronger than 3% ({after_max} vs {before_max})"
+    );
+
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive
+            .read_with_options("a.bin", Default::default())
+            .unwrap(),
+        patterned(120_000, 251)
+    );
+    assert_eq!(
+        archive
+            .read_with_options("b.bin", Default::default())
+            .unwrap(),
+        patterned(100_000, 253)
+    );
+}
+
+/// A bare volume set gains per-volume records when a strength is requested.
+#[test]
+fn multivolume_rr_added_to_bare_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rr-add.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                volume_size: Some(32 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive
+            .add_bytes("a.bin", &patterned(120_000, 251), 0)
+            .unwrap();
+        archive
+            .add_bytes("b.bin", &patterned(100_000, 253), 0)
+            .unwrap();
+        archive.close().unwrap();
+    }
+    let before = discover_volumes(&base);
+    for volume in &before {
+        assert!(
+            crate::recovery::legacy_rr::scan_protect_file(volume, None)
+                .unwrap()
+                .protect
+                .is_none(),
+            "precondition: no record yet"
+        );
+    }
+
+    let mut editor = ArchiveEditor::open(&before[0]).unwrap();
+    editor.apply(EditPlan::new().set_recovery(5)).unwrap();
+    drop(editor);
+
+    let after = discover_volumes(&base);
+    for volume in &after {
+        let protect = crate::recovery::legacy_rr::scan_protect_file(volume, None)
+            .unwrap()
+            .protect
+            .unwrap_or_else(|| panic!("{} has no record", volume.display()));
+        assert!(protect.rec_sectors >= 2);
+    }
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive
+            .read_with_options("a.bin", Default::default())
+            .unwrap(),
+        patterned(120_000, 251)
+    );
+    assert_eq!(
+        archive
+            .read_with_options("b.bin", Default::default())
+            .unwrap(),
+        patterned(100_000, 253)
+    );
+}
+
+/// A per-member comment edit on a volume set repacks the set and lands in the
+/// rebuilt member header.
+#[test]
+fn multivolume_member_comment_repacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("mc.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                volume_size: Some(32 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive
+            .add_bytes("a.bin", &patterned(120_000, 251), 0)
+            .unwrap();
+        archive
+            .add_bytes("b.bin", &patterned(100_000, 253), 0)
+            .unwrap();
+        archive.close().unwrap();
+    }
+    let before = discover_volumes(&base);
+    let mut editor = ArchiveEditor::open(&before[0]).unwrap();
+    let a = editor.unique_entry("a.bin").unwrap();
+    editor
+        .apply(EditPlan::new().set_member_comment(a, b"member comment".to_vec()))
+        .unwrap();
+    drop(editor);
+
+    let after = discover_volumes(&base);
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    let entry = archive
+        .entries
+        .iter()
+        .find(|entry| entry.name() == "a.bin")
+        .unwrap();
+    assert_eq!(
+        entry.header.comment.as_deref(),
+        Some(b"member comment".as_slice())
+    );
+    assert_eq!(
+        archive
+            .read_with_options("a.bin", Default::default())
+            .unwrap(),
+        patterned(120_000, 251)
+    );
+}
+
+/// Changing the record strength rescales the `.rev` set too: a fully
+/// protected set keeps one recovery volume per data volume after the repack
+/// (the volume count changes because every volume's record grew).
+#[test]
+fn multivolume_rr_change_rescales_recovery_volumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rr-scale.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                volume_size: Some(16 * 1024),
+                recovery_percent: Some(3),
+                recovery_volumes_percent: Some(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive
+            .add_bytes("big.bin", &patterned(300_000, 251), 0)
+            .unwrap();
+        archive.close().unwrap();
+    }
+    let rev_count = |dir: &std::path::Path| {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "rev")
+            })
+            .count()
+    };
+    let before = discover_volumes(&base);
+    assert!(before.len() > 3, "precondition: {before:?}");
+    assert_eq!(
+        rev_count(dir.path()),
+        before.len(),
+        "precondition: one .rev per data volume"
+    );
+
+    let mut editor = ArchiveEditor::open(&before[0]).unwrap();
+    editor.apply(EditPlan::new().set_recovery(20)).unwrap();
+    drop(editor);
+
+    let after = discover_volumes(&base);
+    assert!(
+        after.len() > before.len(),
+        "the stronger record must split the set ({} -> {})",
+        before.len(),
+        after.len()
+    );
+    assert_eq!(
+        rev_count(dir.path()),
+        after.len(),
+        "the .rev set must keep covering every data volume"
+    );
+}

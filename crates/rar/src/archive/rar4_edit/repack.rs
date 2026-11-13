@@ -586,6 +586,7 @@ pub(crate) fn repack_multivolume_archive(
             .cloned()
             .zip(finals.iter().cloned())
             .collect();
+        let old_volume_count = archive.volume_paths.len();
         let existing_revs = crate::fs::volume::stale_volume_paths(
             &parent,
             &base,
@@ -593,6 +594,19 @@ pub(crate) fn repack_multivolume_archive(
             &archive.volume_paths,
             &crate::recovery::rev3::rev_name_belongs_to_set,
         );
+        // Keep the set's recovery *ratio*: a set with one `.rev` per data
+        // volume stays fully protected after the repack, while a sparser set
+        // scales its redundancy with the new volume count. Reusing the old
+        // count would leave the extra volumes of a grown set unprotected.
+        let recovery_count = if existing_revs.is_empty() {
+            0
+        } else if existing_revs.len() >= old_volume_count.max(1) {
+            finals.len()
+        } else {
+            (existing_revs.len() * finals.len())
+                .div_ceil(old_volume_count.max(1))
+                .max(1)
+        };
         let retire = crate::fs::volume::stale_volume_paths(
             &parent,
             &base,
@@ -602,10 +616,7 @@ pub(crate) fn repack_multivolume_archive(
         );
         crate::fs::atomic::commit_files(&parent, &base, &install, &retire)?;
         if !existing_revs.is_empty() {
-            match crate::recovery::rev3::build_recovery_volumes_for_set(
-                &finals,
-                existing_revs.len(),
-            ) {
+            match crate::recovery::rev3::build_recovery_volumes_for_set(&finals, recovery_count) {
                 Ok(written) => {
                     let retire: Vec<std::path::PathBuf> = existing_revs
                         .iter()
