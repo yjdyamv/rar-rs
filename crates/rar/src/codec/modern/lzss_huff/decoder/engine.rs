@@ -11,7 +11,7 @@
 use super::*;
 
 use super::symbols::{Symbol, SymbolReader, SymbolState};
-use crate::codec::common::filters::apply_filter_decode;
+use crate::codec::common::filters::apply_filter_decode_in_place;
 use crate::error::{RarError, RarResult};
 
 /// Decode RAR5 compressed data into a buffer.
@@ -158,31 +158,43 @@ fn run_engine(
     let mut pending_filters: Vec<PendingFilter> = Vec::new();
     let mut sink = OutputSink::new(writer, output_start);
     let mut copied_abs = output_start;
+    // Mirror of `window.total_written()`, advanced right where the bytes are
+    // produced. Reading it back through the window on every symbol cost two
+    // field loads per literal (distance check + staging check) for a value
+    // only this loop changes.
+    let mut written = output_start;
 
     while let Some(symbol) = symbols.next() {
         match symbol {
-            Symbol::Literal(byte) => window.put_byte(byte),
+            Symbol::Literal(byte) => {
+                window.put_byte(byte);
+                written += 1;
+            }
             Symbol::Match { dist, len, .. } => {
                 // Reject distances no real encoder can emit: zero (a match
                 // must refer back) and those beyond the retained window /
                 // produced output. `copy_match` masks the source address, so
                 // an out-of-window match would silently decode aliased ring
                 // bytes instead of failing like unrar/libarchive.
-                let max_dist = window.total_written().min(window.capacity() as u64);
+                let max_dist = written.min(window.capacity() as u64);
                 if dist == 0 || dist > max_dist {
                     return Err(RarError::format(format!(
                         "match distance {dist} exceeds the {max_dist}-byte window"
                     )));
                 }
                 window.copy_match(dist as usize, len as usize);
+                written += len as u64;
             }
-            Symbol::Filter(filter) => pending_filters.push(filter),
-            Symbol::BlockStart(_) => {}
+            Symbol::Filter(filter) => pending_filters.push(*filter),
         }
 
         // Copy newly produced window bytes into staging before the ring can
         // overwrite them, then drain as far as filters allow.
-        let written = window.total_written();
+        debug_assert_eq!(
+            written,
+            window.total_written(),
+            "window write counter diverged"
+        );
         debug_assert_eq!(
             written,
             symbols.pos(),
@@ -288,16 +300,12 @@ impl<'a> OutputSink<'a> {
             // is stream-absolute for solid chains — subtract the member
             // start to get the member-relative offset. `staging_start`
             // advances as data drains, so it is not a valid base here.
-            let filtered = apply_filter_decode(
+            apply_filter_decode_in_place(
                 filt.filter_type,
                 region,
                 filt.channels,
                 filt.block_start - self.member_start,
             )?;
-            if filtered.len() != region.len() {
-                return Err(RarError::format("RAR5 filter changed output length"));
-            }
-            region.copy_from_slice(&filtered);
             filt.applied = true;
         }
         Ok(())

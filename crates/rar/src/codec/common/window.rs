@@ -70,7 +70,11 @@ impl SlidingWindow {
     /// Write a single literal byte.
     #[inline]
     pub fn put_byte(&mut self, b: u8) {
-        self.buf[self.pos] = b;
+        // `pos` is kept masked below `buf.len()`, so the bounds check here is
+        // pure overhead on the hottest path in the decoder.
+        unsafe {
+            *self.buf.get_unchecked_mut(self.pos) = b;
+        }
         self.pos = (self.pos + 1) & self.mask;
         self.total_written += 1;
     }
@@ -92,11 +96,7 @@ impl SlidingWindow {
                 self.buf.copy_within(src..src + length, dst);
             } else {
                 // Overlapping: the output repeats with period `dist`, so copy
-                // that period once and then double the copied prefix. A run of
-                // `length` identical bytes (dist == 1) costs log2(length)
-                // memmoves instead of one per byte, which is the difference
-                // between a memmove call per output byte and a handful per
-                // match.
+                // that period once and then double the copied prefix.
                 let mut done = dist;
                 self.buf.copy_within(src..src + done, dst);
                 while done < length {
@@ -128,8 +128,7 @@ impl SlidingWindow {
     }
 
     /// Append `length` bytes starting from a total-written offset to `out`,
-    /// straight from the ring — no intermediate buffer, which matters because
-    /// the decoder pushes every output byte through here.
+    /// straight from the ring — no intermediate buffer.
     pub fn append_output_into(&self, start_total: u64, length: usize, out: &mut Vec<u8>) {
         let buf_size = self.buf.len();
         assert!(length <= buf_size, "requested output exceeds window size");

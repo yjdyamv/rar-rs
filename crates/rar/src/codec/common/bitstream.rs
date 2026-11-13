@@ -25,11 +25,24 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Top the buffer up to at least 56 bits while the stream has whole bytes
-    /// left. Eight bytes are loaded at once and shifted into place, which is
-    /// one unaligned load per eight symbols instead of one per peek.
+    /// Top the buffer up so at least 32 bits are available.
+    ///
+    /// The hot path only checks the buffer level: after a refill it holds at
+    /// least 56 bits, and a symbol consumes at most 16, so three peeks in a
+    /// row skip the refill entirely. The actual byte pull is out of line.
     #[inline(always)]
     fn fill(&mut self) {
+        if self.bits < 32 {
+            self.fill_impl();
+        }
+    }
+
+    /// Pull whole bytes until the buffer holds at least 56 bits.
+    ///
+    /// Eight bytes are loaded at once and shifted into place, which is one
+    /// unaligned load per several symbols instead of one per peek.
+    #[inline(always)]
+    fn fill_impl(&mut self) {
         while self.bits < 56 {
             if self.pos + 8 <= self.data.len() {
                 let word = u64::from_be_bytes(
@@ -91,7 +104,7 @@ impl<'a> BitReader<'a> {
         }
         if n <= 32 {
             let value = self.peek_bits(n)?;
-            self.skip_bits(n as u32);
+            self.skip_bits_unchecked(n as u32);
             return Ok(value);
         }
         let mut result: u32 = 0;
@@ -111,10 +124,11 @@ impl<'a> BitReader<'a> {
             return Ok(0);
         }
         self.fill();
-        if (n as usize) > self.bits_remaining() || (n as u32) > self.bits {
-            // Near the end the buffer may hold fewer than `n` bits while the
-            // stream has them in unloaded bytes, but `fill` already drained
-            // every whole byte, so anything left is the padded tail.
+        if (n as u32) > self.bits {
+            // `fill` drained every whole byte, so a buffer holding fewer than
+            // `n` bits means only the padded tail is left. The previous
+            // `bits_remaining()` check computed `bits + (len - pos) * 8` for
+            // every peek; the hot path peeks once per symbol.
             return Err("BitReader: end of data");
         }
         Ok((self.buf >> (64 - n as u32)) as u32)
@@ -154,6 +168,20 @@ impl<'a> BitReader<'a> {
             self.buf <<= n;
             self.bits -= n;
         }
+    }
+
+    /// Skip `n` bits that are already in the buffer.
+    ///
+    /// Unlike [`Self::skip_bits`] this does not refill or test for the buffer
+    /// running dry: callers use it only after a peek proved `n` bits are
+    /// available. Shifting by `n` (at most 32 here) is defined, and the
+    /// asserted preconditions keep the buffer level consistent.
+    #[inline(always)]
+    pub fn skip_bits_unchecked(&mut self, n: u32) {
+        debug_assert!(n <= self.bits, "skip past the buffered bits");
+        debug_assert!(n < 64, "shift by n bits must stay defined");
+        self.buf <<= n;
+        self.bits -= n;
     }
 
     /// Advance to the next byte boundary.
