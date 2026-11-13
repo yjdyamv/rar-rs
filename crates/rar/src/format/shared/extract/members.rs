@@ -29,22 +29,35 @@ use crate::parallel::extraction_pool;
 #[cfg(feature = "parallel")]
 const PARALLEL_PEAK_BUDGET: u64 = 512 * 1024 * 1024;
 
-/// Estimated resident bytes of a parallel run: the payloads that are
-/// pre-read (RAR5 only — legacy workers read their own volume) plus the
-/// decoded buffers of the largest `workers` members, which is the worst
-/// case the pool can hold at once.
-#[cfg(feature = "parallel")]
-fn parallel_peak_bytes(packed_total: u64, unpacked: &[u64], workers: usize) -> u64 {
-    let mut largest: Vec<u64> = unpacked.to_vec();
-    largest.sort_unstable_by(|a, b| b.cmp(a));
-    let live: u64 = largest.into_iter().take(workers.max(1)).sum();
-    packed_total.saturating_add(live)
-}
-
-/// Worker count the pool will actually use for this run.
+/// Worker count the pool would use if the budget allowed it.
 #[cfg(feature = "parallel")]
 fn parallel_workers(opts: &crate::options::ExtractOptions) -> usize {
     extraction_pool(opts.threads).current_num_threads().max(1)
+}
+
+/// How many members may decode at once without exceeding the budget: the
+/// pre-read payloads stay resident for the whole run, so the remaining
+/// budget is filled with the largest decoded buffers first (the worst case
+/// for a pool that picks up members in arbitrary order). Returns `0` when
+/// not even one member fits.
+#[cfg(feature = "parallel")]
+fn live_workers_for(packed_total: u64, sizes: &[u64], workers: usize, budget: u64) -> usize {
+    let mut largest: Vec<u64> = sizes.to_vec();
+    largest.sort_unstable_by(|a, b| b.cmp(a));
+    let mut resident = packed_total;
+    let mut live = 0usize;
+    for size in largest {
+        if live == workers {
+            break;
+        }
+        let next = resident.saturating_add(size);
+        if next > budget {
+            break;
+        }
+        resident = next;
+        live += 1;
+    }
+    live
 }
 /// Per-member verify outcome keyed by catalog index.
 #[cfg(feature = "parallel")]
@@ -673,7 +686,16 @@ fn extract_all_parallel(
         sizes.push(e.header.unpacked_size);
     }
     let packed_budget = if rar5 { total_packed } else { 0 };
-    if parallel_peak_bytes(packed_budget, &sizes, parallel_workers(&opts)) > PARALLEL_PEAK_BUDGET {
+    // Throttle concurrency to the memory budget instead of sending the whole
+    // archive to the serial path: 8×90 MB members with 200 MB of pre-read
+    // payloads run three at a time instead of one after another.
+    let live = live_workers_for(
+        packed_budget,
+        &sizes,
+        parallel_workers(&opts),
+        PARALLEL_PEAK_BUDGET,
+    );
+    if live < 2 {
         return Ok(None);
     }
     if total_unpacked < PARALLEL_MIN_UNPACKED {
@@ -913,7 +935,16 @@ pub(crate) fn verify_indices_parallel(
         sizes.push(entry.header.unpacked_size);
     }
     let packed_budget = if rar5 { total_packed } else { 0 };
-    if parallel_peak_bytes(packed_budget, &sizes, parallel_workers(opts)) > PARALLEL_PEAK_BUDGET {
+    // Throttle concurrency to the memory budget instead of sending the whole
+    // archive to the serial path: 8×90 MB members with 200 MB of pre-read
+    // payloads run three at a time instead of one after another.
+    let live = live_workers_for(
+        packed_budget,
+        &sizes,
+        parallel_workers(opts),
+        PARALLEL_PEAK_BUDGET,
+    );
+    if live < 2 {
         return Ok(None);
     }
     if total_unpacked < PARALLEL_MIN_UNPACKED {
@@ -965,7 +996,7 @@ pub(crate) fn verify_indices_parallel(
     // Phase 2: decode + integrity-check in parallel. Every worker owns its
     // header/payload and drops the decoded bytes as soon as the hashes are
     // computed.
-    let results = extraction_pool(opts.threads).install(|| {
+    let results = extraction_pool(Some(live)).install(|| {
         payloads
             .into_par_iter()
             .enumerate()
@@ -1379,21 +1410,18 @@ fn finish_member(
 
 #[cfg(all(test, feature = "parallel"))]
 mod parallel_budget_tests {
-    use super::parallel_peak_bytes;
+    use super::live_workers_for;
 
+    /// Budget 100, packed 10: 90 + 10 fits one member, 45 + 10 fits two,
+    /// and the largest are admitted first (worst case for the pool).
     #[test]
-    fn peak_counts_packed_plus_the_largest_live_members() {
-        // Three members decode at once at most: only the three largest
-        // decoded buffers are resident together.
-        assert_eq!(
-            parallel_peak_bytes(100, &[80, 10, 5, 70, 60], 3),
-            100 + 80 + 70 + 60
-        );
-        // A single worker holds the largest member only.
-        assert_eq!(parallel_peak_bytes(0, &[80, 10, 5], 1), 80);
-        // Fewer members than workers: everything can be live at once.
-        assert_eq!(parallel_peak_bytes(7, &[3, 4], 8), 14);
-        // Saturating arithmetic keeps a pathological header from wrapping.
-        assert_eq!(parallel_peak_bytes(u64::MAX - 1, &[8], 1), u64::MAX);
+    fn concurrency_is_throttled_by_the_resident_budget() {
+        assert_eq!(live_workers_for(10, &[90, 45, 45], 8, 100), 1);
+        assert_eq!(live_workers_for(10, &[45, 45, 45, 45], 8, 100), 2);
+        assert_eq!(live_workers_for(10, &[10, 10, 10, 10], 3, 100), 3);
+        // Nothing fits: the caller must fall back to the serial path.
+        assert_eq!(live_workers_for(100, &[90], 8, 150), 0);
+        // Fewer members than workers: everything may run at once.
+        assert_eq!(live_workers_for(0, &[1, 2, 3], 24, 8), 3);
     }
 }
