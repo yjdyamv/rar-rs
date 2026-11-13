@@ -7,13 +7,15 @@ use crate::error::{RarError, RarResult};
 
 /// Apply the inverse filter (for decompression).
 ///
-/// Filter types 4-7 (ARMT/IA64/PPC/SPARC) are defined in the RAR5 format
-/// notes but are never produced by any implementation (WinRAR 7.23 only
-/// emits Delta/E8/E8E9; ARM was disabled in 5.80; unrar 5.9.4/7.23 and
-/// 7-Zip implement and produce nothing beyond type 3). We refuse them
-/// explicitly instead of silently returning unfiltered data, so a
-/// hypothetical archive using them fails with a clear error rather than a
-/// CRC mismatch.
+/// Filter types 4-7 are never produced by any RAR5 writer: the public
+/// format notes define only 0-3 (Delta, E8, E8E9, ARM), and the names
+/// unrar uses for 4-7 internally (AUDIO, RGB, ITANIUM, TEXT) are
+/// encoder-selection ids, not on-disk values. WinRAR 7.30, 5.50 and 5.00
+/// emit only 0-2 on audio, bitmap, ARM and x86 inputs (ARM has been
+/// disabled since 5.80); 7-Zip likewise implements nothing beyond type 3.
+/// We refuse them explicitly instead of silently returning unfiltered
+/// data, so a hypothetical archive using them fails with a clear error
+/// rather than a CRC mismatch.
 pub fn apply_filter_decode(
     filter_type: u8,
     data: &mut [u8],
