@@ -236,8 +236,10 @@ packed 流 FNV 全等（`examples/ratiocheck.rs` 的 hash 列），`slot_pricer_
 `-m3 -mc-`：`t -idq` 327 ms → 205 ms，同批 `UnRAR.exe t` 317 ms；带滤波器语料
 同口径 327 → 205 ms。`parallel` 特性下生效，`cargo test --features parallel`
 覆盖；资格门槛与顺序语义见 `docs/PITFALLS.md`「并行校验的资格门槛」条。整档
-`x` 的旧并行路径仍保留 `chunks.len() == 1` 限制——多块大成员并行读入再落盘
-实测反而慢 3%（写盘是瓶颈）。
+`x` 改成**解码与落盘流水线**：工作线程解码，主线程按目录顺序做 `-o-`/`-kb`/
+覆盖裁决并写盘（有界 sync_channel + 小重排窗，资格条件不变），同一 DLL 档
+384 ms → 306 ms，同批 `UnRAR x` 343 ms。多块成员（`chunks.len() != 1`）仍走
+串行流式（内存/顺序语义不值得为它冒风险）。
 
 **解压基线**（`cargo run --release --example decode_bench`，自建语料，packed
 比例 29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74
