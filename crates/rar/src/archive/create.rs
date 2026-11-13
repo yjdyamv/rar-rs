@@ -748,6 +748,9 @@ impl RarArchive {
         if recovery {
             arch_flags |= ARCHIVE_FLAG_RECOVERY;
         }
+        if self.write_ctx().solid.mode || self.archive_solid {
+            arch_flags |= ARCHIVE_FLAG_SOLID;
+        }
         let (hdr, qo_field, rr_field) = crate::format::rar5::headers::locator::build_main_header(
             arch_flags,
             &[],

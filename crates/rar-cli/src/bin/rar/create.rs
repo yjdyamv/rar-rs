@@ -672,10 +672,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         incoming_names.sort();
         let version_spec = misc.version_control.clone();
         let apply = |staged_path: &std::path::Path| {
-            // Capture the set's volume size before the delete. Replacing the
-            // last remaining member erases the staged archive, and the
-            // recreate below must keep the original split instead of
-            // collapsing the whole set into one volume.
+            // Capture the set's shape and the archive-level metadata before
+            // the delete. Replacing the last remaining member erases the
+            // staged archive, so the recreate below has to put back the
+            // volume size, format, solid flag, header encryption, comment and
+            // recovery record the original carried.
             let staged_volumes = rar_rs::discover_volumes(staged_path);
             let set_volume_size = (staged_volumes.len() > 1)
                 .then(|| {
@@ -686,6 +687,46 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                         .min()
                 })
                 .flatten();
+            let old_numbering = staged_volumes.len() > 1
+                && staged_volumes.iter().skip(1).all(|volume| {
+                    !volume
+                        .file_name()
+                        .map(|name| {
+                            name.to_string_lossy()
+                                .to_ascii_lowercase()
+                                .contains(".part")
+                        })
+                        .unwrap_or(false)
+                });
+            // A repacked set can be renamed to `part01`, so address the
+            // staged set by its base name from here on.
+            let staged_base = {
+                let name = staged_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let stem = name.split(".part").next().unwrap_or(&name);
+                let stem = stem.strip_suffix(".rar").unwrap_or(stem);
+                staged_path.with_file_name(format!("{stem}.rar"))
+            };
+            let (original_version, original_solid, headers_encrypted, archive_comment, recovery) = {
+                let mut source_opts = rar_rs::OpenOptions::default();
+                if let Some(pw) = &password {
+                    source_opts = source_opts.password(pw.clone());
+                }
+                let mut source = rar_rs::ArchiveReader::open_with(staged_path, source_opts)
+                    .map_err(|e| CliError::from(e).context("replace"))?;
+                let version = source.entries().next().map(|entry| entry.version());
+                let solid = source.is_solid();
+                let headers = source.headers_encrypted();
+                let comment = source
+                    .comment()
+                    .map_err(|e| CliError::from(e).context("replace"))?;
+                let recovery = source
+                    .recovery_record()
+                    .map_err(|e| CliError::from(e).context("replace"))?;
+                (version, solid, headers, comment, recovery)
+            };
             let mut editor = open_editor(staged_path, password.as_deref())?;
             if let Some(spec) = &version_spec {
                 let edits = crate::edit::version_edits(&editor, &incoming_names, spec)
@@ -711,7 +752,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             // `rar d`); when the replacement removed the only members,
             // recreate it instead of appending to a file that no longer
             // exists.
-            let writer = if staged_path.exists() {
+            let (report, recreated) = if staged_path.exists() {
                 let mut append_opts = rar_rs::AppendOptions::new();
                 if let Some(pw) = &password {
                     append_opts = append_opts.password(pw.clone());
@@ -719,19 +760,79 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 if let Some(size) = dictionary {
                     append_opts = append_opts.dictionary_size(size);
                 }
-                crate::ops::append_writer(staged_path, append_opts)
-                    .map_err(|e| CliError::from(e).context("open"))?
+                let writer = crate::ops::append_writer(staged_path, append_opts)
+                    .map_err(|e| CliError::from(e).context("open"))?;
+                (write_members(writer)?, false)
             } else {
-                // Rebuild with the set shape captured above; plain
-                // `rar a` never changes an existing set's volume size.
-                let recreate_opts = match set_volume_size {
-                    Some(size) => opts.clone().volume_size(size),
+                // Rebuild with the shape and metadata captured above; plain
+                // `rar a` never changes an existing archive's format, volume
+                // size, solid flag or encryption.
+                let mut recreate = match original_version {
+                    // The legacy writer rejects RAR5-only knobs (quick-open,
+                    // dictionaries, Blake2) that `opts` carries when the CLI
+                    // defaulted to a RAR5 format, so build a minimal option
+                    // set from what actually applies.
+                    Some(version) if version.is_legacy() || version.is_rar13() => {
+                        let mut minimal = rar_rs::WriterOptions::new().compression(version);
+                        if let Some(pw) = &password {
+                            minimal = minimal.password(pw.clone());
+                        }
+                        minimal
+                    }
+                    Some(version) => opts.clone().compression(version),
                     None => opts.clone(),
                 };
-                crate::ops::create_writer(staged_path, recreate_opts)
-                    .map_err(|e| CliError::from(e).context("create"))?
+                if let Some(size) = set_volume_size {
+                    recreate = recreate.volume_size(size);
+                }
+                if old_numbering && original_version.is_some_and(|version| version.is_legacy()) {
+                    recreate = recreate.old_numbering(true);
+                }
+                if original_solid && solid_mode == rar_rs::SolidMode::Disabled {
+                    recreate = recreate.solid_mode(rar_rs::SolidMode::Continuous);
+                }
+                if headers_encrypted {
+                    recreate = recreate
+                        .encrypt_headers(true)
+                        // Quick-open records live outside the encrypted
+                        // header and cannot accompany it.
+                        .quick_open(false)
+                        .quick_open_automatic(false);
+                }
+                // An explicit `-rr` on the command line wins over the record
+                // the erased archive carried.
+                if args.recovery_percent.is_none() && args.recovery_sectors.is_none() {
+                    match recovery {
+                        Some(rar_rs::RecoveryRecord::Percent(percent)) => {
+                            recreate = recreate.recovery_percent(percent);
+                        }
+                        Some(rar_rs::RecoveryRecord::Sectors(sectors)) => {
+                            recreate = recreate.recovery_sectors(sectors);
+                        }
+                        None => {}
+                    }
+                }
+                let writer = crate::ops::create_writer(staged_path, recreate)
+                    .map_err(|e| CliError::from(e).context("create"))?;
+                (write_members(writer)?, true)
             };
-            write_members(writer)
+            if recreated && let Some(comment) = archive_comment {
+                // The writer only queues comments for the formats whose
+                // comment lives in the main header; everything else attaches
+                // it through the editor role. The recreated set's first
+                // volume may be named `part1`/`part01`, and the editor opens
+                // a concrete path (unlike the reader, it does not resolve a
+                // base name), so discover it first.
+                let first = rar_rs::discover_volumes(&staged_base)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| staged_base.clone());
+                let mut editor = open_editor(&first, password.as_deref())?;
+                editor
+                    .apply(rar_rs::EditPlan::new().set_comment(comment))
+                    .map_err(|e| CliError::from(e).context("replace"))?;
+            }
+            Ok(report)
         };
         let volume_set = rar_rs::discover_volumes(std::path::Path::new(archive_path)).len() > 1;
         if volume_set {

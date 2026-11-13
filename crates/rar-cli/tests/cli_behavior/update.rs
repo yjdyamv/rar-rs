@@ -935,3 +935,108 @@ fn cli_update_test_after_and_delete_after() {
     let id = rar.unique_entry("u.txt").unwrap();
     assert_eq!(rar.read_entry(id).unwrap(), b"v2");
 }
+
+/// Recreating a set after every member is replaced must keep the
+/// archive-level metadata the old set carried: format, solid flag, header
+/// encryption, comment and recovery record.
+#[test]
+fn cli_a_replacing_last_member_keeps_archive_metadata() {
+    for (format, hp) in [("-ma4", false), ("-ma5", false), ("-ma5", true)] {
+        let dir = make_temp_dir();
+        let original = pseudo_random_bytes(40 * 1024, 406);
+        let replacement = pseudo_random_bytes(40 * 1024, 407);
+        for name in ["a.bin", "b.bin"] {
+            std::fs::write(dir.path().join(name), &original).unwrap();
+        }
+        let base = dir.path().join("meta");
+        let password = hp.then_some("secret");
+
+        let mut create = std::process::Command::new(RAR_CLI);
+        create
+            .args(["a", format, "-s", "-rr5%", "-v8k", "-idq"])
+            .current_dir(dir.path());
+        if let Some(pw) = password {
+            create.arg(format!("-hp{pw}"));
+        }
+        let status = create.arg(&base).args(["a.bin", "b.bin"]).status().unwrap();
+        assert!(status.success(), "create failed for {format}");
+
+        let first = rar_rs::discover_volumes(&base)[0].clone();
+        let mut comment = std::process::Command::new(RAR_CLI);
+        comment.current_dir(dir.path()).args(["c"]);
+        if let Some(pw) = password {
+            comment.arg(format!("-p{pw}"));
+        }
+        let mut child = comment
+            .arg(&first)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"kept comment\n")
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "c failed for {format}");
+
+        for name in ["a.bin", "b.bin"] {
+            std::fs::write(dir.path().join(name), &replacement).unwrap();
+        }
+        let mut replace = std::process::Command::new(RAR_CLI);
+        replace.args(["a", "-idq"]);
+        if let Some(pw) = password {
+            replace.arg(format!("-p{pw}"));
+        }
+        let out = replace
+            .arg(&base)
+            .args(["a.bin", "b.bin"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "replace failed for {format}:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let after = rar_rs::discover_volumes(&base);
+        assert!(
+            after.len() > 1,
+            "{format}: replacing the last member collapsed the set to one volume"
+        );
+        let mut open = rar_rs::OpenOptions::default();
+        if let Some(pw) = password {
+            open = open.password(pw.to_string());
+        }
+        let mut reader = rar_rs::ArchiveReader::open_with(&after[0], open).unwrap();
+        assert!(reader.is_solid(), "{format}: solid flag was dropped");
+        assert_eq!(
+            reader.headers_encrypted(),
+            hp,
+            "{format}: header encryption was dropped"
+        );
+        assert_eq!(
+            reader.comment().unwrap().as_deref(),
+            Some(b"kept comment\n".as_slice()),
+            "{format}: comment was dropped"
+        );
+        assert!(
+            reader.recovery_record().unwrap().is_some(),
+            "{format}: recovery record was dropped"
+        );
+        let version = reader.entries().next().unwrap().version();
+        assert_eq!(
+            version.is_legacy(),
+            format == "-ma4",
+            "{format}: format changed"
+        );
+        let mut names: Vec<String> = reader.entries().map(|entry| entry.name().into()).collect();
+        names.sort();
+        assert_eq!(names, ["a.bin", "b.bin"], "{format}");
+        let entry = reader.unique_entry("a.bin").unwrap();
+        assert_eq!(reader.read_entry(entry).unwrap(), replacement, "{format}");
+    }
+}

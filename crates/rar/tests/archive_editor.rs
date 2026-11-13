@@ -975,7 +975,7 @@ fn combined_plan_with_comment_and_recovery_applies_atomically() {
 }
 
 #[test]
-fn comment_and_recovery_ops_refuse_multivolume_archives() {
+fn comment_and_recovery_ops_on_multivolume_archives() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("mv-cmt.rar");
     let mut archive =
@@ -995,27 +995,17 @@ fn comment_and_recovery_ops_refuse_multivolume_archives() {
         .collect();
     parts.sort();
     let first = parts.into_iter().next().expect("first volume");
-    let snapshot: Vec<_> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| (entry.file_name(), entry.path()))
-        .filter(|(_, path)| path.extension().is_some_and(|ext| ext == "rar"))
-        .map(|(name, path)| (name, std::fs::read(path).unwrap()))
-        .collect();
-
     let mut editor = ArchiveEditor::open(&first).unwrap();
-    assert!(matches!(
-        editor.apply(EditPlan::new().set_comment(b"x".to_vec())),
-        Err(RarError::Unsupported(_))
-    ));
-    let after: Vec<_> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| (entry.file_name(), entry.path()))
-        .filter(|(_, path)| path.extension().is_some_and(|ext| ext == "rar"))
-        .map(|(name, path)| (name, std::fs::read(path).unwrap()))
-        .collect();
-    assert_eq!(after, snapshot, "refused ops must not touch any volume");
+    editor
+        .apply(EditPlan::new().set_comment(b"x".to_vec()))
+        .unwrap();
+    drop(editor);
+    let mut reader = ArchiveReader::open(&first).unwrap();
+    assert_eq!(
+        reader.comment().unwrap(),
+        Some(b"x".to_vec()),
+        "the comment must land in the first volume"
+    );
 
     // A recovery record, on the other hand, is legal on a set: `-rr` with `-v`
     // gives every volume its own record (WinRAR's shape), so the rewrite

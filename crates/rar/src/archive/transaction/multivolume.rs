@@ -158,11 +158,17 @@ impl RarArchive {
         deleted: &[bool],
         chains: &[(usize, usize)],
         rename_map: Option<&std::collections::HashMap<usize, String>>,
+        comment: Option<&[u8]>,
     ) -> RarResult<()> {
         // Read the archive comment before the stream is redirected to the
         // staged set; it is re-emitted verbatim after the rebuilt main
-        // header so a delete does not silently drop it.
-        let comment = self.get_comment()?;
+        // header so a delete does not silently drop it. An explicit comment
+        // (including an empty one, which removes it) wins over the current
+        // one.
+        let comment = match comment {
+            Some(bytes) => Some(bytes.to_vec()),
+            None => self.get_comment()?,
+        };
         let orig_volumes = self.volume_paths.clone();
         let mut vol_sizes = Vec::with_capacity(orig_volumes.len());
         for vol in &orig_volumes {
