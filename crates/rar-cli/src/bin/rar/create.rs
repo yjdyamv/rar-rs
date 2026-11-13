@@ -651,12 +651,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // old member.
     let write_report = if existing {
         use std::collections::HashSet;
-        // Appending to a volume set would rewrite only the opened volume;
-        // refuse it up front like the library's append and the update path.
-        if args.volume_size.is_some()
-            || rar_rs::discover_volumes(std::path::Path::new(archive_path)).len() > 1
-        {
-            return Err("appending to multi-volume archives is not supported".into());
+        // The append repack keeps the original set shape (volume size and
+        // numbering); changing it would be a different, explicit operation.
+        if args.volume_size.is_some() {
+            return Err("changing the volume size of an existing archive is not supported".into());
         }
         let incoming: HashSet<String> = collected
             .iter()
@@ -668,51 +666,60 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         let mut incoming_names: Vec<String> = incoming.iter().cloned().collect();
         incoming_names.sort();
         let version_spec = misc.version_control.clone();
-        crate::transaction::update_archive_transactionally_with(
-            std::path::Path::new(archive_path),
-            |staged_path| {
-                let mut editor = open_editor(staged_path, password.as_deref())?;
-                if let Some(spec) = &version_spec {
-                    let edits = crate::edit::version_edits(&editor, &incoming_names, spec)
+        let apply = |staged_path: &std::path::Path| {
+            let mut editor = open_editor(staged_path, password.as_deref())?;
+            if let Some(spec) = &version_spec {
+                let edits = crate::edit::version_edits(&editor, &incoming_names, spec)
+                    .map_err(|e| CliError::from(e).context("replace"))?;
+                crate::edit::apply_version_edits(&mut editor, edits)
+                    .map_err(|e| e.context("replace"))?;
+            } else {
+                let to_drop: Vec<String> = editor
+                    .entries()
+                    .map(|entry| entry.name().to_string())
+                    .filter(|n| incoming.contains(n))
+                    .collect();
+                if !to_drop.is_empty() {
+                    let refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
+                    let plan = editor_delete_plan(&editor, &refs)
                         .map_err(|e| CliError::from(e).context("replace"))?;
-                    crate::edit::apply_version_edits(&mut editor, edits)
-                        .map_err(|e| e.context("replace"))?;
-                } else {
-                    let to_drop: Vec<String> = editor
-                        .entries()
-                        .map(|entry| entry.name().to_string())
-                        .filter(|n| incoming.contains(n))
-                        .collect();
-                    if !to_drop.is_empty() {
-                        let refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
-                        let plan = editor_delete_plan(&editor, &refs)
-                            .map_err(|e| CliError::from(e).context("replace"))?;
-                        editor
-                            .apply(plan)
-                            .map_err(|e| CliError::from(e).context("replace"))?;
-                    }
+                    editor
+                        .apply(plan)
+                        .map_err(|e| CliError::from(e).context("replace"))?;
                 }
-                // Deleting every member erases the staged archive (like
-                // `rar d`); when the replacement removed the only members,
-                // recreate it instead of appending to a file that no longer
-                // exists.
-                let writer = if staged_path.exists() {
-                    let mut append_opts = rar_rs::AppendOptions::new();
-                    if let Some(pw) = &password {
-                        append_opts = append_opts.password(pw.clone());
-                    }
-                    if let Some(size) = dictionary {
-                        append_opts = append_opts.dictionary_size(size);
-                    }
-                    crate::ops::append_writer(staged_path, append_opts)
-                        .map_err(|e| CliError::from(e).context("open"))?
-                } else {
-                    crate::ops::create_writer(staged_path, opts.clone())
-                        .map_err(|e| CliError::from(e).context("create"))?
-                };
-                write_members(writer)
-            },
-        )?
+            }
+            // Deleting every member erases the staged archive (like
+            // `rar d`); when the replacement removed the only members,
+            // recreate it instead of appending to a file that no longer
+            // exists.
+            let writer = if staged_path.exists() {
+                let mut append_opts = rar_rs::AppendOptions::new();
+                if let Some(pw) = &password {
+                    append_opts = append_opts.password(pw.clone());
+                }
+                if let Some(size) = dictionary {
+                    append_opts = append_opts.dictionary_size(size);
+                }
+                crate::ops::append_writer(staged_path, append_opts)
+                    .map_err(|e| CliError::from(e).context("open"))?
+            } else {
+                crate::ops::create_writer(staged_path, opts.clone())
+                    .map_err(|e| CliError::from(e).context("create"))?
+            };
+            write_members(writer)
+        };
+        let volume_set = rar_rs::discover_volumes(std::path::Path::new(archive_path)).len() > 1;
+        if volume_set {
+            crate::transaction::update_volume_set_transactionally_with(
+                std::path::Path::new(archive_path),
+                apply,
+            )?
+        } else {
+            crate::transaction::update_archive_transactionally_with(
+                std::path::Path::new(archive_path),
+                apply,
+            )?
+        }
     } else {
         write_members(created.expect("new archive opened above"))?
     };

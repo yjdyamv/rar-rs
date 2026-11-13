@@ -313,6 +313,7 @@ impl RarArchive {
         if let Some(write) = self.write.as_mut() {
             // A deferred solid append must not repack on the abort path.
             write.rar4.solid_append = false;
+            write.rar4.multivolume_append = false;
             write.rar4.solid_append_entries.clear();
         }
         if let Some(pending) = self
@@ -497,6 +498,16 @@ impl RarArchive {
                 // record, end-of-archive) are header-encrypted with the
                 // archive password, like everything already in the file.
                 self.header_encryption = true;
+            }
+            if prelude.whole_set {
+                // A volume set cannot grow in place: defer the append to a
+                // whole-set repack at close (the additions are buffered in
+                // the write context). The original volumes are left untouched
+                // until the repack replaces them atomically.
+                self.write_ctx_mut().rar4.solid_append = true;
+                self.write_ctx_mut().rar4.multivolume_append = true;
+                self.write_ctx_mut().rar4.solid_append_entries.clear();
+                return Ok(());
             }
             if prelude.solid {
                 // A solid chain cannot be streamed after: defer the append

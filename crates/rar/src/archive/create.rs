@@ -906,6 +906,49 @@ impl RarArchive {
     }
 
     fn finish_writing_rar4(&mut self) -> RarResult<()> {
+        if self
+            .write
+            .as_ref()
+            .is_some_and(|w| w.rar4.multivolume_append)
+        {
+            // Deferred multi-volume append: close repacks the whole set
+            // (surviving members + buffered additions) at the set's original
+            // volume size, numbering, solid flag, comment and per-volume
+            // recovery strength, then replaces the volumes atomically.
+            let additions = std::mem::take(&mut self.write_ctx_mut().rar4.solid_append_entries);
+            let comment = self.write_ctx_mut().rar4.writer_comment.take();
+            self.write_ctx_mut().rar4.solid_append = false;
+            self.write_ctx_mut().rar4.multivolume_append = false;
+            let none_deleted = vec![false; self.entries.len()];
+            // New numbering names volumes `.partNN.rar`; old numbering uses
+            // `.rar`/`.r00`. Derive it from the set we are replacing.
+            let old_numbering = self.volume_paths.iter().skip(1).all(|path| {
+                path.file_name()
+                    .map(|name| {
+                        !name
+                            .to_string_lossy()
+                            .to_ascii_lowercase()
+                            .contains(".part")
+                    })
+                    .unwrap_or(false)
+            });
+            let solid = self.archive_solid;
+            crate::archive::rar4_edit::repack_multivolume_archive(
+                self,
+                &none_deleted,
+                &std::collections::HashMap::new(),
+                comment.as_deref(),
+                None,
+                None,
+                0,
+                &additions,
+                &[],
+                solid,
+                old_numbering,
+            )?;
+            self.mode = Mode::Read;
+            return Ok(());
+        }
         if self.write.as_ref().is_some_and(|w| w.rar4.solid_append) {
             // Deferred solid append: close repacks the whole archive
             // (surviving members re-encoded in chain order + the buffered

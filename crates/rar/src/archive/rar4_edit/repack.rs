@@ -374,8 +374,10 @@ pub(crate) fn repack_multivolume_archive(
     force_rr: Option<u8>,
     force_sectors: Option<u32>,
     renamed: usize,
+    additions: &[SolidAppendEntry],
     member_comments: &[(usize, Option<Vec<u8>>)],
-    main_flags: u16,
+    solid: bool,
+    old_numbering: bool,
 ) -> RarResult<EditSummary> {
     for idx in rename_map.keys() {
         if deleted[*idx] {
@@ -419,7 +421,6 @@ pub(crate) fn repack_multivolume_archive(
     let first = first_volume(archive).to_path_buf();
     let parent = crate::fs::atomic::parent_dir(&first);
     let base = crate::fs::volume::volume_base_of(&first);
-    let old_numbering = main_flags & crate::format::rar4::MHD_NEWNUMBERING == 0;
 
     // Same volume ceiling as the original set (the largest existing volume):
     // a smaller one would split members the old set kept whole, a larger one
@@ -480,7 +481,6 @@ pub(crate) fn repack_multivolume_archive(
         });
     }
 
-    let solid = main_flags & crate::format::rar4::MHD_SOLID != 0;
     let staging = parent.join(format!(
         ".{base}.repack-{}",
         crate::fs::atomic::temp_suffix()
@@ -529,6 +529,19 @@ pub(crate) fn repack_multivolume_archive(
                     member.mtime_ns,
                     member.comment.clone(),
                     Some(member.attr),
+                )?;
+            }
+            for addition in additions {
+                archive.check_cancel()?;
+                crate::format::rar4::write::member::add_rar4_data(
+                    &mut writer,
+                    addition.name.clone(),
+                    addition.data.clone(),
+                    addition.level,
+                    addition.mtime,
+                    addition.mtime_ns,
+                    None,
+                    Some(addition.attr),
                 )?;
             }
             writer.close()?;

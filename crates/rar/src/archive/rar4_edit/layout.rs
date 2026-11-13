@@ -18,7 +18,7 @@ use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::{
     ENDARC_HEAD, EnvelopePolicy, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD,
-    MHD_VOLUME, NEWSUB_HEAD, Rar4Block, read_block,
+    NEWSUB_HEAD, Rar4Block, read_block,
 };
 use crate::fs::atomic::copy_prefix;
 
@@ -147,21 +147,6 @@ fn read_main_from_file(path: &Path, sfx_offset: u64) -> RarResult<(u64, Vec<u8>)
     let block = read_block(&mut file, false, None, EnvelopePolicy::PLAN)?
         .ok_or_else(|| RarError::format("RAR4: missing main header"))?;
     Ok((block.offset, block.header))
-}
-
-/// Refuse edits on multi-volume RAR4 sets. Used by the append path: like
-/// official `rar`, appending to a volume set is refused ("Cannot modify
-/// volume"); header-level renames and lock are handled per volume instead.
-pub(super) fn refuse_unsupported_containers(
-    archive: &RarArchive,
-    main_flags: u16,
-) -> RarResult<()> {
-    if archive.volume_paths.len() > 1 || main_flags & MHD_VOLUME != 0 {
-        return Err(RarError::unsupported(
-            "editing multi-volume RAR4 archives is not supported",
-        ));
-    }
-    Ok(())
 }
 
 /// Lock the archive (`rar k`): set the MHD_LOCK bit in the main header and

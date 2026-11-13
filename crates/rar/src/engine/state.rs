@@ -266,6 +266,11 @@ pub(crate) struct Rar4Append {
     /// Buffered additions for a deferred solid-append (see
     /// [`Self::solid_append`]).
     pub solid_append_entries: Vec<SolidAppendEntry>,
+    /// Appending to a multi-volume RAR4 set defers to a whole-set repack at
+    /// close (like [`Self::solid_append`], but the fresh archive keeps the
+    /// set's volume size, numbering, solid flag and per-volume recovery
+    /// records). The additions are buffered in `solid_append_entries`.
+    pub multivolume_append: bool,
     /// Archive-comment text queued for a RAR4 create/repack writer: emitted
     /// as a NEWSUB `CMT` block right before the first member (create writes
     /// members to a stream, so the comment must be queued before the first

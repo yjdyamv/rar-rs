@@ -116,8 +116,10 @@ Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   surgically rewrites non-solid ones
   ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)). Deleting from a
   multi-volume set repacks the whole set at its original volume size, keeping
-  the numbering, solid flag, comment and per-volume recovery records; appending
-  to a multi-volume set is refused, as the official `rar` does.
+  the numbering, solid flag, comment and per-volume recovery records. Appending
+  (`a`/`u`/`f`) takes the same whole-set repack, so a set grows while keeping
+  its shape; an explicit volume-size change (`-v` on an existing archive) is
+  still refused.
 - **RAR5 header-encrypted (`-hp`) sets**: rename, `ch`, archive comments,
   delete (single- and multi-volume) and `-k`/lock all work — rewritten headers
   are re-encrypted and the comment rides as a plaintext data area. Inline
