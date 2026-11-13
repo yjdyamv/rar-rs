@@ -89,7 +89,7 @@ fn open_read_rar4_with(cx: &mut dyn Engine, salvage: bool) -> RarResult<()> {
 /// being directly followed by a flagged member). Pre-RAR3 codecs never
 /// write that bit: when the main header carried MHD_SOLID, every
 /// compressed member of such a codec is part of one shared-window run.
-fn is_rar4_solid_member(cx: &dyn Engine, idx: usize) -> bool {
+pub(crate) fn is_rar4_solid_member(cx: &dyn Engine, idx: usize) -> bool {
     let hdr = &cx.entries()[idx].header;
     if !is_rar29_codec(hdr) {
         return cx.archive_solid() && !cx.entries()[idx].is_dir();
@@ -352,7 +352,7 @@ fn rar4_verify_crc(hdr: &FileHeader, data: &[u8]) -> RarResult<()> {
 }
 
 /// Compare a member's stored checksum with the computed one.
-fn verify_member_crc(hdr: &FileHeader, actual: u32) -> RarResult<()> {
+pub(crate) fn verify_member_crc(hdr: &FileHeader, actual: u32) -> RarResult<()> {
     if let Some(expected) = hdr.crc32_val
         && actual != expected
     {

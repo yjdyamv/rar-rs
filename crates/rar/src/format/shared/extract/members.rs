@@ -31,6 +31,89 @@ const PARALLEL_BUFFER_LIMIT: u64 = 256 * 1024 * 1024;
 #[cfg(feature = "parallel")]
 type VerifyBatch = Vec<(usize, RarResult<()>)>;
 
+/// Where a parallel worker gets a member's payload from.
+#[cfg(feature = "parallel")]
+enum ParallelPayload {
+    /// RAR5: pre-read and decrypted through the single engine cursor.
+    Modern(DecryptedPayload),
+    /// Legacy: the worker opens volume 0 itself and the reader pulls the
+    /// split chunks (and later volumes) it needs.
+    Legacy,
+}
+
+/// State shared by the legacy parallel workers.
+#[cfg(feature = "parallel")]
+struct LegacyParallelContext {
+    volume_paths: Vec<PathBuf>,
+    password: Option<String>,
+    max_packed_bytes: u64,
+}
+
+/// Whether `idx` belongs to a solid run in either family. Solid chains
+/// share decoder state and must stay on the sequential path.
+#[cfg(feature = "parallel")]
+fn parallel_solid_member(cx: &dyn Engine, idx: usize) -> bool {
+    if cx.is_legacy() {
+        crate::format::rar4::extract::is_rar4_solid_member(cx, idx)
+    } else {
+        crate::format::rar5::extract::solid::is_solid_chain_member(cx, idx)
+    }
+}
+
+#[cfg(feature = "parallel")]
+fn legacy_parallel_context(cx: &mut dyn Engine) -> Option<LegacyParallelContext> {
+    if !cx.is_legacy() {
+        return None;
+    }
+    let (volume_paths, password) = {
+        let p = cx.parts();
+        (p.volume_paths.to_vec(), p.password.map(str::to_owned))
+    };
+    Some(LegacyParallelContext {
+        volume_paths,
+        password,
+        max_packed_bytes: crate::format::shared::extract::max_packed_bytes(cx),
+    })
+}
+
+/// Decode one non-solid legacy member from its own volume handle: reads
+/// and decrypts the packed chunks (later volumes on demand), decodes, and
+/// verifies the header CRC32.
+#[cfg(feature = "parallel")]
+fn decode_legacy_parallel(
+    ctx: &LegacyParallelContext,
+    hdr: &FileHeader,
+    chunks: &[crate::model::DataChunk],
+    opts: &crate::options::ExtractOptions,
+) -> RarResult<Vec<u8>> {
+    if let Some(limit) = opts.max_unpacked_bytes
+        && hdr.unpacked_size > limit
+    {
+        return Err(RarError::limit_exceeded(
+            limit,
+            format!(
+                "{}: unpacked size {} exceeds limit",
+                hdr.name, hdr.unpacked_size
+            ),
+        ));
+    }
+    let mut file = File::open(&ctx.volume_paths[0])?;
+    let data = crate::format::rar4::decode_member_bytes(
+        &mut file,
+        &ctx.volume_paths,
+        chunks,
+        hdr,
+        crate::format::rar4::MemberDecodeOptions {
+            password: ctx.password.as_deref(),
+            decoder: None,
+            max_alloc_packed_bytes: ctx.max_packed_bytes,
+            max_stream_packed_bytes: ctx.max_packed_bytes,
+        },
+    )?;
+    crate::format::rar4::extract::verify_member_crc(hdr, crc32fast::hash(&data))?;
+    Ok(data)
+}
+
 /// Parallel extraction only engages for at least this many members...
 #[cfg(feature = "parallel")]
 const PARALLEL_MIN_MEMBERS: usize = 4;
@@ -517,15 +600,14 @@ pub(crate) fn extract_all_with_options(
 /// feature).
 ///
 /// Eligible: at least [`PARALLEL_MIN_MEMBERS`] members, no solid chains,
-/// no split/multi-volume members, no progress callback, and total packed
-/// + unpacked sizes within a bounded memory budget. Packed payloads are
-///   read sequentially, then decoded and integrity-checked with Rayon
-///   workers (archive order preserved by replaying writes sequentially
-///   afterwards). Ineligible archives fall back to the sequential path
-///   unchanged. The codec's decode is memory-bandwidth-bound, so the
-///   parallel path mainly helps on machines where decompression is
-///   CPU-bound; it engages only for member counts and sizes where Rayon
-///   overhead is amortized.
+/// no progress callback, and total packed + unpacked sizes within a
+/// bounded memory budget. RAR5 payloads are read and decrypted
+/// sequentially (one engine cursor); legacy workers open their own volume
+/// handle, so split and multi-volume members parallelize too. Decoded
+/// members are integrity-checked on Rayon workers and the writes are
+/// replayed in archive order, overlapping I/O with the decode of later
+/// members. Ineligible archives fall back to the sequential path
+/// unchanged.
 #[cfg(feature = "parallel")]
 fn extract_all_parallel(
     cx: &mut dyn Engine,
@@ -557,9 +639,8 @@ fn extract_all_parallel(
     {
         return Ok(None);
     }
-    for (i, e) in cx.entries().iter().enumerate() {
-        if crate::format::rar5::extract::solid::is_solid_chain_member(cx, i) || e.chunks.len() != 1
-        {
+    for i in 0..cx.entries().len() {
+        if parallel_solid_member(cx, i) {
             return Ok(None);
         }
     }
@@ -584,15 +665,31 @@ fn extract_all_parallel(
         ));
     }
 
-    // Phase 1: read + decrypt all payloads sequentially.
-    let mut payloads: Vec<(usize, DecryptedPayload)> = Vec::with_capacity(cx.entries().len());
-    for i in 0..cx.entries().len() {
-        payloads.push((
-            i,
-            crate::format::rar5::extract::decode::read_packed_data(cx, i)?,
-        ));
-    }
+    // Phase 1 (RAR5 only): read + decrypt all payloads sequentially. A
+    // legacy worker needs no such pass: it opens volume 0 itself.
+    let legacy_ctx = legacy_parallel_context(cx);
+    let payloads: Vec<(usize, ParallelPayload)> = if legacy_ctx.is_some() {
+        (0..cx.entries().len())
+            .map(|i| (i, ParallelPayload::Legacy))
+            .collect()
+    } else {
+        let mut payloads = Vec::with_capacity(cx.entries().len());
+        for i in 0..cx.entries().len() {
+            payloads.push((
+                i,
+                ParallelPayload::Modern(crate::format::rar5::extract::decode::read_packed_data(
+                    cx, i,
+                )?),
+            ));
+        }
+        payloads
+    };
     let headers: Vec<FileHeader> = cx.entries().iter().map(|e| e.header.clone()).collect();
+    let legacy_chunks: Vec<Vec<crate::model::DataChunk>> = if legacy_ctx.is_some() {
+        cx.entries().iter().map(|e| e.chunks.clone()).collect()
+    } else {
+        Vec::new()
+    };
 
     /// One member decoded in phase 2: `error` carries the failure that
     /// interrupted the decode, with `data` holding the bytes produced so
@@ -661,28 +758,12 @@ fn extract_all_parallel(
                 .into_par_iter()
                 .for_each_with(tx, |tx, (i, payload)| {
                     let hdr = &headers[i];
-                    if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
-                        let err = RarError::limit_exceeded(
-                            MAX_DICT_SIZE_LOG as u64,
-                            format!(
-                                "{}: dictionary size log {} exceeds supported maximum {}",
-                                hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
-                            ),
-                        );
-                        let _ = tx.send(DecodedMember {
-                            idx: i,
-                            data: Vec::new(),
-                            error: Some(err),
-                        });
-                        return;
-                    }
                     // The one member decoder (STORE bound, decode, size check)
                     // the serial paths use; the Vec sink keeps the decoded bytes
                     // for the ordered replay on the other side of the channel.
                     let mut data = Vec::new();
                     let mut error = None;
                     let decoded = (|| -> RarResult<()> {
-                        let _ = capped_dict_bytes(hdr, opts.max_dict_size)?;
                         if let Some(limit) = opts.max_unpacked_bytes
                             && hdr.unpacked_size > limit
                         {
@@ -694,22 +775,43 @@ fn extract_all_parallel(
                                 ),
                             ));
                         }
-                        if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
-                            crate::format::rar5::payload::decode_member(
-                                hdr, &payload, None, &mut data,
-                            )?;
+                        match payload {
+                            ParallelPayload::Modern(payload) => {
+                                if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
+                                    return Err(RarError::limit_exceeded(
+                                        MAX_DICT_SIZE_LOG as u64,
+                                        format!(
+                                            "{}: dictionary size log {} exceeds supported maximum {}",
+                                            hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
+                                        ),
+                                    ));
+                                }
+                                let _ = capped_dict_bytes(hdr, opts.max_dict_size)?;
+                                if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
+                                    crate::format::rar5::payload::decode_member(
+                                        hdr, &payload, None, &mut data,
+                                    )?;
+                                }
+                                let crc = crc32fast::hash(&data);
+                                let blake = hdr
+                                    .hash_value
+                                    .map(|_| crate::format::rar5::blake2sp::hash(&data));
+                                verify_integrity_for(
+                                    hdr,
+                                    crc,
+                                    blake,
+                                    payload.params.as_ref(),
+                                    payload.keys.as_ref(),
+                                )
+                            }
+                            ParallelPayload::Legacy => {
+                                let ctx = legacy_ctx.as_ref().ok_or_else(|| {
+                                    RarError::invalid_state("legacy parallel context missing")
+                                })?;
+                                data = decode_legacy_parallel(ctx, hdr, &legacy_chunks[i], &opts)?;
+                                Ok(())
+                            }
                         }
-                        let crc = crc32fast::hash(&data);
-                        let blake = hdr
-                            .hash_value
-                            .map(|_| crate::format::rar5::blake2sp::hash(&data));
-                        verify_integrity_for(
-                            hdr,
-                            crc,
-                            blake,
-                            payload.params.as_ref(),
-                            payload.keys.as_ref(),
-                        )
                     })();
                     if let Err(e) = decoded {
                         error = Some(e);
@@ -778,7 +880,7 @@ pub(crate) fn verify_indices_parallel(
         let Some(entry) = cx.entries().get(idx) else {
             return Ok(None);
         };
-        if crate::format::rar5::extract::solid::is_solid_chain_member(cx, idx) {
+        if parallel_solid_member(cx, idx) {
             return Ok(None);
         }
         total_packed = total_packed.saturating_add(entry.header.packed_size);
@@ -799,19 +901,39 @@ pub(crate) fn verify_indices_parallel(
         ));
     }
 
-    // Phase 1: read + decrypt payloads through the single engine cursor.
-    let mut payloads = Vec::with_capacity(indices.len());
-    for &idx in indices {
-        cx.check_cancel()?;
-        payloads.push((
-            idx,
-            crate::format::rar5::extract::decode::read_packed_data(cx, idx)?,
-        ));
-    }
+    // Phase 1 (RAR5 only): read + decrypt payloads through the single
+    // engine cursor. Legacy workers read their own volume instead.
+    let legacy_ctx = legacy_parallel_context(cx);
+    let payloads: Vec<(usize, ParallelPayload)> = if legacy_ctx.is_some() {
+        indices
+            .iter()
+            .map(|&idx| (idx, ParallelPayload::Legacy))
+            .collect()
+    } else {
+        let mut payloads = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            cx.check_cancel()?;
+            payloads.push((
+                idx,
+                ParallelPayload::Modern(crate::format::rar5::extract::decode::read_packed_data(
+                    cx, idx,
+                )?),
+            ));
+        }
+        payloads
+    };
     let headers: Vec<FileHeader> = payloads
         .iter()
         .map(|(idx, _)| cx.entries()[*idx].header.clone())
         .collect();
+    let legacy_chunks: Vec<Vec<crate::model::DataChunk>> = if legacy_ctx.is_some() {
+        payloads
+            .iter()
+            .map(|(idx, _)| cx.entries()[*idx].chunks.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Phase 2: decode + integrity-check in parallel. Every worker owns its
     // header/payload and drops the decoded bytes as soon as the hashes are
@@ -823,16 +945,6 @@ pub(crate) fn verify_indices_parallel(
             .map(|(slot, (idx, payload))| {
                 let hdr = &headers[slot];
                 let outcome = (|| -> RarResult<()> {
-                    if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
-                        return Err(RarError::limit_exceeded(
-                            MAX_DICT_SIZE_LOG as u64,
-                            format!(
-                                "{}: dictionary size log {} exceeds supported maximum {}",
-                                hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
-                            ),
-                        ));
-                    }
-                    let _ = capped_dict_bytes(hdr, opts.max_dict_size)?;
                     if let Some(limit) = opts.max_unpacked_bytes
                         && hdr.unpacked_size > limit
                     {
@@ -844,23 +956,44 @@ pub(crate) fn verify_indices_parallel(
                             ),
                         ));
                     }
-                    let mut data = Vec::new();
-                    if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
-                        crate::format::rar5::payload::decode_member(
-                            hdr, &payload, None, &mut data,
-                        )?;
+                    match payload {
+                        ParallelPayload::Modern(payload) => {
+                            if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
+                                return Err(RarError::limit_exceeded(
+                                    MAX_DICT_SIZE_LOG as u64,
+                                    format!(
+                                        "{}: dictionary size log {} exceeds supported maximum {}",
+                                        hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
+                                    ),
+                                ));
+                            }
+                            let _ = capped_dict_bytes(hdr, opts.max_dict_size)?;
+                            let mut data = Vec::new();
+                            if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
+                                crate::format::rar5::payload::decode_member(
+                                    hdr, &payload, None, &mut data,
+                                )?;
+                            }
+                            let crc = crc32fast::hash(&data);
+                            let blake = hdr
+                                .hash_value
+                                .map(|_| crate::format::rar5::blake2sp::hash(&data));
+                            verify_integrity_for(
+                                hdr,
+                                crc,
+                                blake,
+                                payload.params.as_ref(),
+                                payload.keys.as_ref(),
+                            )
+                        }
+                        ParallelPayload::Legacy => {
+                            let ctx = legacy_ctx.as_ref().ok_or_else(|| {
+                                RarError::invalid_state("legacy parallel context missing")
+                            })?;
+                            decode_legacy_parallel(ctx, hdr, &legacy_chunks[slot], opts)?;
+                            Ok(())
+                        }
                     }
-                    let crc = crc32fast::hash(&data);
-                    let blake = hdr
-                        .hash_value
-                        .map(|_| crate::format::rar5::blake2sp::hash(&data));
-                    verify_integrity_for(
-                        hdr,
-                        crc,
-                        blake,
-                        payload.params.as_ref(),
-                        payload.keys.as_ref(),
-                    )
                 })();
                 (idx, outcome)
             })

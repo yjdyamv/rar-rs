@@ -596,21 +596,27 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   退回串行——它先把所有成员解码完，"在第一个失败处停下"根本无法实现，与其猜不如让路。改这些条件前先想清楚顺序语义。
   （因此该函数**不接** progress tracker：资格条件已经排除了它的存在，
   传进去只会留一段永不执行的报告代码。）
-- **并行校验的资格门槛**：`verify_ids_parallel`（`t` 的并行路径）只接手
-  RAR5、非固实链成员、≥`PARALLEL_MIN_MEMBERS`(4) 个成员、总解压量
-  ≥`PARALLEL_MIN_UNPACKED`(8 MiB)、总量在 `PARALLEL_BUFFER_LIMIT`(256 MiB)
-  以内、且没有进度回调的批次。负载必须先在**单个** `Engine` 游标上串行读出
-  解密（`read_packed_data`），再并行 decode——不要让多个线程共享 `Engine`；
-  一个成员一个 `DecodedPayload`，哈希算完就丢，峰值内存是"全部 packed +
-  每线程一个解压缓冲"。错误按目录顺序汇总，`Cancelled` 仍然整体返回。门槛改
+- **并行校验的资格门槛**：`verify_indices_parallel`（`t` 的并行路径）接手
+  RAR5 与 RAR4（RAR 1.3/1.4 除外）、非固实链成员、≥`PARALLEL_MIN_MEMBERS`(4)
+  个成员、总解压量 ≥`PARALLEL_MIN_UNPACKED`(8 MiB)、总量在
+  `PARALLEL_BUFFER_LIMIT`(256 MiB) 以内、且没有进度回调的批次。RAR5 的负载必须
+  先在**单个** `Engine` 游标上串行读出解密（`read_packed_data`），再并行 decode
+  ——不要让多个线程共享 `Engine`；RAR4 反过来：工作线程各自 `File::open` 卷 0，
+  由 `decode_member_bytes` 按 chunk 打开后续卷，所以分卷/跨卷成员也能并行，且
+  不需要预读负载。一个成员一份缓冲，哈希算完就丢，峰值内存是"RAR5 全部 packed
+  + 每线程一个解压缓冲"。错误按目录顺序汇总，`Cancelled` 仍然整体返回。门槛改
   成 64 MiB 时 87 MB 的 DLL 档就不会走并行，`t` 从 205 ms 退回 ~330 ms——这是
   故意调的，不要为了提高命中率去动内存预算。
-- **整档 `x` 的并行路径保留 `chunks.len() == 1`**，并已改成解码/落盘流水线：
-  工作线程解码后经**有界** `sync_channel` 交给主线程，主线程仍按目录顺序执行
-  `resolve_member_target` → `materialize_member_file` → `finish_member`，所以
-  `-o-`/`-or`/`-kb`/覆盖提示的语义与串行完全一致；重排窗由通道容量限制，不会
-  攒下整档。写失败时先丢弃接收端，工作线程的 `send` 失败即退出，`scope` 不会
-  死锁。多块大成员仍走串行流式。
+- **整档 `x` 的并行路径是解码/落盘流水线**：工作线程解码后经**有界**
+  `sync_channel` 交给主线程，主线程仍按目录顺序执行 `resolve_member_target` →
+  `materialize_member_file` → `finish_member`，所以 `-o-`/`-or`/`-kb`/覆盖提示的
+  语义与串行完全一致；重排窗由通道容量限制，不会攒下整档。写失败时先丢弃接收端，
+  工作线程的 `send` 失败即退出，`scope` 不会死锁。`chunks.len() == 1` 的限制已
+  取消：RAR5 多块/多卷成员按整成员预读，RAR4 由工作线程按 chunk 读卷。
+- **RAR4 的 0x78/0x7a 恢复记录不是唯一的"跨卷"陷阱**：`is_rar4_solid_member`
+  对 pre-RAR3 的 codec 依赖 `MHD_SOLID`（这些版本不写 `FHD_SOLID`），并行路径
+  必须用同一个判定，否则会把固实链拆到多个线程、解码出垃圾。两种格式的判定统一
+  走 `parallel_solid_member`。
 - **提取进度的粒度是逐成员，且不许倒退**：成员经临时兄弟文件**原子安装**，中途没有可发布的字节数；因此
   `on_progress` 的 `bytes_written`
   在一个成员落盘后才前进（单个巨成员会长时间只报很少）。终态事件必须重发**库给出的真实总量**，写
