@@ -147,8 +147,8 @@ fn cli_rar4_multivolume_archive_comment_roundtrips() {
 
 /// Header-encrypted RAR5 archives now support rename and archive-comment
 /// edits: rewritten headers are re-encrypted through the encrypting writer.
-/// Create-time `-z` is supported too; `-k`/lock stays refused, as do delete
-/// and recovery-record edits (which keep working).
+/// Create-time `-z` and `-k` are supported too (the lock patch re-encrypts
+/// the main header, so its flags vint may grow).
 #[test]
 fn cli_header_encrypted_rar5_edits_work() {
     let dir = make_temp_dir();
@@ -215,7 +215,8 @@ fn cli_header_encrypted_rar5_edits_work() {
         String::from_utf8_lossy(&test.stderr)
     );
 
-    // Create-time `-z` is supported; `-k` is still refused before writing.
+    // Create-time `-z` is supported; `-k` locks after the create writes the
+    // members.
     let with_comment = dir.path().join("nz.rar");
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-hpsecret", "-idq", "-znote.txt"])
@@ -235,8 +236,29 @@ fn cli_header_encrypted_rar5_edits_work() {
         .current_dir(dir.path())
         .status()
         .unwrap();
-    assert!(!status.success(), "a -hp -k must still be rejected");
-    assert!(!locked.exists(), "nk.rar must not be created");
+    assert!(status.success(), "a -hp -k must now succeed");
+    assert!(locked.exists());
+    // The lock patch re-encrypts the main header, so the official tool sees
+    // both flags and can still read the members.
+    let test = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-psecret", "-idq"])
+        .arg(&locked)
+        .output()
+        .unwrap();
+    assert!(
+        test.status.success(),
+        "official unrar must read a -hp -k archive:\n{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
+    // Locking is final: the archive is read-only afterwards.
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-psecret", "-idq"])
+        .arg(&locked)
+        .arg("g.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(!status.success(), "a locked archive must reject appends");
 
     // Delete still works on the encrypted archive.
     let status = std::process::Command::new(RAR_CLI)
