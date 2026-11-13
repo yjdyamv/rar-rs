@@ -49,6 +49,9 @@ pub struct StreamAnalysis {
     pub short_dist: [[u64; 5]; 2],
     /// Filter regions as `(member-relative start, length)`.
     pub filter_regions: Vec<(u64, u64)>,
+    /// Filter records as `(member-relative start, length, type, channels)`,
+    /// in stream order. `type` is the raw 3-bit filter id.
+    pub filter_records: Vec<(u64, u64, u8, u8)>,
 }
 
 /// Walk a RAR5/RAR7 compressed member stream and record per-block symbol
@@ -94,6 +97,12 @@ pub fn analyze_stream(
                 // Record the filter region's member-relative coverage.
                 out.filter_regions
                     .push((filt.block_start, filt.block_length));
+                out.filter_records.push((
+                    filt.block_start,
+                    filt.block_length,
+                    filt.filter_type,
+                    filt.channels,
+                ));
             }
             Symbol::Match { dist, len, kind } => {
                 block.out_bytes += len as u64;
