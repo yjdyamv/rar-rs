@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use super::headers::{file_header_name, rebuild_rar4_header, rename_file_header};
 use super::layout::{
     archive_is_locked, copy_range, emit_block, first_volume, header_password, locate_signature,
-    main_flags, patch_main_header, refuse_unsupported_containers, scan_layout_stream,
+    main_flags, patch_main_header, scan_layout_stream,
 };
 use super::repack::{repack_multivolume_archive, repack_solid_archive};
 use super::{CMT_HEAD_SIZE, RECOVERY_HEAD_SIZE};
@@ -30,8 +30,8 @@ use crate::format::rar4::comment::{
     build_comment_block, comment_block_name_is_cmt, encode_comment_text, parse_legacy_comment,
 };
 use crate::format::rar4::{
-    COMM_HEAD, ENDARC_HEAD, EnvelopePolicy, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD,
-    MHD_RECOVERY, MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD, read_block,
+    COMM_HEAD, ENDARC_HEAD, EnvelopePolicy, FILE_HEAD, MAIN_HEAD, MHD_LOCK, MHD_NEWNUMBERING,
+    MHD_PASSWORD, MHD_RECOVERY, MHD_SOLID, MHD_VOLUME, NEWSUB_HEAD, read_block,
 };
 use crate::fs::atomic::{commit_files, install_durable, read_write_create, temp_sibling_path};
 use crate::fs::volume::{stale_volume_paths, volume_base_of};
@@ -262,13 +262,18 @@ pub(crate) struct AppendPrelude {
     /// The archive is `-hp` header-encrypted: the appended blocks must be
     /// header-encrypted with the archive password too.
     pub header_encrypted: bool,
+    /// A multi-volume set: append defers to a whole-set repack at close
+    /// (members cannot be appended to one volume without rebalancing the
+    /// set). Takes precedence over `solid`.
+    pub whole_set: bool,
 }
 
-/// Prepare an existing single-volume RAR4 archive for appending members.
-/// The archive's main flags gate the edit (multi-volume and locked archives
-/// are refused). Non-solid archives truncate at the trailing NEWSUB recovery
-/// record / end-of-archive block; solid archives defer to a whole-archive
-/// repack at close (the writer cannot continue an existing chain).
+/// Prepare an existing RAR4 archive for appending members. Locked archives
+/// are refused. Multi-volume sets defer to a whole-set repack at close (a
+/// volume cannot grow without shifting every later member and the parity
+/// grid), solid archives defer to a whole-archive repack, and non-solid
+/// single-volume archives truncate at the trailing NEWSUB recovery record /
+/// end-of-archive block.
 /// `-hp` archives are appended to under the same header encryption (the
 /// password is required and reported by the prelude).
 pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
@@ -280,18 +285,29 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
             header_password(archive),
         )?
     };
-    refuse_unsupported_containers(archive, layout.main_flags)?;
     if layout.main_flags & MHD_LOCK != 0 {
         return Err(RarError::ArchiveLocked);
     }
     let header_encrypted = layout.header_encrypted;
+    let rr_sectors = layout.protect.as_ref().map(|protect| protect.rec_sectors);
+    if archive.volume_paths.len() > 1 || layout.main_flags & MHD_VOLUME != 0 {
+        // A volume set: append repacks the whole set at close, keeping its
+        // shape (volume size, numbering, solid flag, recovery records).
+        return Ok(AppendPrelude {
+            whole_set: true,
+            solid: false,
+            truncate_pos: None,
+            rr_sectors,
+            header_encrypted,
+        });
+    }
     let solid = layout.main_flags & MHD_SOLID != 0;
     if solid {
         // A solid archive is repacked whole at close, so either record shape
         // (NEWSUB `Protect+` or RAR 2.5 PROTECT_HEAD) is dropped and rebuilt
         // at the carried strength.
-        let rr_sectors = layout.protect.as_ref().map(|protect| protect.rec_sectors);
         return Ok(AppendPrelude {
+            whole_set: false,
             solid: true,
             truncate_pos: None,
             rr_sectors,
@@ -310,6 +326,7 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
         None => (Some(layout.endarc_offset as u64), None),
     };
     Ok(AppendPrelude {
+        whole_set: false,
         solid: false,
         truncate_pos,
         rr_sectors,
@@ -479,8 +496,10 @@ pub(crate) fn edit_rar4(
                 force_rr,
                 force_sectors,
                 renamed,
+                &[],
                 member_comments,
-                layout.main_flags,
+                layout.main_flags & MHD_SOLID != 0,
+                layout.main_flags & MHD_NEWNUMBERING == 0,
             );
         }
         if force_rr.is_some() || force_sectors.is_some() || !member_comments.is_empty() {

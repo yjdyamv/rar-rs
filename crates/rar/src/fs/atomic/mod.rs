@@ -5,7 +5,8 @@
 //! Role split:
 //! - [`primitives`] — temp naming, `create_new` staging, the platform
 //!   `replace_file` variants and the fsync ordering,
-//! - [`staged`] — the [`StagedFile`]/[`StagedCopy`] single-file values,
+//! - [`staged`] — the [`StagedFile`]/[`StagedCopy`] single-file values and
+//!   the [`StagedVolumeSet`] multi-volume value,
 //! - [`journal`] — the on-disk commit journal and its field escaping,
 //! - [`set`] — [`StagedSet`], the commit phases and commit recovery.
 
@@ -21,8 +22,8 @@ pub(crate) use primitives::{
     temp_suffix,
 };
 pub(crate) use set::{StagedSet, commit_files, recover_interrupted_commit};
-pub use staged::StagedCopy;
 pub(crate) use staged::StagedFile;
+pub use staged::{StagedCopy, StagedVolumeSet};
 
 // Helpers the unit tests drive directly (same-file private before the split).
 #[cfg(test)]

@@ -108,7 +108,7 @@ pub use codec::lzss_huff::{EncoderState, encode_chunked_mt};
 pub use detect::sfx_offset_of;
 pub use error::{ErrorCode, RarError, RarResult};
 pub use features::{Feature, FeatureSet};
-pub use fs::atomic::StagedCopy;
+pub use fs::atomic::{StagedCopy, StagedVolumeSet};
 pub use options::{
     DictionarySize, ExtractErrorPolicy, ExtractOptions, ExtractionCallback, ExtractionProgress,
     FilterMode, FilterOptions, MarkOfTheWeb, OverwriteChoice, OverwritePrompt, SolidReset,

@@ -436,38 +436,26 @@ fn cli_failed_a_replace_preserves_the_original_archive() {
     );
 }
 
-/// `rar a` refuses an existing multi-volume set up front and leaves every
-/// volume untouched (the transaction can only stage a single file).
+/// `rar a` on an existing multi-volume set repacks the whole set: the new
+/// member lands in a fresh set with the same volume ceiling and every old
+/// member stays readable.
 #[test]
-fn cli_a_rejects_multi_volume_archives_without_modifying_them() {
+fn cli_a_repacks_multi_volume_archives() {
     let dir = make_temp_dir();
-    std::fs::write(
-        dir.path().join("payload.bin"),
-        pseudo_random_bytes(16 * 1024, 77),
-    )
-    .unwrap();
+    let payload = pseudo_random_bytes(16 * 1024, 77);
+    std::fs::write(dir.path().join("payload.bin"), &payload).unwrap();
     std::fs::write(dir.path().join("added.txt"), b"added").unwrap();
     let base = dir.path().join("multi-a");
     let status = std::process::Command::new(RAR_CLI)
-        .args(["a", "-v1k", "-idq"])
+        .args(["a", "-ma4", "-v1k", "-idq"])
         .arg(&base)
         .arg("payload.bin")
         .current_dir(dir.path())
         .status()
         .unwrap();
     assert!(status.success());
-    let mut volumes: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rar"))
-        .collect();
-    volumes.sort();
+    let volumes = rar_rs::discover_volumes(&base);
     assert!(volumes.len() > 1, "expected a multi-volume archive");
-    let original: Vec<Vec<u8>> = volumes
-        .iter()
-        .map(|path| std::fs::read(path).unwrap())
-        .collect();
 
     let out = std::process::Command::new(RAR_CLI)
         .args(["a", "-idq"])
@@ -476,43 +464,43 @@ fn cli_a_rejects_multi_volume_archives_without_modifying_them() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("multi-volume"));
-    for (path, expected) in volumes.iter().zip(original) {
-        assert_eq!(std::fs::read(path).unwrap(), expected);
-    }
+    assert!(
+        out.status.success(),
+        "append to a multi-volume set failed:
+{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let after = rar_rs::discover_volumes(&base);
+    assert!(after.len() > 1, "the repacked set lost its volumes");
+    let mut reader = rar_rs::ArchiveReader::open(&after[0]).unwrap();
+    let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+    assert!(names.contains(&"payload.bin".to_string()), "{names:?}");
+    assert!(names.contains(&"added.txt".to_string()), "{names:?}");
+    let payload_id = reader.unique_entry("payload.bin").unwrap();
+    assert_eq!(reader.read_entry(payload_id).unwrap(), payload);
+    let added_id = reader.unique_entry("added.txt").unwrap();
+    assert_eq!(reader.read_entry(added_id).unwrap(), b"added");
 }
 
+/// `rar u` on a multi-volume set takes the same whole-set repack path.
 #[test]
-fn cli_update_rejects_multi_volume_archives_without_modifying_them() {
+fn cli_update_repacks_multi_volume_archives() {
     let dir = make_temp_dir();
-    std::fs::write(
-        dir.path().join("payload.bin"),
-        pseudo_random_bytes(16 * 1024, 91),
-    )
-    .unwrap();
+    let payload = pseudo_random_bytes(16 * 1024, 91);
+    std::fs::write(dir.path().join("payload.bin"), &payload).unwrap();
     std::fs::write(dir.path().join("added.txt"), b"added").unwrap();
     let base = dir.path().join("multi");
     let status = std::process::Command::new(RAR_CLI)
-        .args(["a", "-v1k", "-idq"])
+        .args(["a", "-ma4", "-v1k", "-idq"])
         .arg(&base)
         .arg("payload.bin")
         .current_dir(dir.path())
         .status()
         .unwrap();
     assert!(status.success());
-    let mut volumes: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rar"))
-        .collect();
-    volumes.sort();
+    let volumes = rar_rs::discover_volumes(&base);
     assert!(volumes.len() > 1, "expected a multi-volume archive");
-    let original: Vec<Vec<u8>> = volumes
-        .iter()
-        .map(|path| std::fs::read(path).unwrap())
-        .collect();
 
     let out = std::process::Command::new(RAR_CLI)
         .args(["u", "-idq"])
@@ -521,11 +509,112 @@ fn cli_update_rejects_multi_volume_archives_without_modifying_them() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("multi-volume"));
-    for (path, expected) in volumes.iter().zip(original) {
-        assert_eq!(std::fs::read(path).unwrap(), expected);
-    }
+    assert!(
+        out.status.success(),
+        "update of a multi-volume set failed:
+{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let after = rar_rs::discover_volumes(&base);
+    let mut reader = rar_rs::ArchiveReader::open(&after[0]).unwrap();
+    let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+    assert!(names.contains(&"payload.bin".to_string()), "{names:?}");
+    assert!(names.contains(&"added.txt".to_string()), "{names:?}");
+    let payload_id = reader.unique_entry("payload.bin").unwrap();
+    assert_eq!(reader.read_entry(payload_id).unwrap(), payload);
+}
+
+/// RAR5 volume sets still refuse appends (official `rar` does too); the
+/// whole-set repack path is RAR4-only.
+#[test]
+fn cli_a_refuses_rar5_multi_volume_append() {
+    let dir = make_temp_dir();
+    std::fs::write(
+        dir.path().join("payload.bin"),
+        pseudo_random_bytes(16 * 1024, 303),
+    )
+    .unwrap();
+    let base = dir.path().join("rar5-multi");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-v1k", "-idq"])
+        .arg(&base)
+        .arg("payload.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "expected a RAR5 volume set");
+
+    std::fs::write(dir.path().join("added.txt"), b"must not be appended").unwrap();
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&volumes[0])
+        .arg("added.txt")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "RAR5 multi-volume append must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("multi-volume"),
+        "unexpected error: {stderr}"
+    );
+    let after = rar_rs::discover_volumes(&base);
+    assert_eq!(
+        after.len(),
+        volumes.len(),
+        "the refused append touched the set"
+    );
+}
+
+/// `rar a` replacing an existing member of a multi-volume set deletes the old
+/// version and appends the new one inside the same staged set, so the
+/// replacement is all-or-nothing and leaves no duplicate name.
+#[test]
+fn cli_a_replaces_member_in_multi_volume_archive() {
+    let dir = make_temp_dir();
+    let original = pseudo_random_bytes(16 * 1024, 101);
+    let replacement = pseudo_random_bytes(24 * 1024, 202);
+    std::fs::write(dir.path().join("payload.bin"), &original).unwrap();
+    let base = dir.path().join("multi-replace");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-v1k", "-idq"])
+        .arg(&base)
+        .arg("payload.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "expected a multi-volume archive");
+
+    std::fs::write(dir.path().join("payload.bin"), &replacement).unwrap();
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&volumes[0])
+        .arg("payload.bin")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "replacement in a multi-volume set failed:
+{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let after = rar_rs::discover_volumes(&base);
+    let mut reader = rar_rs::ArchiveReader::open(&after[0]).unwrap();
+    let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(
+        names.iter().filter(|name| *name == "payload.bin").count(),
+        1,
+        "{names:?}"
+    );
+    let payload_id = reader.unique_entry("payload.bin").unwrap();
+    assert_eq!(reader.read_entry(payload_id).unwrap(), replacement);
 }
 
 #[test]

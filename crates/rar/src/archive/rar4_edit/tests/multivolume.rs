@@ -57,6 +57,12 @@ fn noise(len: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
+/// Entry options for [`crate::archive::ArchiveWriter::add_bytes`].
+fn entry_options(level: u8) -> crate::EntryWriteOptions {
+    crate::EntryWriteOptions::new()
+        .compression_level(crate::CompressionLevel::try_from(level).unwrap())
+}
+
 fn main_flags(bytes: &[u8]) -> u16 {
     u16::from_le_bytes([bytes[10], bytes[11]])
 }
@@ -348,6 +354,192 @@ fn multivolume_delete_keeps_comment_and_recovery() {
             protect.is_some(),
             "{} lost its recovery record",
             volume.display()
+        );
+    }
+}
+
+/// Appending to a stored set repacks the whole set: the new member and every
+/// old member survive, and no volume exceeds the original ceiling.
+#[test]
+fn multivolume_append_stored_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let volumes = build_set(dir.path());
+    let first = volumes[0].clone();
+    let base = dir.path().join("plain-mv.rar");
+    let limit = volumes
+        .iter()
+        .map(|volume| std::fs::metadata(volume).unwrap().len())
+        .max()
+        .unwrap();
+    let added = patterned(200_000, 241);
+    {
+        let mut writer = crate::archive::ArchiveWriter::append(&first).unwrap();
+        writer.add_bytes("c.bin", &added, entry_options(0)).unwrap();
+        writer.finish().unwrap();
+    }
+    let after = discover_volumes(&base);
+    assert!(after.len() > 1, "the appended set lost its volumes");
+    for volume in &after {
+        assert!(
+            std::fs::metadata(volume).unwrap().len() <= limit.max(1),
+            "{} grew past the original volume ceiling",
+            volume.display()
+        );
+    }
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["a.bin", "b.bin", "c.bin"]
+    );
+    assert_eq!(
+        archive
+            .read_with_options("a.bin", Default::default())
+            .unwrap(),
+        patterned(150_000, 251)
+    );
+    assert_eq!(
+        archive
+            .read_with_options("c.bin", Default::default())
+            .unwrap(),
+        added
+    );
+}
+
+/// Compressed (non-solid) members decode through the regular reader during an
+/// append repack; old and new payloads stay byte-identical.
+#[test]
+fn multivolume_append_recompresses_compressed_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("c-append.rar");
+    let p1 = noise(150_000, 0xB1);
+    let p2 = noise(120_000, 0xC2);
+    let added = noise(90_000, 0xD3);
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                volume_size: Some(64 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.bin", &p1, 3).unwrap();
+        archive.add_bytes("b.bin", &p2, 3).unwrap();
+        archive.close().unwrap();
+    }
+    let first = discover_volumes(&base)[0].clone();
+    {
+        let mut writer = crate::archive::ArchiveWriter::append(&first).unwrap();
+        writer.add_bytes("c.bin", &added, entry_options(3)).unwrap();
+        writer.finish().unwrap();
+    }
+    let after = discover_volumes(&base);
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["a.bin", "b.bin", "c.bin"]
+    );
+    for (name, expected) in [("a.bin", &p1), ("b.bin", &p2), ("c.bin", &added)] {
+        assert_eq!(
+            &archive.read_with_options(name, Default::default()).unwrap(),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+/// A solid chain spans volumes, so an append decodes and re-encodes the whole
+/// chain; every member must still read back.
+#[test]
+fn multivolume_solid_append_repacks_the_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("s-append.rar");
+    let p1 = noise(150_000, 0xE1);
+    let p2 = noise(120_000, 0xF2);
+    let added = noise(90_000, 0x13);
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                solid: true,
+                volume_size: Some(32 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.bin", &p1, 1).unwrap();
+        archive.add_bytes("b.bin", &p2, 1).unwrap();
+        archive.close().unwrap();
+    }
+    let first = discover_volumes(&base)[0].clone();
+    {
+        let mut writer = crate::archive::ArchiveWriter::append(&first).unwrap();
+        writer.add_bytes("c.bin", &added, entry_options(1)).unwrap();
+        writer.finish().unwrap();
+    }
+    let after = discover_volumes(&base);
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["a.bin", "b.bin", "c.bin"]
+    );
+    for (name, expected) in [("a.bin", &p1), ("b.bin", &p2), ("c.bin", &added)] {
+        assert_eq!(
+            &archive.read_with_options(name, Default::default()).unwrap(),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+/// Header-encrypted sets append with the set password; the rebuilt volumes
+/// stay `-hp` and every member reads back with the password.
+#[test]
+fn multivolume_append_keeps_header_encryption() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("hp-append.rar");
+    let p1 = patterned(120_000, 251);
+    let p2 = patterned(100_000, 253);
+    let added = patterned(90_000, 249);
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                volume_size: Some(32 * 1024),
+                password: Some("secret".into()),
+                encrypt_headers: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.bin", &p1, 0).unwrap();
+        archive.add_bytes("b.bin", &p2, 0).unwrap();
+        archive.close().unwrap();
+    }
+    let first = discover_volumes(&base)[0].clone();
+    {
+        let mut writer = crate::archive::ArchiveWriter::append_with(
+            &first,
+            crate::AppendOptions::new().password("secret"),
+        )
+        .unwrap();
+        writer.add_bytes("c.bin", &added, entry_options(0)).unwrap();
+        writer.finish().unwrap();
+    }
+    let after = discover_volumes(&base);
+    let mut archive = RarArchive::open_with_password(&after[0], "secret").unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["a.bin", "b.bin", "c.bin"]
+    );
+    for (name, expected) in [("a.bin", &p1), ("b.bin", &p2), ("c.bin", &added)] {
+        assert_eq!(
+            &archive.read_with_options(name, Default::default()).unwrap(),
+            expected,
+            "{name}"
         );
     }
 }

@@ -56,7 +56,7 @@ pub(crate) use crate::format::rar4::comment::CMT_HEAD_SIZE;
 pub(crate) use comment::read_comment;
 pub(crate) use engine::{append_prelude, edit_rar4};
 pub(crate) use layout::lock_archive;
-pub(crate) use repack::repack_solid_archive;
+pub(crate) use repack::{repack_multivolume_archive, repack_solid_archive};
 
 /// Header byte count of the NEWSUB `RR` recovery record built by
 /// `build_legacy_recovery_block` (32 fixed + 2-byte name + 20-byte tail);

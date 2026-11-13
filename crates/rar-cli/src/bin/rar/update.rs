@@ -11,7 +11,7 @@ use crate::error::CliResult;
 use crate::info;
 use crate::ops;
 use crate::time;
-use crate::transaction::update_archive_transactionally;
+use crate::transaction::{update_archive_transactionally, update_volume_set_transactionally};
 /// Update an archive: add files not present, replace files whose source
 /// is newer (like `rar u`).
 pub(crate) fn cmd_update(args: &FilesArgs, misc: &common::MiscSwitches) -> CliResult<()> {
@@ -38,9 +38,6 @@ fn cmd_update_freshen(
     let password = &args.password.password;
     if !archive_path.exists() {
         return Err(format!("archive not found: {}", archive_path.display()).into());
-    }
-    if rar_rs::discover_volumes(archive_path).len() > 1 {
-        return Err("transactional update of multi-volume archives is not supported".into());
     }
 
     // Validate all operation options before allocating the staged copy.
@@ -202,7 +199,7 @@ fn cmd_update_freshen(
     } else {
         Vec::new()
     };
-    update_archive_transactionally(archive_path, |staged_path| {
+    let apply = |staged_path: &std::path::Path| -> CliResult<()> {
         if !to_delete.is_empty() {
             if let Some(version_spec) = &misc.version_control {
                 // Version control chains renames inside one call with
@@ -311,7 +308,13 @@ fn cmd_update_freshen(
                 .map_err(|error| CliError::from(error).context("restore staged archive time"))?;
         }
         Ok(())
-    })?;
+    };
+    let volume_set = rar_rs::discover_volumes(archive_path).len() > 1;
+    if volume_set {
+        update_volume_set_transactionally(archive_path, apply)?;
+    } else {
+        update_archive_transactionally(archive_path, apply)?;
+    }
     crate::log::write_logs(&logs, &[archive_path.to_path_buf()], &log_files)?;
     if misc.lock {
         crate::recovery::cmd_lock(&crate::args::ArchiveArgs {
