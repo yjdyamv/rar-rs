@@ -603,94 +603,34 @@ fn extract_all_parallel(
         error: Option<RarError>,
     }
 
-    // Phase 2: decode + integrity-check in parallel. Validation failures
-    // abort before that member's output is staged (like the serial path,
-    // which validates before creating its temp file); decode and
-    // integrity failures travel back with the partial bytes.
-    let results: Vec<RarResult<DecodedMember>> = extraction_pool(opts.threads).install(|| {
-        payloads
-            .into_par_iter()
-            .map(|(i, payload)| {
-                let hdr = &headers[i];
-                if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
-                    return Err(RarError::limit_exceeded(
-                        MAX_DICT_SIZE_LOG as u64,
-                        format!(
-                            "{}: dictionary size log {} exceeds supported maximum {}",
-                            hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
-                        ),
-                    ));
-                }
-                // The RAR7 byte dictionary bypasses the 4-bit log: enforce
-                // the extraction cap here too.
-                let _ = capped_dict_bytes(hdr, opts.max_dict_size)?;
-                if let Some(limit) = opts.max_unpacked_bytes
-                    && hdr.unpacked_size > limit
-                {
-                    return Err(RarError::limit_exceeded(
-                        limit,
-                        format!(
-                            "{}: unpacked size {} exceeds limit",
-                            hdr.name, hdr.unpacked_size
-                        ),
-                    ));
-                }
-
-                // The one member decoder (STORE bound, decode, size
-                // check) the serial paths use; the Vec sink keeps the
-                // decoded bytes for the sequential replay below. Empty
-                // members have nothing to decode but still carry an
-                // integrity value (a crafted zero-size header must not
-                // bypass the check), so verification runs either way.
-                let mut data = Vec::new();
-                let mut error = None;
-                let outcome = (|| -> RarResult<()> {
-                    if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
-                        crate::format::rar5::payload::decode_member(
-                            hdr, &payload, None, &mut data,
-                        )?;
-                    }
-                    let crc = crc32fast::hash(&data);
-                    let blake = hdr
-                        .hash_value
-                        .map(|_| crate::format::rar5::blake2sp::hash(&data));
-                    verify_integrity_for(
-                        hdr,
-                        crc,
-                        blake,
-                        payload.params.as_ref(),
-                        payload.keys.as_ref(),
-                    )
-                })();
-                if let Err(e) = outcome {
-                    error = Some(e);
-                }
-                Ok(DecodedMember {
-                    idx: i,
-                    data,
-                    error,
-                })
-            })
-            .collect()
-    });
-
-    // Phase 3: replay writes sequentially in archive order, through the
-    // same per-member materialization and post-write steps as the serial
-    // path. A member whose decode failed still stages its partial bytes
-    // so `-kb` behaves identically, then aborts the run.
-    let mut report = ExtractionReport::default();
+    // Phase 2+3: decode and integrity-check on the Rayon pool while this
+    // thread replays the finished members in archive order. Writes stay
+    // single-threaded (all `-o-`/`-kb`/overwrite semantics live here), but
+    // they overlap with the decode of later members instead of starting
+    // after a full parallel pass — on write-bound runs the wall time is
+    // then roughly the write time, not decode + write. Results arrive out
+    // of order; `pending` re-orders them and holds at most a small window
+    // because the workers block on the bounded channel.
     let keep_broken = cx.read_ctx().extract_options.keep_broken;
-    for result in results {
-        let member = result?;
+    let payload_count = payloads.len();
+    let window = crate::parallel::pool_threads(4).max(1) * 2;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<DecodedMember>(window);
+    let mut pending: std::collections::BTreeMap<usize, DecodedMember> =
+        std::collections::BTreeMap::new();
+    let mut next = 0usize;
+    let mut report = ExtractionReport::default();
+    let replay = |cx: &mut dyn Engine,
+                  report: &mut ExtractionReport,
+                  member: DecodedMember|
+     -> RarResult<()> {
         let idx = member.idx;
-        // `resolve_dest_path` and `finish_member` both need the archive,
-        // and the latter takes `&mut dyn Engine`, so the entry is cloned out
-        // of the catalog first (the serial loop keeps a whole-catalog
-        // snapshot for the same reason).
+        // `resolve_member_target` and `finish_member` need the archive, so
+        // the entry is cloned out of the catalog first (the serial loop
+        // keeps a whole-catalog snapshot for the same reason).
         let entry = cx.entries()[idx].clone();
         // The directory/redirect/skip prelude is shared with the serial path.
-        let dest_path = match resolve_member_target(cx, &entry, dest, &mut report)? {
-            MemberTarget::Done(_) => continue,
+        let dest_path = match resolve_member_target(cx, &entry, dest, report)? {
+            MemberTarget::Done(_) => return Ok(()),
             MemberTarget::File(path) => path,
         };
         if let Some(err) = member.error {
@@ -712,7 +652,91 @@ fn extract_all_parallel(
             file.write_all(&member.data)?;
             Ok(())
         })?;
-        finish_member(cx, idx, &entry, dest_path, &mut report)?;
+        finish_member(cx, idx, &entry, dest_path, report)?;
+        Ok(())
+    };
+    let outcome: RarResult<()> = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            payloads
+                .into_par_iter()
+                .for_each_with(tx, |tx, (i, payload)| {
+                    let hdr = &headers[i];
+                    if hdr.comp_dict_size > MAX_DICT_SIZE_LOG {
+                        let err = RarError::limit_exceeded(
+                            MAX_DICT_SIZE_LOG as u64,
+                            format!(
+                                "{}: dictionary size log {} exceeds supported maximum {}",
+                                hdr.name, hdr.comp_dict_size, MAX_DICT_SIZE_LOG
+                            ),
+                        );
+                        let _ = tx.send(DecodedMember {
+                            idx: i,
+                            data: Vec::new(),
+                            error: Some(err),
+                        });
+                        return;
+                    }
+                    // The one member decoder (STORE bound, decode, size check)
+                    // the serial paths use; the Vec sink keeps the decoded bytes
+                    // for the ordered replay on the other side of the channel.
+                    let mut data = Vec::new();
+                    let mut error = None;
+                    let decoded = (|| -> RarResult<()> {
+                        let _ = capped_dict_bytes(hdr, opts.max_dict_size)?;
+                        if let Some(limit) = opts.max_unpacked_bytes
+                            && hdr.unpacked_size > limit
+                        {
+                            return Err(RarError::limit_exceeded(
+                                limit,
+                                format!(
+                                    "{}: unpacked size {} exceeds limit",
+                                    hdr.name, hdr.unpacked_size
+                                ),
+                            ));
+                        }
+                        if hdr.packed_size != 0 || hdr.unpacked_size != 0 {
+                            crate::format::rar5::payload::decode_member(
+                                hdr, &payload, None, &mut data,
+                            )?;
+                        }
+                        let crc = crc32fast::hash(&data);
+                        let blake = hdr
+                            .hash_value
+                            .map(|_| crate::format::rar5::blake2sp::hash(&data));
+                        verify_integrity_for(
+                            hdr,
+                            crc,
+                            blake,
+                            payload.params.as_ref(),
+                            payload.keys.as_ref(),
+                        )
+                    })();
+                    if let Err(e) = decoded {
+                        error = Some(e);
+                    }
+                    // A closed receiver means the run already failed; dropping
+                    // the member and stopping is correct.
+                    let _ = tx.send(DecodedMember {
+                        idx: i,
+                        data,
+                        error,
+                    });
+                })
+        });
+        for member in rx.iter() {
+            pending.insert(member.idx, member);
+            while let Some(member) = pending.remove(&next) {
+                replay(cx, &mut report, member)?;
+                next += 1;
+            }
+        }
+        Ok(())
+    });
+    outcome?;
+    if !pending.is_empty() || next != payload_count {
+        return Err(RarError::invalid_state(
+            "parallel extraction lost a member result",
+        ));
     }
     Ok(Some(report))
 }
