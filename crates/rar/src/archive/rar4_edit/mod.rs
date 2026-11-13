@@ -27,7 +27,8 @@
 //! plaintext marker carrying MHD_PASSWORD, so the layout scan decrypts every
 //! later block header with the archive password and the rewrite re-encrypts
 //! each block it rebuilds or inserts with a fresh salt (untouched blocks are
-//! copied as ciphertext). Multi-volume sets follow the same per-volume rule.
+//! copied as ciphertext). Multi-volume sets are rewritten volume by volume
+//! for renames and comment changes; a delete repacks the whole set.
 //!
 //! Lock (`k`) patches the 13-byte main header in place (mirroring the RAR5
 //! lock). Recovery reads the whole archive into memory — the NEWSUB record

@@ -2126,3 +2126,77 @@ fn varied_bytes(n: usize, line: &[u8]) -> Vec<u8> {
     }
     out
 }
+
+/// Deleting from a multi-volume RAR4 set repacks the whole set (deletes are
+/// refused by official `rar` with "Cannot modify volume"); WinRAR must still
+/// validate every volume of the rewritten set and every survivor must stay
+/// byte-identical.
+#[test]
+fn official_unrar_validates_rar4_multivolume_delete() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let dir = make_temp_dir();
+    let base = dir.path().join("mv.rar");
+    let noise = |len: usize, seed: u64| -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    };
+    let p1 = noise(150_000, 0x11);
+    let p3 = noise(90_000, 0x33);
+    {
+        let mut writer = rar_rs::ArchiveWriter::create_with(
+            &base,
+            rar_rs::WriterOptions::default()
+                .compression(rar_rs::ArchiveVersion::V29)
+                .volume_size(64 * 1024),
+        )
+        .unwrap();
+        writer
+            .add_bytes("a.bin", &p1, EntryWriteOptions::default())
+            .unwrap();
+        writer
+            .add_bytes("b.bin", &noise(120_000, 0x22), EntryWriteOptions::default())
+            .unwrap();
+        writer
+            .add_bytes("c.bin", &p3, EntryWriteOptions::default())
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "precondition: {volumes:?}");
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&volumes[0]).unwrap();
+        let b = editor.unique_entry("b.bin").unwrap();
+        assert_eq!(editor.delete_entries(&[b]).unwrap(), 1);
+    }
+    let after = rar_rs::discover_volumes(&base);
+    assert!(!after.is_empty());
+    let out = std::process::Command::new(&unrar)
+        .args(["t", "-idq"])
+        .arg(&after[0])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "unrar rejected the repacked volume set:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut reader = ArchiveReader::open(&after[0]).unwrap();
+    assert_eq!(
+        reader.entries().map(|e| e.name().to_string()).collect::<Vec<_>>(),
+        ["a.bin", "c.bin"]
+    );
+    let a = reader.unique_entry("a.bin").unwrap();
+    assert_eq!(reader.read_entry(a).unwrap(), p1);
+    let c = reader.unique_entry("c.bin").unwrap();
+    assert_eq!(reader.read_entry(c).unwrap(), p3);
+}

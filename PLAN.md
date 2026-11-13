@@ -26,7 +26,8 @@
   1.5/2.x 读取器同构，2.90 可原样读回；这类归档的注释只能创建时写，
   编辑一律拒绝）。
 - **RAR4 编辑全补**（ADR 0005）：头/块级操作 + 非 solid 块拷贝 + solid 整档
-  repack； `-hp` 与分卷（`rn`/`ch`/`k`/注释）均已支持。
+  repack； `-hp` 与分卷（`rn`/`ch`/`k`/注释/`d` 整集重打包）均已支持；
+  PROTECT_HEAD（0x78）与 stored 成员混代的边角也已解除。
 - **命令面**：官方 `rar` 全部命令（含 `rv` 补恢复卷、`lb/lt/vb/vt`
   列表变体）；官方 7.30 新增的 `la`/`va`/`lba`/`vba` 与服务块列表已接。
 - **成员顺序与目录形状对齐官方**：solid 归档按官方的分组规则排序（扩展名 →
@@ -315,17 +316,20 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 
 ## 一致拒绝（别"修"）
 
-- **分卷 append / 分卷删除**：官方 `rar`
-  同样拒绝（`Cannot modify volume`）。分卷的 `rn` / `ch`、`k`
-  与归档注释**不是**拒绝项：官方支持，我们也支持。
+- **分卷 append**：官方 `rar` 拒绝（`Cannot modify volume`），我们同样拒绝。
+  分卷的 `rn` / `ch`、`k`、归档注释**不是**拒绝项：官方支持，我们也支持。
+- **分卷删除**：官方 `rar` 拒绝（`Cannot modify volume`），我们**故意不跟**——
+  `d` 走整集重打包（原卷大小/编号/固实/注释/逐卷 RR 保留，暂存后整体换卷），
+  因为卷不能缩而不移动后续成员与 parity；这是可验证的正确语义，测试
+  `multivolume_delete_*`、`official_unrar_validates_rar4_multivolume_delete`。
 - **分卷 + 内联恢复记录（`-rr`）**：**创建时已实现**——`-v` 配 `-rr`
   时每卷各带一份记录，`.rev` 可同时用（RAR5 与 legacy RAR4
   同形）；编辑一个**已带记录**的卷集时按原强度重建记录，不是拒绝项。
 - **在 RAR4 卷集上显式改变恢复强度**（`rar rr <set> 20`、`-rr10`
   配已有卷集）：我们拒绝并提示「分卷用 `.rev` 恢复卷」。官方对自己的卷集一律
   `Cannot modify volume`，连逐卷记录都不重建，所以这里没有可对齐的行为。
-- **PROTECT_HEAD（RAR 2.5 时代）记录**：不可就地编辑/追加，报错要求重建归档（见
-  [`docs/PITFALLS.md`](docs/PITFALLS.md)）。
+- **PROTECT_HEAD（RAR 2.5 时代）记录**：已支持就地编辑/追加/重打包，按原强度
+  重建为 NEWSUB `Protect+`（见 [`docs/PITFALLS.md`](docs/PITFALLS.md)）。
 
 ## 已知小差异（记录，互操作无碍）
 

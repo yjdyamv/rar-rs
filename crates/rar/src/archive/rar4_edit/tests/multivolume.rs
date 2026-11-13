@@ -43,6 +43,20 @@ fn build_set(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     volumes
 }
 
+/// Incompressible bytes with a deterministic stream, so a compressed member
+/// really has to span volumes.
+fn noise(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
 fn main_flags(bytes: &[u8]) -> u16 {
     u16::from_le_bytes([bytes[10], bytes[11]])
 }
@@ -124,4 +138,216 @@ fn plain_multivolume_edit_with_irrelevant_password_never_corrupts() {
         archive.get_comment().unwrap(),
         Some(b"edited with an irrelevant password".to_vec())
     );
+}
+
+/// Deleting a member from a multi-volume set repacks the whole set: the
+/// surviving members must extract, the new set must keep the volume ceiling,
+/// and no stale volume may be left behind.
+#[test]
+fn multivolume_delete_repacks_the_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let volumes = build_set(dir.path());
+    let limit = volumes
+        .iter()
+        .map(|volume| std::fs::metadata(volume).unwrap().len())
+        .max()
+        .unwrap();
+    let first = volumes[0].clone();
+
+    let mut editor = ArchiveEditor::open(&first).unwrap();
+    let b = editor.unique_entry("b.bin").unwrap();
+    let report = editor.delete_entries(&[b]).unwrap();
+    assert_eq!(report, 1);
+    drop(editor);
+
+    let after = discover_volumes(&first);
+    assert!(!after.is_empty());
+    for volume in &after {
+        let len = std::fs::metadata(volume).unwrap().len();
+        assert!(
+            len <= limit.max(1),
+            "{} grew past the original volume ceiling ({len} > {limit})",
+            volume.display()
+        );
+    }
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["a.bin"]
+    );
+    assert_eq!(
+        archive
+            .read_with_options("a.bin", Default::default())
+            .unwrap(),
+        patterned(150_000, 251)
+    );
+    // The set must still be a volume set, not a silently truncated part 1.
+    assert!(
+        archive.volume_paths.len() > 1,
+        "the repacked set lost its volumes: {:?}",
+        archive.volume_paths
+    );
+}
+
+/// Compressed (non-solid) members decode through the regular reader during
+/// the repack; the survivors keep their payloads byte for byte.
+#[test]
+fn multivolume_delete_recompresses_compressed_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("c-mv.rar");
+    let p1 = noise(150_000, 0xA1);
+    let p2 = noise(120_000, 0xB2);
+    let p3 = noise(90_000, 0xC3);
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                volume_size: Some(64 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.bin", &p1, 3).unwrap();
+        archive.add_bytes("b.bin", &p2, 3).unwrap();
+        archive.add_bytes("c.bin", &p3, 3).unwrap();
+        archive.close().unwrap();
+    }
+    let volumes = discover_volumes(&base);
+    assert!(volumes.len() > 1);
+    let mut editor = ArchiveEditor::open(&volumes[0]).unwrap();
+    let b = editor.unique_entry("b.bin").unwrap();
+    assert_eq!(editor.delete_entries(&[b]).unwrap(), 1);
+    drop(editor);
+
+    let after = discover_volumes(&base);
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["a.bin", "c.bin"]
+    );
+    assert_eq!(
+        archive
+            .read_with_options("a.bin", Default::default())
+            .unwrap(),
+        p1
+    );
+    assert_eq!(
+        archive
+            .read_with_options("c.bin", Default::default())
+            .unwrap(),
+        p3
+    );
+}
+
+/// Solid chains span volumes: the repack decodes the chain through the set.
+#[test]
+fn multivolume_solid_delete_repacks_the_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("s-mv.rar");
+    let p1 = noise(150_000, 0xD1);
+    let p2 = noise(120_000, 0xE2);
+    let p3 = noise(90_000, 0xF3);
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                solid: true,
+                volume_size: Some(32 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.add_bytes("a.bin", &p1, 1).unwrap();
+        archive.add_bytes("b.bin", &p2, 1).unwrap();
+        archive.add_bytes("c.bin", &p3, 1).unwrap();
+        archive.close().unwrap();
+    }
+    let volumes = discover_volumes(&base);
+    assert!(volumes.len() > 1, "precondition: {volumes:?}");
+    let mut editor = ArchiveEditor::open(&volumes[0]).unwrap();
+    let b = editor.unique_entry("b.bin").unwrap();
+    assert_eq!(editor.delete_entries(&[b]).unwrap(), 1);
+    drop(editor);
+
+    let after = discover_volumes(&base);
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["a.bin", "c.bin"]
+    );
+    assert_eq!(
+        archive
+            .read_with_options("a.bin", Default::default())
+            .unwrap(),
+        p1
+    );
+    assert_eq!(
+        archive
+            .read_with_options("c.bin", Default::default())
+            .unwrap(),
+        p3
+    );
+}
+
+/// A delete composes with the archive comment and the per-volume recovery
+/// records: both survive the whole-set repack.
+#[test]
+fn multivolume_delete_keeps_comment_and_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rr-mv.rar");
+    {
+        let mut archive = RarArchive::create_with_options(
+            &base,
+            crate::options::CreateOptions {
+                compression: ArchiveVersion::V29,
+                volume_size: Some(32 * 1024),
+                recovery_percent: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive.set_rar4_writer_comment(Some(b"set comment".to_vec()));
+        archive
+            .add_bytes("a.bin", &patterned(120_000, 251), 0)
+            .unwrap();
+        archive
+            .add_bytes("b.bin", &patterned(100_000, 253), 0)
+            .unwrap();
+        archive.close().unwrap();
+    }
+    let volumes = discover_volumes(&base);
+    assert!(volumes.len() > 1);
+    let mut editor = ArchiveEditor::open(&volumes[0]).unwrap();
+    let b = editor.unique_entry("b.bin").unwrap();
+    assert_eq!(editor.delete_entries(&[b]).unwrap(), 1);
+    drop(editor);
+
+    let after = discover_volumes(&base);
+    let mut archive = RarArchive::open(&after[0]).unwrap();
+    assert_eq!(
+        archive.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["a.bin"]
+    );
+    assert_eq!(
+        archive.get_comment().unwrap(),
+        Some(b"set comment".to_vec())
+    );
+    assert_eq!(
+        archive
+            .read_with_options("a.bin", Default::default())
+            .unwrap(),
+        patterned(120_000, 251)
+    );
+    for volume in &after {
+        let protect = crate::recovery::legacy_rr::scan_protect_file(volume, None)
+            .unwrap()
+            .protect;
+        assert!(
+            protect.is_some(),
+            "{} lost its recovery record",
+            volume.display()
+        );
+    }
 }

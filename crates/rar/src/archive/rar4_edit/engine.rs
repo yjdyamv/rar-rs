@@ -7,7 +7,9 @@
 //! replaces the archive atomically. Blocks are streamed through bounded
 //! buffers; only a rebuilt recovery record's protected prefix is retained
 //! (its parity covers the whole prefix by construction). Multi-volume sets
-//! follow the per-volume rule (rename + comment only).
+//! are rewritten volume by volume for renames and comment changes; a delete
+//! re-encodes the whole set through [`super::repack`] (a volume cannot shrink
+//! without shifting every later member and the `.rev` parity grid).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -19,7 +21,7 @@ use super::layout::{
     archive_is_locked, copy_range, emit_block, first_volume, header_password, locate_signature,
     main_flags, patch_main_header, refuse_unsupported_containers, scan_layout_stream,
 };
-use super::repack::repack_solid_archive;
+use super::repack::{repack_multivolume_archive, repack_solid_archive};
 use super::{CMT_HEAD_SIZE, RECOVERY_HEAD_SIZE};
 use crate::archive::RarArchive;
 use crate::archive::transaction::EditSummary;
@@ -37,7 +39,9 @@ use crate::recovery::legacy_rr::{build_legacy_recovery_block, recovery_sector_co
 
 /// Header-level edits across a multi-volume RAR4 set: rename and archive
 /// comment. Each volume is rewritten as its own block stream (official `rar`
-/// does not rebalance volumes, so a volume may grow past `-v`). Every
+/// does not rebalance volumes, so a volume may grow past `-v`). Deletes do
+/// not take this path: they repack the whole set through
+/// [`repack_multivolume_archive`]. Every
 /// FILE_HEAD carrying a renamed member's name is rebuilt — a split member
 /// repeats its name in each volume's chunk header — and a comment change
 /// inserts/removes the `CMT` block right after the first volume's main
@@ -283,16 +287,10 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
     let header_encrypted = layout.header_encrypted;
     let solid = layout.main_flags & MHD_SOLID != 0;
     if solid {
-        // RAR 2.5-era PROTECT_HEAD records cannot be repacked in place.
-        let rr_sectors = match &layout.protect {
-            Some(protect) if &protect.mark == b"Protect+" => Some(protect.rec_sectors),
-            Some(_) => {
-                return Err(RarError::unsupported(
-                    "RAR4: archives with a PROTECT_HEAD recovery record cannot be appended to in place; recreate the archive",
-                ));
-            }
-            None => None,
-        };
+        // A solid archive is repacked whole at close, so either record shape
+        // (NEWSUB `Protect+` or RAR 2.5 PROTECT_HEAD) is dropped and rebuilt
+        // at the carried strength.
+        let rr_sectors = layout.protect.as_ref().map(|protect| protect.rec_sectors);
         return Ok(AppendPrelude {
             solid: true,
             truncate_pos: None,
@@ -300,21 +298,15 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
             header_encrypted,
         });
     }
-    // A trailing NEWSUB record sits between the last member and the
-    // end-of-archive block; truncating at its start drops it (it cannot
-    // protect members appended after it) and it is rebuilt at close. RAR
-    // 2.5-era PROTECT_HEAD records cannot be rebuilt this way.
+    // A trailing record sits between the last member and the end-of-archive
+    // block (NEWSUB) or after ENDARC (RAR 2.5 PROTECT_HEAD); truncating at
+    // its start drops it, and it is rebuilt at close from the carried
+    // parity-sector strength in either shape.
     let (truncate_pos, rr_sectors) = match &layout.protect {
-        Some(protect)
-            if &protect.mark == b"Protect+" && protect.data_end <= layout.endarc_offset =>
-        {
+        Some(protect) if protect.block_offset < layout.endarc_offset => {
             (Some(protect.block_offset as u64), Some(protect.rec_sectors))
         }
-        Some(_) => {
-            return Err(RarError::unsupported(
-                "RAR4: archives with a PROTECT_HEAD recovery record cannot be appended to in place; recreate the archive",
-            ));
-        }
+        Some(protect) => (Some(layout.endarc_offset as u64), Some(protect.rec_sectors)),
         None => (Some(layout.endarc_offset as u64), None),
     };
     Ok(AppendPrelude {
@@ -477,9 +469,19 @@ pub(crate) fn edit_rar4(
     // comment/recovery changes are refused clearly.
     if archive.volume_paths.len() > 1 || layout.main_flags & MHD_VOLUME != 0 {
         if deleted_count > 0 {
-            return Err(RarError::unsupported(
-                "cannot delete members from a multi-volume RAR4 archive (volume rebalancing is required; official rar refuses too)",
-            ));
+            let (rename_map, renamed) =
+                crate::archive::rename::build_rename_map(&archive.entries, renames)?;
+            return repack_multivolume_archive(
+                archive,
+                &deleted,
+                &rename_map,
+                comment,
+                force_rr,
+                force_sectors,
+                renamed,
+                member_comments,
+                layout.main_flags,
+            );
         }
         if force_rr.is_some() || force_sectors.is_some() || !member_comments.is_empty() {
             return Err(RarError::unsupported(
@@ -527,33 +529,26 @@ pub(crate) fn edit_rar4(
         return Err(RarError::format("RAR4: archive has no members to edit"));
     }
 
-    // Decide the recovery-record action. A RAR 2.5-era PROTECT_HEAD record
-    // (written after ENDARC, or with a non-NEWSUB mark) cannot be kept
-    // valid through a prefix rewrite; refuse rather than leave a stale
-    // record behind.
-    let existing = match &layout.protect {
-        Some(protect)
-            if &protect.mark == b"Protect+" && protect.data_end <= layout.endarc_offset =>
-        {
-            // Strip the old NEWSUB record; it lies entirely before the
-            // end-of-archive block.
-            Some((protect.block_offset, protect.data_end, protect.rec_sectors))
-        }
-        Some(_) => {
-            return Err(RarError::unsupported(
-                "RAR4: archives with a PROTECT_HEAD recovery record cannot be edited in place; recreate the archive",
-            ));
-        }
-        None => None,
-    };
-    // `region_end`/`tail_from`: a rewrite with a record rebuilds the prefix
-    // up to where the old record started (or the end-of-archive block) and
-    // keeps everything from the old record's data end (or ENDARC) onward.
+    // Decide the recovery-record action. Both record shapes are rebuilt as a
+    // NEWSUB record over the rewritten prefix: one that sits before ENDARC is
+    // skipped by the block walk and replaced wholesale, while a RAR 2.5
+    // PROTECT_HEAD record placed *after* ENDARC is dropped byte-wise from the
+    // tail so ENDARC and anything past the record survive.
     let forced = force_rr.is_some() || force_sectors.is_some();
-    let (region_end, tail_from, keep_sectors) = match (forced, existing) {
-        (_, Some((old_start, old_end, rec))) => (old_start, old_end, Some(rec)),
-        (true, None) => (layout.endarc_offset, layout.endarc_offset, None),
-        (false, None) => (layout.endarc_offset, layout.endarc_offset, None),
+    let (region_end, tail_from, keep_sectors, drop_tail_record) = match &layout.protect {
+        Some(protect) if protect.block_offset >= layout.endarc_offset => (
+            layout.endarc_offset,
+            layout.endarc_offset,
+            Some(protect.rec_sectors),
+            Some((protect.block_offset, protect.data_end)),
+        ),
+        Some(protect) => (
+            protect.block_offset,
+            protect.data_end,
+            Some(protect.rec_sectors),
+            None,
+        ),
+        None => (layout.endarc_offset, layout.endarc_offset, None, None),
     };
     let wants_record = forced || keep_sectors.is_some();
     let patched_main = if wants_record {
@@ -716,19 +711,37 @@ pub(crate) fn edit_rar4(
         }
 
         // Keep the tail (old record's data end onward, or ENDARC + trailing
-        // bytes) verbatim.
+        // bytes) verbatim. A record that lives after ENDARC is cut out of
+        // that tail so neither its header nor its parity survives.
         let file_len = src.metadata().map_err(RarError::Io)?.len();
         if tail_from as u64 > file_len {
             return Err(RarError::format(
                 "RAR4: recovery tail lies past the archive end",
             ));
         }
-        copy_range(
-            &mut src,
-            &mut out,
-            tail_from as u64,
-            file_len - tail_from as u64,
-        )?;
+        match drop_tail_record {
+            None => copy_range(
+                &mut src,
+                &mut out,
+                tail_from as u64,
+                file_len - tail_from as u64,
+            )?,
+            Some((record_start, record_end)) => {
+                let record_start = (record_start as u64).min(file_len);
+                let record_end = (record_end as u64).min(file_len);
+                if record_start > tail_from as u64 {
+                    copy_range(
+                        &mut src,
+                        &mut out,
+                        tail_from as u64,
+                        record_start - tail_from as u64,
+                    )?;
+                }
+                if record_end < file_len {
+                    copy_range(&mut src, &mut out, record_end, file_len - record_end)?;
+                }
+            }
+        }
         out.sync_all().map_err(RarError::Io)?;
         Ok(())
     })();

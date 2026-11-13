@@ -201,8 +201,6 @@ pub(super) struct ProtectRecord {
     pub(super) data_end: usize,
     /// Number of 512-byte parity sectors.
     pub(super) rec_sectors: u32,
-    /// `Protect!` (0x78) or `Protect+` (0x7a).
-    pub(super) mark: [u8; 8],
 }
 
 /// A parsed plaintext, single-volume RAR4 layout. The member headers are the
@@ -256,7 +254,6 @@ fn parse_protect_record(view: &Rar4Block) -> RarResult<Option<ProtectRecord>> {
             block_offset: view.offset as usize,
             data_end: view.end() as usize,
             rec_sectors: u32::from(rec_sectors),
-            mark: [0x50, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x21], // "Protect!"
         }));
     }
     // RAR 3.x/4.x NEWSUB (0x7a) named `RR`: FILE_HEAD-shaped header whose
@@ -288,7 +285,6 @@ fn parse_protect_record(view: &Rar4Block) -> RarResult<Option<ProtectRecord>> {
             block_offset: view.offset as usize,
             data_end: view.end() as usize,
             rec_sectors,
-            mark: [0x50, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x2b], // "Protect+"
         }));
     }
     Ok(None)
@@ -323,7 +319,22 @@ pub(super) fn scan_layout_stream(
     // Latched from the main header: `MHD_PASSWORD` means every later block
     // header is encrypted.
     let mut hp: Option<&[u8]> = None;
-    while let Some(view) = read_block(stream, hp.is_some(), hp, EnvelopePolicy::PLAN)? {
+    loop {
+        if endarc.is_some() {
+            // Only the trailing 0x72..=0x7b block types are considered after
+            // ENDARC (the RAR 2.5 PROTECT_HEAD record); arbitrary trailing
+            // bytes end the scan instead of turning into a format error.
+            let pos = stream.stream_position()?;
+            let mut probe = [0u8; 3];
+            let n = stream.read(&mut probe)?;
+            stream.seek(SeekFrom::Start(pos))?;
+            if n < probe.len() || !(0x72..=0x7b).contains(&probe[2]) {
+                break;
+            }
+        }
+        let Some(view) = read_block(stream, hp.is_some(), hp, EnvelopePolicy::PLAN)? else {
+            break;
+        };
         let start = view.offset as usize;
         stream_end = (view.offset + view.total_size) as usize;
         if view.head_type == MAIN_HEAD && main.is_none() {
@@ -338,10 +349,15 @@ pub(super) fn scan_layout_stream(
             }
             main = Some((start, view.header.clone(), flags));
         } else if view.head_type == ENDARC_HEAD {
-            endarc = Some(start);
-            break;
+            // A RAR 2.5 `-rr` set places its PROTECT_HEAD record *after* the
+            // end-of-archive block, so the scan continues past ENDARC until
+            // the stream runs out (or a post-ENDARC record is found) instead
+            // of stopping there. Blocks after ENDARC are never members.
+            endarc.get_or_insert(start);
         } else if view.head_type == FILE_HEAD {
-            files.push((start, view.header.clone()));
+            if endarc.is_none() {
+                files.push((start, view.header.clone()));
+            }
         } else if protect.is_none() {
             protect = parse_protect_record(&view)?;
         }

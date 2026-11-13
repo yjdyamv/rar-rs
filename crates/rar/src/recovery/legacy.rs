@@ -175,10 +175,27 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
     // `-hp` flag, latched from the (plaintext) main header: every block
     // after it has an encrypted header.
     let mut encrypted = false;
+    // A RAR 2.5 `-rr` set places its PROTECT_HEAD record *after* the
+    // end-of-archive block, so the walk continues past ENDARC until the
+    // stream ends or a record shows up.
+    let mut past_endarc = false;
     // A block found by resynchronizing past a corrupt one; consumed on the
     // next iteration (the stream is already positioned past it).
     let mut resynced: Option<crate::format::rar4::Rar4Block> = None;
     while pos + 7 <= file_len {
+        if past_endarc && resynced.is_none() {
+            // Only a block header is considered after ENDARC; arbitrary
+            // trailing bytes end the scan.
+            let here = stream.stream_position().map_err(RarError::Io)?;
+            let mut probe = [0u8; 3];
+            let n = stream.read(&mut probe).map_err(RarError::Io)?;
+            stream
+                .seek(std::io::SeekFrom::Start(here))
+                .map_err(RarError::Io)?;
+            if n < probe.len() || !(0x72..=0x7b).contains(&probe[2]) {
+                break;
+            }
+        }
         let block = match resynced.take() {
             Some(block) => block,
             None => {
@@ -309,7 +326,7 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
             }
         }
         if head_type == ENDARC_HEAD {
-            break;
+            past_endarc = true;
         }
         pos = start + total;
     }
@@ -560,6 +577,75 @@ pub(crate) fn recovery_sector_count(prefix_len: usize, percent: u8) -> u32 {
 /// The caller appends this block between the last member and the
 /// end-of-archive block.
 pub(crate) fn build_legacy_recovery_block(prefix: &[u8], rec_sectors: u32) -> RarResult<Vec<u8>> {
+    let (tags, parity, total_blocks) = legacy_record_data(prefix, rec_sectors)?;
+    let data_len = tags.len() + parity.len();
+    let mut header = Vec::with_capacity(32 + 2 + 20);
+    // CRC placeholder + type + flags (LONG_BLOCK) + head_size + add_size.
+    header.extend_from_slice(&[0u8; 2]);
+    header.push(0x7a); // NEWSUB_HEAD
+    header.extend_from_slice(&(0xC000u16).to_le_bytes()); // LONG_BLOCK
+    header.extend_from_slice(&(54u16).to_le_bytes()); // head_size
+    header.extend_from_slice(&(data_len as u32).to_le_bytes()); // packed/add
+    header.extend_from_slice(&(data_len as u32).to_le_bytes()); // unpacked
+    header.push(2); // host_os: Windows
+    header.extend_from_slice(&0u32.to_le_bytes()); // file_crc (unused)
+    header.extend_from_slice(&0u32.to_le_bytes()); // file_time
+    header.push(29); // unp_ver
+    header.push(0x30); // method: store
+    header.extend_from_slice(&2u16.to_le_bytes()); // name_size
+    header.extend_from_slice(&0u32.to_le_bytes()); // file_attr
+    header.extend_from_slice(b"RR");
+    header.extend_from_slice(b"Protect+");
+    header.extend_from_slice(&rec_sectors.to_le_bytes());
+    header.extend_from_slice(&total_blocks.to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes());
+    debug_assert_eq!(header.len(), 54);
+
+    // Header CRC16 over bytes[2..] (the RAR4 convention).
+    let crc = (crate::crc32::crc32(&header[2..]) & 0xffff) as u16;
+    header[0..2].copy_from_slice(&crc.to_le_bytes());
+
+    let mut out = header;
+    out.extend_from_slice(&tags);
+    out.extend_from_slice(&parity);
+    Ok(out)
+}
+
+/// Build a RAR 2.5-era PROTECT_HEAD (0x78) record: a fixed 26-byte header
+/// carrying the `Protect!` mark, followed by the same tag table and parity
+/// sectors as the NEWSUB shape. RAR 2.5 writes this record *after* the
+/// end-of-archive block (its predecessor, RAR 2.0, put a 0x78 record before
+/// ENDARC); both are supported by the reader and the editor.
+#[cfg(test)]
+pub(crate) fn build_legacy_protect_head_block(
+    prefix: &[u8],
+    rec_sectors: u32,
+) -> RarResult<Vec<u8>> {
+    let rec_sectors = u16::try_from(rec_sectors)
+        .map_err(|_| RarError::invalid_option("recovery sector count overflows a 16-bit field"))?;
+    let (tags, parity, total_blocks) = legacy_record_data(prefix, u32::from(rec_sectors))?;
+    let data_len = tags.len() + parity.len();
+    let mut header = vec![0u8; 26];
+    header[2] = 0x78; // PROTECT_HEAD
+    header[3..5].copy_from_slice(&0x8000u16.to_le_bytes()); // LONG_BLOCK
+    header[5..7].copy_from_slice(&26u16.to_le_bytes()); // head_size
+    header[7..11].copy_from_slice(&(data_len as u32).to_le_bytes()); // add_size
+    header[12..14].copy_from_slice(&rec_sectors.to_le_bytes());
+    header[14..18].copy_from_slice(&total_blocks.to_le_bytes());
+    header[18..26].copy_from_slice(b"Protect!");
+    let crc = (crate::crc32::crc32(&header[2..]) & 0xffff) as u16;
+    header[0..2].copy_from_slice(&crc.to_le_bytes());
+
+    let mut out = header;
+    out.extend_from_slice(&tags);
+    out.extend_from_slice(&parity);
+    Ok(out)
+}
+
+/// The tag table (one little-endian CRC16 per protected 512-byte sector,
+/// partial tail zero-padded) and XOR parity sectors shared by both legacy
+/// record shapes.
+fn legacy_record_data(prefix: &[u8], rec_sectors: u32) -> RarResult<(Vec<u8>, Vec<u8>, u32)> {
     if rec_sectors == 0 {
         return Err(RarError::format(
             "RAR4: recovery record needs at least one parity sector",
@@ -597,37 +683,7 @@ pub(crate) fn build_legacy_recovery_block(prefix: &[u8], rec_sectors: u32) -> Ra
         }
     }
 
-    let data_len = tags.len() + parity.len();
-    let mut header = Vec::with_capacity(32 + 2 + 20);
-    // CRC placeholder + type + flags (LONG_BLOCK) + head_size + add_size.
-    header.extend_from_slice(&[0u8; 2]);
-    header.push(0x7a); // NEWSUB_HEAD
-    header.extend_from_slice(&(0xC000u16).to_le_bytes()); // LONG_BLOCK
-    header.extend_from_slice(&(54u16).to_le_bytes()); // head_size
-    header.extend_from_slice(&(data_len as u32).to_le_bytes()); // packed/add
-    header.extend_from_slice(&(data_len as u32).to_le_bytes()); // unpacked
-    header.push(2); // host_os: Windows
-    header.extend_from_slice(&0u32.to_le_bytes()); // file_crc (unused)
-    header.extend_from_slice(&0u32.to_le_bytes()); // file_time
-    header.push(29); // unp_ver
-    header.push(0x30); // method: store
-    header.extend_from_slice(&2u16.to_le_bytes()); // name_size
-    header.extend_from_slice(&0u32.to_le_bytes()); // file_attr
-    header.extend_from_slice(b"RR");
-    header.extend_from_slice(b"Protect+");
-    header.extend_from_slice(&rec_sectors.to_le_bytes());
-    header.extend_from_slice(&total_blocks.to_le_bytes());
-    header.extend_from_slice(&0u32.to_le_bytes());
-    debug_assert_eq!(header.len(), 54);
-
-    // Header CRC16 over bytes[2..] (the RAR4 convention).
-    let crc = (crate::crc32::crc32(&header[2..]) & 0xffff) as u16;
-    header[0..2].copy_from_slice(&crc.to_le_bytes());
-
-    let mut out = header;
-    out.extend_from_slice(&tags);
-    out.extend_from_slice(&parity);
-    Ok(out)
+    Ok((tags, parity, total_blocks))
 }
 
 #[cfg(test)]

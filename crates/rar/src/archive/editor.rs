@@ -479,7 +479,8 @@ impl ArchiveEditor {
     /// the FILE_HEAD is rebuilt with the new encoded name and its CRC16
     /// recomputed; member data is never recompressed. Renaming on a `-hp`
     /// archive rewrites the encrypted header with the archive password.
-    /// Multi-volume and locked archives are refused.
+    /// Multi-volume sets are rewritten volume by volume; locked archives are
+    /// refused.
     pub fn rename_entries(&mut self, renames: &[(EntryId, String)]) -> RarResult<usize> {
         let mut plan = EditPlan::new();
         for (id, new_name) in renames {
