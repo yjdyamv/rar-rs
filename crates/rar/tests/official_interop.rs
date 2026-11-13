@@ -2117,6 +2117,61 @@ fn official_unrar_validates_rar4_solid_append() {
     assert_eq!(reader.read_entry(b).unwrap(), p2);
 }
 
+/// `-hp` encrypts every block after the main header, directory entries
+/// included; a plaintext directory header made UnRAR reject the archive with
+/// "Checksum error in the encrypted file ... wrong password".
+#[test]
+fn official_unrar_validates_rar4_hp_directory_headers() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("hp-dirs.rar");
+    let payload = varied_bytes(
+        40_000,
+        b"directory header encryption 0123456789
+",
+    );
+    {
+        let mut archive = rar_rs::ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::default()
+                .compression(rar_rs::ArchiveVersion::V29)
+                .password("pw")
+                .encrypt_headers(true),
+        )
+        .unwrap();
+        archive
+            .add_bytes("sub/", &[], EntryWriteOptions::default())
+            .unwrap();
+        archive
+            .add_bytes("sub/a.txt", &payload, EntryWriteOptions::default())
+            .unwrap();
+        archive.finish().unwrap();
+    }
+    {
+        let mut reader =
+            rar_rs::ArchiveReader::open_with(&path, rar_rs::OpenOptions::default().password("pw"))
+                .unwrap();
+        let directory = reader.unique_entry("sub/").unwrap();
+        assert!(reader.entry(directory).unwrap().metadata().is_dir());
+        let file = reader.unique_entry("sub/a.txt").unwrap();
+        assert_eq!(reader.read_entry(file).unwrap(), payload);
+    }
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg("-ppw")
+        .arg("-idq")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "unrar rejected an -hp archive with directory entries"
+    );
+}
+
 fn varied_bytes(n: usize, line: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     for i in 0..n {

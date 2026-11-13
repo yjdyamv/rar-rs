@@ -579,22 +579,33 @@ pub(crate) fn write_rar4_dir_entry(
         ext_time: ext_time.as_deref(),
     };
     let hdr = build_file_header(&params)?;
+    // `-hp` encrypts every block after the main header, directories
+    // included: a plaintext directory header makes readers derive a wrong
+    // archive key and reject the whole file ("wrong password" / checksum
+    // error). The salt lives in the ciphertext block, so the on-disk size
+    // is `8 + align16(head_size)` rather than `head_size`.
+    let header_encryption = cx.header_encryption();
+    let header_on_disk = if header_encryption {
+        8 + (((hdr.len() + 15) & !15) as u64)
+    } else {
+        hdr.len() as u64
+    };
     // Multi-volume: roll to a volume with room for this head plus the
     // volume-set end-of-archive block (same rule as file members). A volume
     // too small for even a fresh header must error instead of rolling
     // forever.
     if let Some(volume_size) = cx.write_ctx().output.volume_size {
         let endarc = crate::format::rar4::write::endarc_volume_reserve(
-            cx.header_encryption(),
+            header_encryption,
             cx.write_ctx().solid.rar4_unp_ver,
         );
         let mut rolled = false;
         loop {
             let used = cx.bytes_written();
-            // The directory header is what the record will protect.
-            let prefix = used + hdr.len() as u64;
+            // The directory record is what the recovery record will protect.
+            let prefix = used + header_on_disk;
             if volume_size.saturating_sub(used)
-                > endarc + hdr.len() as u64 + cx.recovery_volume_reserve(prefix)
+                > endarc + header_on_disk + cx.recovery_volume_reserve(prefix)
             {
                 break;
             }
@@ -607,9 +618,20 @@ pub(crate) fn write_rar4_dir_entry(
             rolled = true;
         }
     }
+    // Encrypt only after the final volume is chosen, so a roll does not
+    // copy one salt into two volumes.
+    let header_bytes = if header_encryption {
+        let password = cx
+            .password()
+            .map(str::to_owned)
+            .ok_or_else(|| RarError::encrypted("header encryption requires a password"))?;
+        crate::format::rar4::write::encrypt_block_header(&hdr, &password)?.0
+    } else {
+        hdr.clone()
+    };
     let stream = cx.stream_mut()?;
-    stream.write_all(&hdr)?;
-    cx.add_bytes_written(hdr.len() as u64);
+    stream.write_all(&header_bytes)?;
+    cx.add_bytes_written(header_on_disk);
     let head_crc = u16::from_le_bytes([hdr[0], hdr[1]]);
     cx.push_entry(ArchiveEntry {
         header: FileHeader {
