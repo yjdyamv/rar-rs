@@ -276,6 +276,14 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 
 ## 提取与安全
 
+- **固实链里的滤波记录是成员内坐标**：解码器在 `apply_complete_filters` 用
+  `block_start - member_start` 换算，因此同一链里可以有任意多个滤波成员，
+  分块与跨卷都不影响；编码端只能在写数据前决策（共享 `EncoderState` 不能回滚），
+  所以 `solid_filter_specs` 必须先探测后编码，且 `-mc` 策略要在探测前生效。
+  `add_bytes` 走 `add_bytes_rar5`，不试滤波——只有文件路径（`add_rar5_data`）
+  才有滤波；要体积对比必须用文件路径或 CLI。契约
+  `rar5_solid_filters::solid_archive_filters_are_applied_and_roundtrip`。
+
 - **不安全链接目标只跳过该链接、不中止整轮**（记进
   `ExtractionReport::refused`，与 `-o-` 的 `skipped` 分开，exit 1）；
   链接目标的校验在删除既有目标**之前**。

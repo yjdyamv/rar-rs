@@ -231,6 +231,45 @@ fn try_auto_filters(
     )
 }
 
+/// Solid counterpart of [`try_auto_filters`].
+///
+/// The filter decision runs on whole-member probes before the shared encoder
+/// state is touched, because a losing candidate cannot be rolled back out of
+/// a solid chain. The chosen record covers the whole member; the transform
+/// output continues the same LZ window, which the decoder mirrors (its
+/// pending filters add the member start to the recorded positions).
+fn try_solid_filters(
+    cx: &mut dyn Engine,
+    data: &[u8],
+    method: u8,
+    dsl: u8,
+    dict_bytes: Option<u64>,
+    threads: usize,
+) -> RarResult<Option<Vec<u8>>> {
+    let variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
+    let filters = cx.write_ctx().compression.filters;
+    let Some(specs) = lzss_huff::solid_filter_specs(data, method, dsl, variant, &filters)? else {
+        return Ok(None);
+    };
+    let cancel = cx.cancel_token();
+    let state = cx
+        .write_ctx_mut()
+        .solid
+        .encoder_state
+        .as_mut()
+        .expect("encoder state seeded");
+    Ok(Some(lzss_huff::encode_with_filters_continue(
+        data,
+        method,
+        dsl,
+        &specs,
+        variant,
+        threads,
+        state,
+        cancel.as_deref(),
+    )?))
+}
+
 /// RAR5 filesystem-file member writer (the neutral dispatcher lives in
 /// `format::shared::write_ops`).
 pub(crate) fn add_file_rar5(
@@ -383,6 +422,23 @@ pub(crate) fn add_file_rar5(
     crate::format::shared::write_ops::maybe_reset_solid_for_extension(cx, &name);
     let (dsl, dict_bytes) = solid_dict_params(cx, dsl, dict_bytes);
     let chain_solid = cx.begin_solid_member();
+    #[cfg(feature = "parallel")]
+    const MT_MIN: usize = crate::codec::DEFAULT_CHUNK_SIZE;
+    #[cfg(feature = "parallel")]
+    let threads = cx.effective_threads();
+    #[cfg(not(feature = "parallel"))]
+    let threads = 1usize;
+    let use_mt = {
+        #[cfg(feature = "parallel")]
+        {
+            threads > 1 && whole.len() >= MT_MIN
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = threads;
+            false
+        }
+    };
 
     // Try the automatic delta (multimedia) filter first, then the x86
     // (E8/E8E9) filter. Ordering matters: real x86 code is not
@@ -399,15 +455,25 @@ pub(crate) fn add_file_rar5(
     // solid archive never tries one: the first member would leave the
     // chain immediately and every later member would follow it, leaving
     // `-s` to buy nothing.
-    let filtered = if cx.write_ctx().solid.mode {
-        None
+    let solid_mode = cx.write_ctx().solid.mode;
+    let filtered = if solid_mode {
+        try_solid_filters(
+            cx,
+            &whole,
+            method,
+            dsl,
+            dict_bytes,
+            if use_mt { threads } else { 1 },
+        )?
     } else {
         try_auto_filters(cx, &whole, method, dsl, dict_bytes)?
     };
     if let Some(filtered) = filtered
         && (filtered.len() as u64) < file_size
     {
-        crate::format::shared::write_ops::reset_solid_chain(cx);
+        if !solid_mode {
+            crate::format::shared::write_ops::reset_solid_chain(cx);
+        }
         let (header_crc, extra_data, stored_hash, encr) =
             super::emit::payload_extra_and_crc(cx.password(), plain_crc, plain_blake);
         let mut plan = MemberPlan {
@@ -420,7 +486,7 @@ pub(crate) fn add_file_rar5(
             extra_data,
             attrs,
             mtime,
-            solid: false,
+            solid: chain_solid,
             stored_hash,
         };
         plan.push_extra(time_extra.as_deref(), owner_extra.as_deref());
@@ -456,24 +522,7 @@ pub(crate) fn add_file_rar5(
     // looked covered. The batch and streaming gates keep their own
     // thresholds: those run inside a pool wave (nested MT) or only ever
     // see >= 64 MiB members.
-    #[cfg(feature = "parallel")]
-    const MT_MIN: usize = crate::codec::DEFAULT_CHUNK_SIZE;
-    #[cfg(feature = "parallel")]
-    let threads = cx.effective_threads();
-    #[cfg(not(feature = "parallel"))]
-    let threads = 1usize;
     let mut packed = Vec::new();
-    let use_mt = {
-        #[cfg(feature = "parallel")]
-        {
-            threads > 1 && whole.len() >= MT_MIN
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            let _ = threads;
-            false
-        }
-    };
     if use_mt {
         let state = cx
             .write_ctx_mut()

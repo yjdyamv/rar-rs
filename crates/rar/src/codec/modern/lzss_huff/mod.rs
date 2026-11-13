@@ -25,11 +25,13 @@ pub(crate) use encode::encode_chunked_raw_with_lead;
 pub(crate) use encode::set_fast_path_enabled;
 #[cfg(all(test, feature = "parallel"))]
 pub(crate) use encode::set_price_carry_enabled;
+pub(crate) use encode::solid_filter_specs;
 pub use encode::{
     DEFAULT_CHUNK_SIZE, EncodeOptions, EncoderState, FilterSpec, MAX_FILTER_BLOCK_LENGTH, encode,
     encode_chunked, encode_chunked_mt, encode_chunked_raw, encode_raw,
     encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
-    encode_with_filters_mt, encode_with_progress_raw, pick_delta_channel,
+    encode_with_filters_continue, encode_with_filters_mt, encode_with_progress_raw,
+    pick_delta_channel,
 };
 pub(crate) use encode::{
     FILTER_PROBE_LEN, FilterProbe, filter_transform_wins, member_filter_probes,
