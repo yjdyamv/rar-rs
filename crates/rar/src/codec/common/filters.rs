@@ -16,17 +16,47 @@ use crate::error::{RarError, RarResult};
 /// We refuse them explicitly instead of silently returning unfiltered
 /// data, so a hypothetical archive using them fails with a clear error
 /// rather than a CRC mismatch.
+#[allow(dead_code)] // allocation-returning convenience used by tests
 pub fn apply_filter_decode(
     filter_type: u8,
     data: &mut [u8],
     channels: u8,
     file_offset: u64,
 ) -> RarResult<Vec<u8>> {
+    let mut decoded = data.to_vec();
+    apply_filter_decode_in_place(filter_type, &mut decoded, channels, file_offset)?;
+    Ok(decoded)
+}
+
+/// Apply the inverse filter to `data` in place.
+///
+/// E8/E8E9 and ARM transform their bytes where they stand; Delta needs a
+/// separate output buffer (its result is a permutation of channels), so that
+/// one case still goes through a temporary and copies back.
+pub fn apply_filter_decode_in_place(
+    filter_type: u8,
+    data: &mut [u8],
+    channels: u8,
+    file_offset: u64,
+) -> RarResult<()> {
     match filter_type {
-        FILTER_DELTA => Ok(delta_decode(data, channels)),
-        FILTER_E8 => Ok(e8_decode(data, file_offset, true)),
-        FILTER_E8E9 => Ok(e8_decode(data, file_offset, false)),
-        FILTER_ARM => Ok(arm_decode(data, file_offset)),
+        FILTER_DELTA => {
+            let decoded = delta_decode(data, channels);
+            data.copy_from_slice(&decoded);
+            Ok(())
+        }
+        FILTER_E8 => {
+            e8_decode_in_place(data, file_offset, true);
+            Ok(())
+        }
+        FILTER_E8E9 => {
+            e8_decode_in_place(data, file_offset, false);
+            Ok(())
+        }
+        FILTER_ARM => {
+            arm_decode_in_place(data, file_offset);
+            Ok(())
+        }
         other => Err(RarError::format(format!(
             "unsupported RAR5 filter type {other}"
         ))),
@@ -181,17 +211,50 @@ fn delta_decode_simd_ch1(data: &[u8]) -> Vec<u8> {
 /// Virtual file size for the x86 address normalisation model.
 const X86_FILTER_FILE_SIZE: u32 = 0x0100_0000;
 
-fn e8_decode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
-    let n = data.len();
-    if n < 5 {
-        return data.to_vec();
+/// Byte that is zero exactly where a `u64` word contains a zero byte.
+#[inline(always)]
+fn zero_byte_mask(word: u64) -> u64 {
+    word.wrapping_sub(0x0101_0101_0101_0101) & !word & 0x8080_8080_8080_8080
+}
+
+/// Return the next position at or after `start` holding an E8 (or E8/E9)
+/// opcode, scanning eight bytes per step.
+#[inline(always)]
+fn next_e8_opcode(data: &[u8], start: usize, e8_only: bool) -> Option<usize> {
+    let limit = data.len() - 4;
+    let mut i = start;
+    while i + 8 <= limit {
+        let word = u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
+        let folded = word ^ 0xE8E8_E8E8_E8E8_E8E8;
+        let hits = if e8_only {
+            zero_byte_mask(folded)
+        } else {
+            zero_byte_mask(folded & 0xFEFE_FEFE_FEFE_FEFE)
+        };
+        if hits != 0 {
+            return Some(i + (hits.trailing_zeros() as usize >> 3));
+        }
+        i += 8;
     }
     let cmp_mask = if e8_only { 0xFF } else { 0xFE };
-    let opcode_limit = n - 4;
+    while i < limit {
+        if data[i] & cmp_mask == 0xE8 {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn e8_decode_in_place(data: &mut [u8], file_offset: u64, e8_only: bool) {
+    let n = data.len();
+    if n < 5 {
+        return;
+    }
     let mut i = 0usize;
-    while i < opcode_limit {
-        let opcode = data[i];
-        if opcode & cmp_mask == 0xE8 {
+    while let Some(pos) = next_e8_opcode(data, i, e8_only) {
+        {
+            i = pos;
             let cur_pos = i + 1;
             let offset = file_offset.wrapping_add(cur_pos as u64) as u32 % X86_FILTER_FILE_SIZE;
             let addr = u32::from_le_bytes(data[cur_pos..cur_pos + 4].try_into().unwrap());
@@ -207,11 +270,8 @@ fn e8_decode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
                 data[cur_pos..cur_pos + 4].copy_from_slice(&value.to_le_bytes());
             }
             i = cur_pos + 4;
-        } else {
-            i += 1;
         }
     }
-    data.to_vec()
 }
 
 pub(crate) fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec<u8> {
@@ -249,10 +309,10 @@ pub(crate) fn e8_encode(data: &mut [u8], file_offset: u64, e8_only: bool) -> Vec
 
 // ── ARM Filter ─────────────────────────────────────────────────────────────
 
-fn arm_decode(data: &mut [u8], file_offset: u64) -> Vec<u8> {
+fn arm_decode_in_place(data: &mut [u8], file_offset: u64) {
     let n = data.len();
     if n < 4 {
-        return data.to_vec();
+        return;
     }
     let mut i = 0;
     while i + 3 < n {
@@ -267,7 +327,6 @@ fn arm_decode(data: &mut [u8], file_offset: u64) -> Vec<u8> {
         }
         i += 4;
     }
-    data.to_vec()
 }
 
 fn arm_encode(data: &mut [u8], file_offset: u64) -> Vec<u8> {

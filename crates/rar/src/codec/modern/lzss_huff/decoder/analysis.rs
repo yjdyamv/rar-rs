@@ -71,22 +71,22 @@ pub fn analyze_stream(
     let mut produced = 0u64;
 
     while let Some(symbol) = reader.next() {
-        match symbol {
-            Symbol::BlockStart(info) => {
-                if in_block {
-                    out.blocks.push(std::mem::take(&mut block));
-                }
-                block = BlockStat {
-                    block_size: info.block_size,
-                    table_present: info.table_present,
-                    nc: info.nc,
-                    dc: info.dc,
-                    ldc: info.ldc,
-                    rc: info.rc,
-                    ..Default::default()
-                };
-                in_block = true;
+        if let Some(info) = reader.take_block_info() {
+            if in_block {
+                out.blocks.push(std::mem::take(&mut block));
             }
+            block = BlockStat {
+                block_size: info.block_size,
+                table_present: info.table_present,
+                nc: info.nc,
+                dc: info.dc,
+                ldc: info.ldc,
+                rc: info.rc,
+                ..Default::default()
+            };
+            in_block = true;
+        }
+        match symbol {
             Symbol::Literal(_) => {
                 block.literals += 1;
                 block.out_bytes += 1;
@@ -217,7 +217,7 @@ pub fn trace_stream(
 
     while let Some(symbol) = reader.next() {
         match symbol {
-            Symbol::BlockStart(_) | Symbol::Filter(_) => {}
+            Symbol::Filter(_) => {}
             Symbol::Literal(_) => {
                 let p = pos;
                 pos += 1;

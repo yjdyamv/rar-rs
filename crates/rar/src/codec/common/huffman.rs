@@ -23,7 +23,11 @@ pub struct DecodeTable {
     /// Quick lookup, one entry per `QUICK_BITS` prefix: code length in the
     /// high 16 bits, symbol in the low 16. One load per symbol beats two
     /// parallel arrays, and the hot loop runs this for every literal.
-    quick: Vec<u32>,
+    ///
+    /// Fixed size rather than `Vec`: with a constant-length array the hot
+    /// index (`prefix & (QUICK_SIZE - 1)`) is provably in range, so the
+    /// per-symbol bounds check disappears.
+    quick: [u32; QUICK_SIZE],
 }
 
 impl DecodeTable {
@@ -65,7 +69,7 @@ impl DecodeTable {
         }
 
         // Build quick lookup table
-        let mut quick = vec![0u32; QUICK_SIZE];
+        let mut quick = [0u32; QUICK_SIZE];
 
         let mut code: u32 = 0;
         for cl in 1..=QUICK_BITS {
@@ -105,10 +109,10 @@ impl DecodeTable {
 #[inline(always)]
 pub fn decode_symbol(table: &DecodeTable, reader: &mut BitReader) -> Result<usize, &'static str> {
     if let Ok(prefix) = reader.peek_bits(QUICK_BITS as u8) {
-        let entry = table.quick[prefix as usize];
+        let entry = table.quick[(prefix as usize) & (QUICK_SIZE - 1)];
         let cl = entry >> 16;
         if cl != 0 {
-            reader.skip_bits(cl);
+            reader.skip_bits_unchecked(cl);
             return Ok((entry & 0xffff) as usize);
         }
     }

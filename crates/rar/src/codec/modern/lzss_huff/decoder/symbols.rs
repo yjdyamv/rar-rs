@@ -42,6 +42,12 @@ pub(super) enum MatchKind {
 }
 
 /// One resolved symbol.
+///
+/// Cold events (filters) and block starts are kept out of this type: the
+/// enum is returned by value once per decoded symbol, so every inline cold
+/// variant widens the hot return for millions of literals. Filters are boxed,
+/// and block starts are handed to analysis through
+/// [`SymbolReader::take_block_info`].
 pub(super) enum Symbol {
     Literal(u8),
     Match {
@@ -51,10 +57,7 @@ pub(super) enum Symbol {
     },
     /// A filter record, parsed and awaiting its output region. The engine
     /// stages it; analysis only records the region.
-    Filter(PendingFilter),
-    /// The start of a block; consumers that need block statistics use it,
-    /// the engine ignores it.
-    BlockStart(BlockInfo),
+    Filter(Box<PendingFilter>),
 }
 
 /// Symbol-stream state carried across the members of a solid chain.
@@ -99,6 +102,10 @@ pub(super) struct SymbolReader<'d, 's> {
     /// symbol pushed that whole struct through the stack ~6 million times per
     /// member and dominated decode time.
     error: Option<RarError>,
+    /// Information about the most recently started block, consumed by the
+    /// analysis tooling. Kept out of [`Symbol`] because returning it inline
+    /// made every decoded literal carry a 40-byte payload.
+    block_info: Option<BlockInfo>,
 }
 
 impl<'d, 's> SymbolReader<'d, 's> {
@@ -118,7 +125,16 @@ impl<'d, 's> SymbolReader<'d, 's> {
             max_filter_end: start_pos,
             block: None,
             error: None,
+            block_info: None,
         }
+    }
+
+    /// The block header decoded since the last call, if any.
+    ///
+    /// Analysis consumes this before handling each symbol; the decode engine
+    /// ignores it.
+    pub(super) fn take_block_info(&mut self) -> Option<BlockInfo> {
+        self.block_info.take()
     }
 
     /// Absolute output position of the next symbol.
@@ -195,11 +211,15 @@ impl<'d, 's> SymbolReader<'d, 's> {
                 continue;
             }
             // A block header is read a handful of times per member, so the
-            // rich `RarResult` there costs nothing.
-            return match self.read_block_header() {
-                Ok(info) => Some(Symbol::BlockStart(info)),
-                Err(err) => self.fail(err),
-            };
+            // rich `RarResult` there costs nothing. The info goes to the
+            // analysis side channel instead of the per-symbol return type.
+            match self.read_block_header() {
+                Ok(info) => {
+                    self.block_info = Some(info);
+                    continue;
+                }
+                Err(err) => return self.fail(err),
+            }
         }
     }
 
@@ -305,7 +325,7 @@ impl<'d, 's> SymbolReader<'d, 's> {
             self.max_filter_end = self
                 .max_filter_end
                 .max(filter.block_start.saturating_add(filter.block_length));
-            return Some(Symbol::Filter(filter));
+            return Some(Symbol::Filter(Box::new(filter)));
         }
         if sym == SYM_REPEAT {
             let dist = self.state.dist_cache[0];
