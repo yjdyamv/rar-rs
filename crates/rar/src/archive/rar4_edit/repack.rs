@@ -13,7 +13,7 @@ use std::fs;
 
 use super::comment::read_comment;
 use super::engine::edit_rar4;
-use super::layout::{archive_is_header_encrypted, header_password};
+use super::layout::{archive_is_header_encrypted, first_volume, header_password};
 use crate::archive::RarArchive;
 use crate::archive::transaction::EditSummary;
 use crate::engine::SolidAppendEntry;
@@ -22,14 +22,18 @@ use crate::fs::atomic::{install_durable, temp_sibling_path};
 use crate::recovery::legacy_rr::scan_protect_file;
 
 /// Member generation the repacked archive is written with, derived from the
-/// source members: RAR 1.5, RAR 2.x (the `26` alias folds onto the same
-/// codec) or RAR 3.x/4.x (likewise `36`). A solid chain shares one codec, so
-/// a mixed archive is refused rather than silently re-coded.
+/// compressed members: RAR 1.5, RAR 2.x (the `26` alias folds onto the same
+/// codec) or RAR 3.x/4.x (likewise `36`). Stored members always declare
+/// `unp_ver 20` (`-m0`), so they say nothing about the chain's codec and a
+/// normal solid archive with a stored member must not look "mixed"; only two
+/// different *compressed* generations are refused.
 fn solid_repack_version(archive: &RarArchive) -> RarResult<crate::version::ArchiveVersion> {
     use crate::version::LegacyCodec;
 
     let mut target: Option<LegacyCodec> = None;
-    for entry in archive.entries.iter().filter(|entry| !entry.is_dir()) {
+    for entry in archive.entries.iter().filter(|entry| {
+        !entry.is_dir() && !crate::format::rar4::is_stored(entry.header.comp_method)
+    }) {
         let codec = LegacyCodec::from_unp_ver(entry.header.unp_ver).ok_or_else(|| {
             RarError::unsupported(format!(
                 "repacking solid archives with unp_ver {} members is not supported",
@@ -158,16 +162,14 @@ pub(crate) fn repack_solid_archive(
             None
         };
         match scan_protect_file(&archive.path, hp_bytes)?.protect {
-            Some(protect) if &protect.mark == b"Protect+" => {
+            // Either record shape (NEWSUB `Protect+` or the RAR 2.5
+            // PROTECT_HEAD) is dropped by the repack; its strength is
+            // translated back into a percent for the fresh whole.
+            Some(protect) => {
                 let prefix_len = protect.block_offset.max(1) as u64;
                 let percent =
                     ((u64::from(protect.rec_sectors) * 51_200) / prefix_len).clamp(1, 100);
                 Some(percent as u8)
-            }
-            Some(_) => {
-                return Err(RarError::unsupported(
-                    "RAR4: archives with a PROTECT_HEAD recovery record cannot be repacked in place; recreate the archive",
-                ));
             }
             None => None,
         }
@@ -319,4 +321,308 @@ pub(crate) fn repack_solid_archive(
             Err(error)
         }
     }
+}
+
+/// Output generation for a whole-set repack: the newest compressed codec
+/// present (Rar29 > Rar20 > Rar15). Unlike a solid chain, a non-solid set may
+/// legitimately mix generations; re-encoding the whole set uniformly with the
+/// newest one keeps every member readable and avoids the solid-only refusal.
+fn set_repack_version(archive: &RarArchive) -> RarResult<crate::version::ArchiveVersion> {
+    use crate::version::LegacyCodec;
+
+    fn rank(codec: LegacyCodec) -> u8 {
+        match codec {
+            LegacyCodec::Rar15 => 0,
+            LegacyCodec::Rar20 => 1,
+            LegacyCodec::Rar29 => 2,
+        }
+    }
+
+    let mut target: Option<LegacyCodec> = None;
+    for entry in archive.entries.iter().filter(|entry| {
+        !entry.is_dir() && !crate::format::rar4::is_stored(entry.header.comp_method)
+    }) {
+        let codec = LegacyCodec::from_unp_ver(entry.header.unp_ver).ok_or_else(|| {
+            RarError::unsupported(format!(
+                "repacking multi-volume archives with unp_ver {} members is not supported",
+                entry.header.unp_ver
+            ))
+        })?;
+        if target.is_none_or(|existing| rank(codec) > rank(existing)) {
+            target = Some(codec);
+        }
+    }
+    Ok(target.unwrap_or(LegacyCodec::Rar29).writable_version())
+}
+
+/// Delete members from a multi-volume RAR4 set (and optionally rename the
+/// survivors, replace the comment, change the recovery record or rewrite a
+/// member comment) by repacking the whole set: every kept member is decoded
+/// and re-encoded into a fresh set with the same volume size, numbering
+/// policy, solid flag, encryption and parity shape, then the staged volumes
+/// replace the old ones atomically (a longer old set and its `.rev` files are
+/// retired). Official `rar` refuses `d` on a volume set outright
+/// ("Cannot modify volume"); whole-set repacking is the only correct answer
+/// because removing bytes from one volume shifts every later member and the
+/// parity grid.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn repack_multivolume_archive(
+    archive: &mut RarArchive,
+    deleted: &[bool],
+    rename_map: &HashMap<usize, String>,
+    comment: Option<&[u8]>,
+    force_rr: Option<u8>,
+    force_sectors: Option<u32>,
+    renamed: usize,
+    member_comments: &[(usize, Option<Vec<u8>>)],
+    main_flags: u16,
+) -> RarResult<EditSummary> {
+    for idx in rename_map.keys() {
+        if deleted[*idx] {
+            return Err(RarError::invalid_option(
+                "cannot rename a member that the same edit deletes",
+            ));
+        }
+    }
+    if archive.sfx_offset != 0 {
+        return Err(RarError::unsupported(
+            "repacking a multi-volume self-extracting RAR4 set is not supported",
+        ));
+    }
+    let deleted_count = deleted.iter().filter(|deleted| **deleted).count();
+    let target_version = set_repack_version(archive)?;
+    let hp = archive_is_header_encrypted(archive)? || archive.header_encryption;
+    let member_encrypted = archive
+        .entries
+        .iter()
+        .any(|entry| entry.header.flags & crate::format::rar4::FHD_PASSWORD as u64 != 0);
+    let password = if hp || member_encrypted {
+        Some(
+            header_password(archive)
+                .ok_or_else(|| {
+                    RarError::Encrypted(if hp {
+                        "repacking a header-encrypted (-hp) RAR4 set requires its password".into()
+                    } else {
+                        "repacking a member-encrypted (-p) RAR4 set requires its password".into()
+                    })
+                })?
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let final_comment: Option<Vec<u8>> = match comment {
+        Some([]) => None,
+        Some(bytes) => Some(bytes.to_vec()),
+        None => read_comment(archive)?,
+    };
+    let first = first_volume(archive).to_path_buf();
+    let parent = crate::fs::atomic::parent_dir(&first);
+    let base = crate::fs::volume::volume_base_of(&first);
+    let old_numbering = main_flags & crate::format::rar4::MHD_NEWNUMBERING == 0;
+
+    // Same volume ceiling as the original set (the largest existing volume):
+    // a smaller one would split members the old set kept whole, a larger one
+    // would silently change the set's shape.
+    let volume_size = archive
+        .volume_paths
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .max()
+        .ok_or_else(|| RarError::format("repacking: cannot stat the set's volumes"))?;
+
+    // Recovery shape: an explicit request wins, otherwise each volume keeps a
+    // record of the first volume's strength (WinRAR writes one per volume).
+    let (rr_percent, rr_sectors) = match (force_rr, force_sectors) {
+        (Some(percent), _) => (Some(percent), None),
+        (_, Some(count)) => (None, Some(count)),
+        _ => {
+            let hp_bytes = if hp {
+                header_password(archive).map(str::as_bytes)
+            } else {
+                None
+            };
+            match scan_protect_file(&first, hp_bytes)?.protect {
+                Some(protect) => (None, Some(protect.rec_sectors)),
+                None => (None, None),
+            }
+        }
+    };
+
+    let mut kept: Vec<KeptMember> = Vec::new();
+    for (i, entry) in archive.entries.iter().enumerate() {
+        if deleted[i] {
+            continue;
+        }
+        let name = rename_map
+            .get(&i)
+            .cloned()
+            .unwrap_or_else(|| entry.header.name.clone());
+        let comment = member_comments
+            .iter()
+            .find(|(idx, _)| *idx == i)
+            .map(|(_, comment)| comment.clone())
+            .unwrap_or_else(|| entry.header.comment.clone());
+        let mtime = if entry.header.format_version == 4 {
+            crate::format::shared::legacy_time::local_civil_to_epoch(entry.header.mtime)
+        } else {
+            entry.header.mtime
+        };
+        kept.push(KeptMember {
+            index: i,
+            name,
+            level: entry.header.comp_method,
+            mtime,
+            mtime_ns: entry.header.mtime_ns.unwrap_or(0),
+            comment,
+            attr: (entry.header.attributes & 0xFF) as u32,
+        });
+    }
+
+    let solid = main_flags & crate::format::rar4::MHD_SOLID != 0;
+    let staging = parent.join(format!(
+        ".{base}.repack-{}",
+        crate::fs::atomic::temp_suffix()
+    ));
+    fs::create_dir_all(&staging).map_err(RarError::Io)?;
+    let staged_path = staging.join(format!("{base}.rar"));
+    let result = (|| -> RarResult<EditSummary> {
+        {
+            let mut writer = crate::archive::RarArchive::create_with_options(
+                &staged_path,
+                crate::options::CreateOptions {
+                    compression: target_version,
+                    solid,
+                    password: password.clone(),
+                    encrypt_headers: hp,
+                    volume_size: Some(volume_size),
+                    old_numbering,
+                    recovery_percent: rr_percent,
+                    recovery_sectors: rr_sectors,
+                    ..Default::default()
+                },
+            )?;
+            crate::format::rar4::write::member::set_rar4_writer_comment(
+                &mut writer,
+                final_comment.clone(),
+            );
+            for member in &kept {
+                archive.check_cancel()?;
+                let data = if archive.entries[member.index].is_dir() {
+                    Vec::new()
+                } else if solid {
+                    crate::format::rar4::extract::rar4_decode_solid_through(archive, member.index)?
+                } else {
+                    crate::format::shared::extract::read::read_at_index_with_options(
+                        archive,
+                        member.index,
+                        crate::options::ExtractOptions::default(),
+                    )?
+                };
+                crate::format::rar4::write::member::add_rar4_data(
+                    &mut writer,
+                    member.name.clone(),
+                    data,
+                    member.level,
+                    member.mtime,
+                    member.mtime_ns,
+                    member.comment.clone(),
+                    Some(member.attr),
+                )?;
+            }
+            writer.close()?;
+        }
+
+        let staged_volumes = crate::discover_volumes(&staged_path);
+        if staged_volumes.is_empty() {
+            return Err(RarError::format("repacking: the staged set has no volumes"));
+        }
+        // Every member must read back from the staged set before the old
+        // volumes are touched (the reader checks size and CRC).
+        {
+            let mut staged = match password.as_deref() {
+                Some(password) => {
+                    crate::archive::RarArchive::open_with_password(&staged_volumes[0], password)?
+                }
+                None => crate::archive::RarArchive::open(&staged_volumes[0])?,
+            };
+            for index in 0..staged.entries.len() {
+                if staged.entries[index].is_dir() {
+                    continue;
+                }
+                crate::format::shared::extract::read::read_at_index_with_options(
+                    &mut staged,
+                    index,
+                    crate::options::ExtractOptions::default(),
+                )?;
+            }
+        }
+
+        let finals: Vec<std::path::PathBuf> = staged_volumes
+            .iter()
+            .map(|path| {
+                parent.join(
+                    path.file_name()
+                        .expect("a discovered volume always has a file name"),
+                )
+            })
+            .collect();
+        let install: Vec<(std::path::PathBuf, std::path::PathBuf)> = staged_volumes
+            .iter()
+            .cloned()
+            .zip(finals.iter().cloned())
+            .collect();
+        let existing_revs = crate::fs::volume::stale_volume_paths(
+            &parent,
+            &base,
+            true,
+            &archive.volume_paths,
+            &crate::recovery::rev3::rev_name_belongs_to_set,
+        );
+        let retire = crate::fs::volume::stale_volume_paths(
+            &parent,
+            &base,
+            true,
+            &finals,
+            &crate::recovery::rev3::rev_name_belongs_to_set,
+        );
+        crate::fs::atomic::commit_files(&parent, &base, &install, &retire)?;
+        if !existing_revs.is_empty() {
+            match crate::recovery::rev3::build_recovery_volumes_for_set(
+                &finals,
+                existing_revs.len(),
+            ) {
+                Ok(written) => {
+                    let retire: Vec<std::path::PathBuf> = existing_revs
+                        .iter()
+                        .filter(|path| {
+                            !written
+                                .iter()
+                                .any(|new| new.file_name() == path.file_name())
+                        })
+                        .cloned()
+                        .collect();
+                    if !retire.is_empty() {
+                        crate::fs::atomic::commit_files(&parent, &base, &[], &retire)?;
+                    }
+                }
+                Err(error) => {
+                    for path in &existing_revs {
+                        let _ = fs::remove_file(path);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        archive.path = finals[0].clone();
+        archive.volume_paths = finals;
+        crate::format::shared::extract::open::open_read(archive)?;
+        Ok(EditSummary {
+            deleted: deleted_count,
+            renamed,
+        })
+    })();
+    let _ = fs::remove_dir_all(&staging);
+    result
 }

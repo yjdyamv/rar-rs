@@ -335,8 +335,10 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   parity 改坏数据），并在装好新卷后从新卷重建 legacy `.rev`。
   **但显式请求新强度（`rar rr <set>` / `-rr`）在 RAR4
   分卷上是拒绝项**（见「一致拒绝」）。
-- **PROTECT_HEAD（RAR 2.5 时代记录）不可就地编辑/追加**：只有 NEWSUB `Protect+`
-  且落在 ENDARC 之前的记录能随前缀重写重建，其余形态明确报错、要求重建归档。
+- **PROTECT_HEAD（RAR 2.5 时代记录）可编辑/追加/重打包**：布局扫描越过
+  ENDARC 继续找记录（首字节 3 位类型探测，不把尾部杂字节当格式错），删除/追加
+  把 0x78 记录按原 `rec_sectors` 强度重建为 NEWSUB `Protect+`（官方 `rar r`
+  只认 NEWSUB 形态）；官方 RAR 2.5 时代的 0x78 记录也能就地处理，不再要求重建归档。
 - **`reconstruct` 保留的是容器族，不是成员 codec**：legacy 源重建为 RAR4
   容器、成员是 STORE（`unp_ver` 20）。**别把成员改回 29**，那会破坏 `-m0`
   的逐字节对拍。

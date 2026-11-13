@@ -34,6 +34,61 @@ fn make_text(n: usize) -> Vec<u8> {
     out
 }
 
+/// Stored members declare `unp_ver 20` while the chain is `29`: that is not
+/// a mixed generation, and deleting one still repacks the chain.
+#[test]
+fn delete_stored_member_of_solid_chain_repacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("solid-stored.rar");
+    let p1 = make_text(40_000);
+    let p2 = vec![0x5a; 20_000];
+    let p3 = make_text(10_000);
+    {
+        let mut a = RarArchive::create_with_options(
+            &path,
+            crate::options::CreateOptions {
+                compression: crate::version::ArchiveVersion::V29,
+                solid: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        a.add_bytes("a.txt", &p1, 3).unwrap();
+        a.add_bytes("b.bin", &p2, 0).unwrap();
+        a.add_bytes("c.txt", &p3, 3).unwrap();
+        a.close().unwrap();
+    }
+    {
+        let a = RarArchive::open(&path).unwrap();
+        assert!(
+            a.entries
+                .iter()
+                .any(|entry| entry.header.unp_ver == 20 && entry.header.comp_method == 0)
+        );
+        assert!(a.entries.iter().any(|entry| entry.header.unp_ver == 29));
+    }
+    let mut editor = crate::archive::editor::ArchiveEditor::open(&path).unwrap();
+    let b = editor.unique_entry("b.bin").unwrap();
+    editor
+        .apply(crate::archive::editor::EditPlan::new().delete(b))
+        .unwrap();
+    drop(editor);
+
+    let mut a = RarArchive::open(&path).unwrap();
+    assert_eq!(
+        a.entries.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        ["a.txt", "c.txt"]
+    );
+    assert_eq!(
+        a.read_with_options("a.txt", Default::default()).unwrap(),
+        p1
+    );
+    assert_eq!(
+        a.read_with_options("c.txt", Default::default()).unwrap(),
+        p3
+    );
+}
+
 #[test]
 fn delete_middle_of_solid_chain_repacks_and_keeps_data() {
     let dir = tempfile::tempdir().unwrap();

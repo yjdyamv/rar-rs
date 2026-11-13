@@ -1,7 +1,9 @@
 use crate::support::{RAR_CLI, UNRAR_CLI, make_temp_dir};
 /// RAR4 multi-volume sets support the header-level edits official `rar`
-/// supports: rename (and lock) rewrite each volume in place, while delete is
-/// refused exactly like WinRAR's "Cannot modify volume".
+/// supports: rename (and lock) rewrite each volume in place, while a delete
+/// repacks the whole set at its original volume size (official `rar` refuses
+/// with "Cannot modify volume"; the set cannot shrink without shifting every
+/// later member and its parity grid).
 #[test]
 fn cli_rar4_multivolume_rename_and_lock() {
     let dir = make_temp_dir();
@@ -46,17 +48,19 @@ fn cli_rar4_multivolume_rename_and_lock() {
     let id = reader.unique_entry("renamed.bin").unwrap();
     assert_eq!(reader.read_entry(id).unwrap(), content);
 
-    // Delete is refused (official parity), not silently ignored.
+    // Delete repacks the whole set: the survivor must stay readable.
     let delete = std::process::Command::new(RAR_CLI)
         .args(["d", "-idq"])
         .arg(&first)
         .arg("renamed.bin")
-        .output()
+        .status()
         .unwrap();
-    assert!(
-        !delete.status.success(),
-        "delete on a RAR4 volume set must fail"
-    );
+    assert!(delete.success(), "delete in a RAR4 volume set");
+    let mut reader = rar_rs::ArchiveReader::open(&first).unwrap();
+    let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+    assert_eq!(names, ["b.bin"]);
+    let id = reader.unique_entry("b.bin").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), vec![0x5Au8; 30_000]);
 
     // Lock patches the first volume's main header; a later edit is refused.
     let status = std::process::Command::new(RAR_CLI)

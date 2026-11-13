@@ -25,7 +25,9 @@ pub(crate) mod legacy_rr {
     // goes through the password-aware file variant); the RAR4 edit tests
     // still use them to assert a record is present.
     #[cfg(test)]
-    pub(crate) use super::legacy::{scan_protect, scan_protect_with_password};
+    pub(crate) use super::legacy::{
+        build_legacy_protect_head_block, scan_protect, scan_protect_with_password,
+    };
 }
 pub(crate) mod parity;
 pub mod rar50;
