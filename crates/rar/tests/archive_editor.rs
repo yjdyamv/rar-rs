@@ -447,6 +447,252 @@ fn solid_multivolume_delete_recompresses_the_chain() {
     );
 }
 
+fn rar5_noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed | 1;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        out.push((state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u8);
+    }
+    out
+}
+
+fn rar5_set(
+    base: &std::path::Path,
+    options: WriterOptions,
+    members: &[(&str, Vec<u8>)],
+) -> std::path::PathBuf {
+    let mut archive = ArchiveWriter::create_with(base, options).unwrap();
+    for (name, payload) in members {
+        archive
+            .add_bytes(name, payload, EntryWriteOptions::new())
+            .unwrap();
+    }
+    archive.finish().unwrap();
+    let volumes = rar_rs::discover_volumes(base);
+    assert!(volumes.len() > 1, "precondition: a volume set {volumes:?}");
+    volumes[0].clone()
+}
+
+fn recovery_volume_count(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rev"))
+        })
+        .count()
+}
+
+/// RAR5 multi-volume append rewrites the whole set, keeps every member and
+/// streams the appended ones into the regenerated last volume.
+#[test]
+fn rar5_multivolume_append_repacks_the_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rar5-append.rar");
+    let payloads: Vec<Vec<u8>> = (1..=3u64).map(|seed| rar5_noise(seed, 30_000)).collect();
+    let first = rar5_set(
+        &base,
+        WriterOptions::new().volume_size(8 * 1024),
+        &[
+            ("m0.bin", payloads[0].clone()),
+            ("m1.bin", payloads[1].clone()),
+            ("m2.bin", payloads[2].clone()),
+        ],
+    );
+    let added = b"appended to a RAR5 volume set".repeat(40);
+    {
+        let mut archive = ArchiveWriter::append(&first).unwrap();
+        archive
+            .add_bytes("added.txt", &added, EntryWriteOptions::new())
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    let after = rar_rs::discover_volumes(&base);
+    assert!(after.len() > 1, "the repacked set lost its volumes");
+    let mut reader = ArchiveReader::open(&after[0]).unwrap();
+    let names: Vec<String> = reader
+        .entries()
+        .map(|entry| entry.name().to_string())
+        .collect();
+    assert_eq!(names, ["m0.bin", "m1.bin", "m2.bin", "added.txt"]);
+    for (name, payload) in ["m0.bin", "m1.bin", "m2.bin"].iter().zip(&payloads) {
+        let id = reader.unique_entry(name).unwrap();
+        assert_eq!(&reader.read_entry(id).unwrap(), payload);
+    }
+    let id = reader.unique_entry("added.txt").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), added);
+    assert!(reader.verify().unwrap().is_ok());
+}
+
+#[test]
+fn rar5_multivolume_append_keeps_recovery_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rar5-rr.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &base,
+        WriterOptions::new()
+            .volume_size(8 * 1024)
+            .recovery_percent(5),
+    )
+    .unwrap();
+    archive
+        .add_bytes("m0.bin", &rar5_noise(11, 40_000), EntryWriteOptions::new())
+        .unwrap();
+    archive.finish().unwrap();
+    let first = rar_rs::discover_volumes(&base)[0].clone();
+
+    {
+        let mut archive = ArchiveWriter::append(&first).unwrap();
+        archive
+            .add_bytes("added.txt", b"added", EntryWriteOptions::new())
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    let after = rar_rs::discover_volumes(&base);
+    assert!(after.len() > 1);
+    let mut reader = ArchiveReader::open(&after[0]).unwrap();
+    let id = reader.unique_entry("added.txt").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), b"added");
+    // The writer re-emits one recovery record per data volume.
+    for volume in &after {
+        let bytes = std::fs::read(volume).unwrap();
+        assert!(
+            count_occurrences(&bytes, b"RR") >= 1,
+            "volume {} lost its recovery record",
+            volume.display()
+        );
+    }
+}
+
+#[test]
+fn rar5_multivolume_append_rescales_recovery_volumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rar5-rev.rar");
+    let first = rar5_set(
+        &base,
+        WriterOptions::new()
+            .volume_size(8 * 1024)
+            .recovery_percent(5)
+            .recovery_volumes_percent(100),
+        &[("m0.bin", rar5_noise(21, 40_000))],
+    );
+    let data_before = rar_rs::discover_volumes(&base).len();
+    assert_eq!(recovery_volume_count(dir.path()), data_before);
+
+    {
+        let mut archive = ArchiveWriter::append(&first).unwrap();
+        archive
+            .add_bytes(
+                "added.bin",
+                &rar5_noise(22, 50_000),
+                EntryWriteOptions::new(),
+            )
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    let data_after = rar_rs::discover_volumes(&base).len();
+    assert!(data_after > data_before);
+    assert_eq!(
+        recovery_volume_count(dir.path()),
+        data_after,
+        "a 100% parity ratio must stay 100% after the append"
+    );
+}
+
+#[test]
+fn rar5_multivolume_append_keeps_header_encryption() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rar5-hp.rar");
+    let first = rar5_set(
+        &base,
+        WriterOptions::new()
+            .volume_size(8 * 1024)
+            .password("pw")
+            .encrypt_headers(true),
+        &[("m0.bin", rar5_noise(31, 30_000))],
+    );
+
+    {
+        let mut archive =
+            ArchiveWriter::append_with(&first, rar_rs::AppendOptions::new().password("pw"))
+                .unwrap();
+        archive
+            .add_bytes("added.txt", b"secret", EntryWriteOptions::new())
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    let after = rar_rs::discover_volumes(&base);
+    let mut reader =
+        ArchiveReader::open_with(&after[0], rar_rs::OpenOptions::default().password("pw")).unwrap();
+    let names: Vec<String> = reader
+        .entries()
+        .map(|entry| entry.name().to_string())
+        .collect();
+    assert_eq!(names, ["m0.bin", "added.txt"]);
+    let id = reader.unique_entry("added.txt").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), b"secret");
+    assert!(
+        ArchiveReader::open(&after[0]).is_err(),
+        "the headers must stay encrypted"
+    );
+}
+
+#[test]
+fn rar5_multivolume_append_of_a_solid_set_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rar5-solid.rar");
+    let payload = rar5_noise(41, 20_000);
+    let first = rar5_set(
+        &base,
+        WriterOptions::new()
+            .volume_size(8 * 1024)
+            .solid_mode(SolidMode::Continuous),
+        &[("m0.bin", payload.clone()), ("m1.bin", payload.clone())],
+    );
+
+    {
+        let mut archive = ArchiveWriter::append(&first).unwrap();
+        archive
+            .add_bytes("added.txt", &payload, EntryWriteOptions::new())
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    let after = rar_rs::discover_volumes(&base);
+    let mut reader = ArchiveReader::open(&after[0]).unwrap();
+    for name in ["m0.bin", "m1.bin", "added.txt"] {
+        let id = reader.unique_entry(name).unwrap();
+        assert_eq!(reader.read_entry(id).unwrap(), payload, "{name}");
+    }
+    assert!(reader.verify().unwrap().is_ok());
+}
+
+#[test]
+fn rar5_multivolume_lock_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("rar5-locked.rar");
+    let first = rar5_set(
+        &base,
+        WriterOptions::new().volume_size(8 * 1024),
+        &[("m0.bin", rar5_noise(51, 20_000))],
+    );
+    let error = ArchiveEditor::open(&first).unwrap().lock().unwrap_err();
+    assert!(
+        matches!(error, RarError::Unsupported(_)),
+        "unexpected error: {error:?}"
+    );
+}
+
 #[test]
 fn edition_never_mixes_ids_between_archives() {
     let dir = tempfile::tempdir().unwrap();

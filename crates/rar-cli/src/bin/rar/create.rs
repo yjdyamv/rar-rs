@@ -251,7 +251,12 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         .save_streams(misc.save_streams)
         .time_precision_seconds(ts.precision_seconds);
 
-    let existing = std::path::Path::new(archive_path).exists();
+    // A set is often addressed by its base name (`rar a set.rar …`) while the
+    // volumes on disk are `set.part1.rar` …; treat that as an existing archive
+    // so the append goes through the volume-set transaction instead of
+    // creating a fresh single-volume `set.rar` beside the parts.
+    let existing = std::path::Path::new(archive_path).exists()
+        || rar_rs::discover_volumes(std::path::Path::new(archive_path)).len() > 1;
     // -tk: keep the archive's original modification time on update, or set
     // the archive time to the given local date.
     let keep_original_time = args.keep_time.as_deref() == Some("");

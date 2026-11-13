@@ -231,6 +231,15 @@ impl RarArchive {
             (count as usize).min(nd)
         } else if let Some(percent) = self.recovery_volumes_percent {
             crate::recovery::rev50::plan_recovery_volume_count(nd, percent as u64)?
+        } else if let Some((rec, data)) = self.write_ctx().output.recovery_ratio {
+            // A deferred multi-volume append carries the set's old ratio:
+            // scale it to the new data-volume count (full protection stays
+            // full; a partial set keeps its proportion).
+            if data == 0 {
+                0
+            } else {
+                ((rec as usize) * nd).div_ceil(data as usize).min(nd)
+            }
         } else {
             return Ok(Vec::new());
         };
@@ -447,11 +456,15 @@ impl RarArchive {
                 );
                 let result = commit_files(parent, final_base, &install, &retire);
                 if result.is_ok() {
+                    // A deferred append rewrote the set from a temporary base;
+                    // follow the (possibly re-padded) installed first volume.
+                    self.path = data_paths[0].clone();
                     self.volume_paths = data_paths;
                     // The .rev generation is one-shot: never re-run it on a
                     // later close (the data volumes are already installed).
                     self.recovery_volumes_percent = None;
                     self.recovery_volumes_count = None;
+                    self.write_ctx_mut().output.recovery_ratio = None;
                 }
                 result
             }

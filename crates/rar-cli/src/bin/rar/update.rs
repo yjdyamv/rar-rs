@@ -36,7 +36,9 @@ fn cmd_update_freshen(
 ) -> CliResult<()> {
     let archive_path = std::path::Path::new(&args.archive);
     let password = &args.password.password;
-    if !archive_path.exists() {
+    // `rar u set.rar …` names the set by its base while the volumes on disk
+    // are `set.part1.rar` …; accept that spelling like the create path does.
+    if !archive_path.exists() && rar_rs::discover_volumes(archive_path).len() <= 1 {
         return Err(format!("archive not found: {}", archive_path.display()).into());
     }
 
