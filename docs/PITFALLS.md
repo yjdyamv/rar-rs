@@ -598,8 +598,12 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   传进去只会留一段永不执行的报告代码。）
 - **并行校验的资格门槛**：`verify_indices_parallel`（`t` 的并行路径）接手
   RAR5 与 RAR4（RAR 1.3/1.4 除外）、非固实链成员、≥`PARALLEL_MIN_MEMBERS`(4)
-  个成员、总解压量 ≥`PARALLEL_MIN_UNPACKED`(8 MiB)、总量在
-  `PARALLEL_BUFFER_LIMIT`(256 MiB) 以内、且没有进度回调的批次。RAR5 的负载必须
+  个成员、总解压量 ≥`PARALLEL_MIN_UNPACKED`(8 MiB)、估算峰值
+  （RAR5 预读的全部 packed + 最大的 `threads` 个成员解压缓冲）在
+  `PARALLEL_PEAK_BUDGET`(512 MiB) 以内、且没有进度回调的批次。旧口径
+  "packed+unpacked 总量 ≤256 MiB" 会让 300 MB 以上的档静默退回串行（4×90 MB
+  的档从 1.4 s 变成 553 ms）；现在按真实并发峰值估算，`parallel_peak_bytes`
+  有单元测试。RAR5 的负载必须
   先在**单个** `Engine` 游标上串行读出解密（`read_packed_data`），再并行 decode
   ——不要让多个线程共享 `Engine`；RAR4 反过来：工作线程各自 `File::open` 卷 0，
   由 `decode_member_bytes` 按 chunk 打开后续卷，所以分卷/跨卷成员也能并行，且

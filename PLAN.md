@@ -241,6 +241,10 @@ DLL、87 MB、`-m3`：RAR5 `t -idq` 327 ms → 205 ms（官方 317 ms）；RAR4 
 （官方 343 ms），RAR4 单卷 337–375 ms（官方 430 ms），RAR4 多卷 382 ms。
 `parallel` 特性下生效，`cargo test --features parallel` 覆盖（含 RAR4 分卷
 verify/extract）；门槛与顺序语义见 `docs/PITFALLS.md`「并行校验的资格门槛」条。
+内存门槛按"RAR5 预读 packed + 最大 `threads` 个成员解压缓冲 ≤512 MiB"估算
+（`parallel_peak_bytes`），不再用 packed+unpacked 总量一刀切：4×90 MB 的档
+（360 MB 解压、100 MB packed）`t` 从串行 ~1.4 s 降到 553–611 ms，官方 UnRAR
+1080 ms；`x` 1196 ms（官方 1208 ms，写盘受限）。
 
 **解压基线**（`cargo run --release --example decode_bench`，自建语料，packed
 比例 29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74

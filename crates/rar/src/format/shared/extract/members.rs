@@ -23,10 +23,29 @@ use crate::model::FileHeader;
 #[cfg(feature = "parallel")]
 use crate::parallel::extraction_pool;
 
-/// Memory budget (packed + unpacked) for the optional parallel extraction
-/// path; larger archives stream sequentially to stay bounded.
+/// Memory budget for the optional parallel path: pre-read packed payloads
+/// plus the decoded buffers of the members that decode at the same time.
+/// Archives whose estimated peak exceeds it stream sequentially.
 #[cfg(feature = "parallel")]
-const PARALLEL_BUFFER_LIMIT: u64 = 256 * 1024 * 1024;
+const PARALLEL_PEAK_BUDGET: u64 = 512 * 1024 * 1024;
+
+/// Estimated resident bytes of a parallel run: the payloads that are
+/// pre-read (RAR5 only — legacy workers read their own volume) plus the
+/// decoded buffers of the largest `workers` members, which is the worst
+/// case the pool can hold at once.
+#[cfg(feature = "parallel")]
+fn parallel_peak_bytes(packed_total: u64, unpacked: &[u64], workers: usize) -> u64 {
+    let mut largest: Vec<u64> = unpacked.to_vec();
+    largest.sort_unstable_by(|a, b| b.cmp(a));
+    let live: u64 = largest.into_iter().take(workers.max(1)).sum();
+    packed_total.saturating_add(live)
+}
+
+/// Worker count the pool will actually use for this run.
+#[cfg(feature = "parallel")]
+fn parallel_workers(opts: &crate::options::ExtractOptions) -> usize {
+    extraction_pool(opts.threads).current_num_threads().max(1)
+}
 /// Per-member verify outcome keyed by catalog index.
 #[cfg(feature = "parallel")]
 type VerifyBatch = Vec<(usize, RarResult<()>)>;
@@ -644,14 +663,18 @@ fn extract_all_parallel(
             return Ok(None);
         }
     }
+    let rar5 = !cx.is_legacy();
     let mut total_packed = 0u64;
     let mut total_unpacked = 0u64;
+    let mut sizes = Vec::with_capacity(cx.entries().len());
     for e in cx.entries() {
         total_packed = total_packed.saturating_add(e.header.packed_size);
         total_unpacked = total_unpacked.saturating_add(e.header.unpacked_size);
-        if total_packed > PARALLEL_BUFFER_LIMIT || total_unpacked > PARALLEL_BUFFER_LIMIT {
-            return Ok(None);
-        }
+        sizes.push(e.header.unpacked_size);
+    }
+    let packed_budget = if rar5 { total_packed } else { 0 };
+    if parallel_peak_bytes(packed_budget, &sizes, parallel_workers(&opts)) > PARALLEL_PEAK_BUDGET {
+        return Ok(None);
     }
     if total_unpacked < PARALLEL_MIN_UNPACKED {
         return Ok(None);
@@ -874,8 +897,10 @@ pub(crate) fn verify_indices_parallel(
     if opts.prompt_overwrite {
         return Ok(None);
     }
+    let rar5 = !cx.is_legacy();
     let mut total_packed = 0u64;
     let mut total_unpacked = 0u64;
+    let mut sizes = Vec::with_capacity(indices.len());
     for &idx in indices {
         let Some(entry) = cx.entries().get(idx) else {
             return Ok(None);
@@ -885,9 +910,11 @@ pub(crate) fn verify_indices_parallel(
         }
         total_packed = total_packed.saturating_add(entry.header.packed_size);
         total_unpacked = total_unpacked.saturating_add(entry.header.unpacked_size);
-        if total_packed > PARALLEL_BUFFER_LIMIT || total_unpacked > PARALLEL_BUFFER_LIMIT {
-            return Ok(None);
-        }
+        sizes.push(entry.header.unpacked_size);
+    }
+    let packed_budget = if rar5 { total_packed } else { 0 };
+    if parallel_peak_bytes(packed_budget, &sizes, parallel_workers(opts)) > PARALLEL_PEAK_BUDGET {
+        return Ok(None);
     }
     if total_unpacked < PARALLEL_MIN_UNPACKED {
         return Ok(None);
@@ -1348,4 +1375,25 @@ fn finish_member(
     crate::format::shared::extract::dest::apply_member_attributes(cx, &entry.header, &dest_path);
     report.record_written(dest_path.clone());
     Ok(dest_path)
+}
+
+#[cfg(all(test, feature = "parallel"))]
+mod parallel_budget_tests {
+    use super::parallel_peak_bytes;
+
+    #[test]
+    fn peak_counts_packed_plus_the_largest_live_members() {
+        // Three members decode at once at most: only the three largest
+        // decoded buffers are resident together.
+        assert_eq!(
+            parallel_peak_bytes(100, &[80, 10, 5, 70, 60], 3),
+            100 + 80 + 70 + 60
+        );
+        // A single worker holds the largest member only.
+        assert_eq!(parallel_peak_bytes(0, &[80, 10, 5], 1), 80);
+        // Fewer members than workers: everything can be live at once.
+        assert_eq!(parallel_peak_bytes(7, &[3, 4], 8), 14);
+        // Saturating arithmetic keeps a pathological header from wrapping.
+        assert_eq!(parallel_peak_bytes(u64::MAX - 1, &[8], 1), u64::MAX);
+    }
 }
