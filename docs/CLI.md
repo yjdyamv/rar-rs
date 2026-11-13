@@ -171,7 +171,10 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 - `-oi[0-4][:<minsize>]` — identical files as references: `-oi`/`-oi1` store the
   first file and reference the rest, `-oi2` announces the groups, `-oi3`/`-oi4`
   list them and create no archive; default 64 KiB minimum (RAR5 only)
-- `-sfx[name]` — create an SFX archive at create time
+- `-sfx[name]` — create an SFX archive at create time. The module goes on
+  the first volume only, named like WinRAR names it: `{base}.exe` for a
+  single-volume archive and `{base}.part1.exe` for a set (later volumes
+  stay `{base}.partN.rar`); readers accept either spelling of part 1.
 - `-z<file>` / `-c-` — comment file / no comment (`-z` is accepted and ignored
   outside the create and comment commands)
 

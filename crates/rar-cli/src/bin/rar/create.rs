@@ -729,9 +729,19 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         write_members(created.expect("new archive opened above"))?
     };
     let was_existing = existing;
+    // The replace path's report still names the staged copy the commit
+    // consumed; the original archive path is the only final volume there.
+    let mut report_volumes: Vec<std::path::PathBuf> = if was_existing {
+        vec![std::path::PathBuf::from(archive_path)]
+    } else {
+        write_report.volume_paths().to_vec()
+    };
     // -sfx[name]: prepend the SFX module to the (first) archive volume. The
     // replace path wrote through a staged copy that was installed over the
     // archive on commit, so the original path is the final one there.
+    // A created SFX archive is named like WinRAR names it: the first volume
+    // is an executable (`{base}.exe`, or `{base}.part1.exe` for a set),
+    // while the remaining volumes keep their `.partN.rar` names.
     if let Some(module) = &args.sfx_module {
         let target = if was_existing {
             std::path::Path::new(archive_path)
@@ -739,14 +749,40 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             write_report.primary_path()
         };
         crate::sfx::prepend_module_in_place(target, Some(module.as_str()))?;
+        if !was_existing {
+            let base = std::path::Path::new(archive_path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "archive".to_string());
+            let first = report_volumes
+                .first()
+                .cloned()
+                .expect("a created archive always has a first volume");
+            let exe = if report_volumes.len() > 1 {
+                let width = first
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| {
+                        let lower = name.to_ascii_lowercase();
+                        let digits = lower.rsplit_once(".part")?.1.trim_end_matches(".rar");
+                        digits
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit())
+                            .then_some(digits.len())
+                    })
+                    .unwrap_or(1)
+                    .max(1);
+                first.with_file_name(format!("{base}.part{:0width$}.exe", 1))
+            } else {
+                first.with_file_name(format!("{base}.exe"))
+            };
+            if exe != first {
+                std::fs::rename(&first, &exe)
+                    .map_err(|error| CliError::from(error).context("sfx"))?;
+            }
+            report_volumes[0] = exe;
+        }
     }
-    // The replace path's report still names the staged copy the commit
-    // consumed; the original archive path is the only final volume there.
-    let report_volumes: Vec<std::path::PathBuf> = if was_existing {
-        vec![std::path::PathBuf::from(archive_path)]
-    } else {
-        write_report.volume_paths().to_vec()
-    };
     crate::log::write_logs(&logs, &report_volumes, &log_files)?;
     // -tsp: restore the source files' access times that were recorded
     // before archiving (reading the files may have refreshed them).
@@ -788,7 +824,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             .filter_map(|c| std::fs::metadata(&c.path).ok()?.modified().ok())
             .max();
         if let Some(t) = latest {
-            let path = std::path::Path::new(archive_path);
+            let path = report_volumes
+                .first()
+                .map(std::path::PathBuf::as_path)
+                .unwrap_or_else(|| std::path::Path::new(archive_path));
             warn_on_time_error(
                 "set the archive time of",
                 path,
@@ -801,7 +840,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     }
     // -tk<date>: assign the requested archive modification time.
     if let Some(t) = tk_date {
-        let path = std::path::Path::new(archive_path);
+        let path = report_volumes
+            .first()
+            .map(std::path::PathBuf::as_path)
+            .unwrap_or_else(|| std::path::Path::new(archive_path));
         warn_on_time_error(
             "set the archive time of",
             path,
@@ -812,8 +854,12 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // member contents or extracting to a temporary directory. Runs before
     // -df so a failed post-test never destroys the source files.
     if args.test_after {
+        let test_path = report_volumes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| std::path::PathBuf::from(archive_path));
         let mut ar =
-            ops::open_reader(archive_path, password.as_deref()).map_err(|e| e.context("open"))?;
+            ops::open_reader(&test_path, password.as_deref()).map_err(|e| e.context("open"))?;
         let report: rar_rs::VerificationReport = ar
             .verify_with_options(ops::verify_options())
             .map_err(|e| error::CliError::from(e).context("test failed"))?;

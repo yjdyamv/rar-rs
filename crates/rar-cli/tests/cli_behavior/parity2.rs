@@ -345,6 +345,67 @@ fn cli_create_sfx_prepends_module() {
     assert!(status.success(), "unrar t on the created SFX");
 }
 
+/// `a -sfx -v<size>` keeps WinRAR's naming: the SFX volume is an
+/// executable (`{base}.part1.exe` for a set, `{base}.exe` for one volume).
+#[test]
+fn cli_create_sfx_names_first_volume_exe() {
+    let dir = make_temp_dir();
+    let mut state = 0x9E37_79B9u32;
+    let payload: Vec<u8> = (0..48 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as u8
+        })
+        .collect();
+    std::fs::write(dir.path().join("payload.bin"), &payload).unwrap();
+
+    let output = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sfx", "-v16k", "-idq"])
+        .arg("set.rar")
+        .arg("payload.bin")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    if !output.status.success() {
+        let text = String::from_utf8_lossy(&output.stderr);
+        if text.contains("default.sfx not found") {
+            eprintln!("skipped: no SFX module installed");
+            return;
+        }
+        panic!("a -sfx -v failed: {text}");
+    }
+    assert!(
+        dir.path().join("set.part1.exe").exists(),
+        "an SFX set's first volume must be named part1.exe"
+    );
+    assert!(!dir.path().join("set.part1.rar").exists());
+
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "-idq"])
+        .arg("set.part1.exe")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar t on the SFX set");
+    let mut reader = rar_rs::ArchiveReader::open(dir.path().join("set.part1.exe")).unwrap();
+    let id = reader.unique_entry("payload.bin").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), payload);
+
+    // A single-volume SFX archive is `{base}.exe` (no `.part1`).
+    let output = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sfx", "-idq"])
+        .arg("solo.rar")
+        .arg("payload.bin")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(dir.path().join("solo.exe").exists());
+    assert!(!dir.path().join("solo.rar").exists());
+}
+
 /// Overwrite policy: with no `-y`/`-o±` (no interactive prompt) extraction
 /// skips existing files, `-y`/`-o+` overwrite and `-o-` skips, matching
 /// WinRAR's non-interactive outcomes.
