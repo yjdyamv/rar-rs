@@ -128,6 +128,22 @@ fn print_analysis(a: &rar_rs::codec::lzss_huff::StreamAnalysis, packed: &[u8]) {
         "    short_dist len2 [<16,<256,<4K,<64K,64K+]: {:?} | len3 {:?}",
         a.short_dist[0], a.short_dist[1]
     );
+    if !a.filter_records.is_empty() {
+        let mut types: Vec<(u8, u8, usize)> = Vec::new();
+        for &(_, _, ty, ch) in &a.filter_records {
+            match types.iter_mut().find(|(t, c, _)| *t == ty && *c == ch) {
+                Some(entry) => entry.2 += 1,
+                None => types.push((ty, ch, 1)),
+            }
+        }
+        println!(
+            "    filters: {} record(s), types (type, channels, count): {:?}",
+            a.filter_records.len(),
+            types
+        );
+        let first: Vec<(u64, u64, u8, u8)> = a.filter_records.iter().copied().take(4).collect();
+        println!("    first filters (start, len, type, ch): {first:?}");
+    }
     // Block-size distribution summary.
     let mut sizes: Vec<u32> = a.blocks.iter().map(|b| b.block_size).collect();
     sizes.sort_unstable();
