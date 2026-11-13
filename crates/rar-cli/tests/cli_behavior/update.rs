@@ -657,6 +657,55 @@ fn cli_a_replaces_member_in_multi_volume_archive() {
     assert_eq!(reader.read_entry(payload_id).unwrap(), replacement);
 }
 
+/// Replacing the last remaining member of a volume set must keep the set
+/// split: the staged archive is erased and recreated, and the recreate has
+/// to retain the original volume size instead of collapsing to one volume.
+#[test]
+fn cli_a_replacing_last_member_keeps_volume_set() {
+    for format in ["-ma4", "-ma5"] {
+        let dir = make_temp_dir();
+        let original = pseudo_random_bytes(40 * 1024, 404);
+        let replacement = pseudo_random_bytes(40 * 1024, 405);
+        std::fs::write(dir.path().join("payload.bin"), &original).unwrap();
+        let base = dir.path().join("replace-last");
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", format, "-v8k", "-idq"])
+            .arg(&base)
+            .arg("payload.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "create failed for {format}");
+        let before = rar_rs::discover_volumes(&base);
+        assert!(before.len() > 1, "expected a set for {format}");
+
+        std::fs::write(dir.path().join("payload.bin"), &replacement).unwrap();
+        let out = std::process::Command::new(RAR_CLI)
+            .args(["a", "-idq"])
+            .arg(&base)
+            .arg("payload.bin")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "replace failed for {format}:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let after = rar_rs::discover_volumes(&base);
+        assert!(
+            after.len() > 1,
+            "{format}: replacing the last member collapsed the set to one volume"
+        );
+        let mut reader = rar_rs::ArchiveReader::open(&after[0]).unwrap();
+        let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
+        assert_eq!(names, ["payload.bin"], "{format}: {names:?}");
+        let entry = reader.unique_entry("payload.bin").unwrap();
+        assert_eq!(reader.read_entry(entry).unwrap(), replacement, "{format}");
+    }
+}
+
 #[test]
 fn cli_member_selection_uses_exact_paths_or_masks() {
     let dir = make_temp_dir();

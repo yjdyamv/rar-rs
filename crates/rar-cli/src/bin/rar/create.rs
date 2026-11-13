@@ -672,6 +672,20 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         incoming_names.sort();
         let version_spec = misc.version_control.clone();
         let apply = |staged_path: &std::path::Path| {
+            // Capture the set's volume size before the delete. Replacing the
+            // last remaining member erases the staged archive, and the
+            // recreate below must keep the original split instead of
+            // collapsing the whole set into one volume.
+            let staged_volumes = rar_rs::discover_volumes(staged_path);
+            let set_volume_size = (staged_volumes.len() > 1)
+                .then(|| {
+                    staged_volumes[..staged_volumes.len() - 1]
+                        .iter()
+                        .filter_map(|volume| std::fs::metadata(volume).ok())
+                        .map(|metadata| metadata.len())
+                        .min()
+                })
+                .flatten();
             let mut editor = open_editor(staged_path, password.as_deref())?;
             if let Some(spec) = &version_spec {
                 let edits = crate::edit::version_edits(&editor, &incoming_names, spec)
@@ -708,7 +722,13 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 crate::ops::append_writer(staged_path, append_opts)
                     .map_err(|e| CliError::from(e).context("open"))?
             } else {
-                crate::ops::create_writer(staged_path, opts.clone())
+                // Rebuild with the set shape captured above; plain
+                // `rar a` never changes an existing set's volume size.
+                let recreate_opts = match set_volume_size {
+                    Some(size) => opts.clone().volume_size(size),
+                    None => opts.clone(),
+                };
+                crate::ops::create_writer(staged_path, recreate_opts)
                     .map_err(|e| CliError::from(e).context("create"))?
             };
             write_members(writer)
