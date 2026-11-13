@@ -492,6 +492,59 @@ fn legacy_rr_command_honors_the_requested_strength() {
     assert!(rr("switch-count.rar", &["-rr20"]) < percent);
 }
 
+/// `rar rr` on an RAR4 volume set repacks the set: every volume carries the
+/// requested strength and the member still extracts. Official `rar` refuses
+/// volume sets with "Cannot modify volume", so this is an extension.
+#[test]
+fn legacy_rr_command_repacks_multi_volume_sets() {
+    let dir = make_temp_dir();
+    let payload = vec![0x5Au8; 200_000];
+    std::fs::write(dir.path().join("big.bin"), &payload).unwrap();
+    let base = dir.path().join("set.rar");
+    assert!(
+        std::process::Command::new(RAR_CLI)
+            .args(["a", "-ma4", "-m0", "-v32k", "-rr3%", "-idq"])
+            .arg(&base)
+            .arg("big.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "precondition: {volumes:?}");
+    let before = volumes
+        .iter()
+        .map(|volume| recovery_sectors(volume))
+        .max()
+        .unwrap();
+
+    let status = std::process::Command::new(RAR_CLI)
+        .arg("rr")
+        .arg(&volumes[0])
+        .arg("-rr20")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rr on a volume set failed");
+
+    let after = rar_rs::discover_volumes(&base);
+    assert!(after.len() > 1, "the set stopped being multi-volume");
+    let after_max = after
+        .iter()
+        .map(|volume| recovery_sectors(volume))
+        .max()
+        .unwrap();
+    assert!(
+        after_max >= 10 && after_max > before,
+        "20 sectors per volume expected, got {after_max} (was {before})"
+    );
+
+    let mut reader = rar_rs::ArchiveReader::open(&after[0]).unwrap();
+    let id = reader.unique_entry("big.bin").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), payload);
+}
+
 /// `-ma13`/`-ma14` create the DOS-era `RE~^` container (RAR 1.3/1.4):
 /// stored, compressed and solid members round-trip through our reader and
 /// `unrar`, and the archive comment is queued ahead of the first member.

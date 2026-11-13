@@ -2127,6 +2127,75 @@ fn varied_bytes(n: usize, line: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Changing the recovery strength of a multi-volume RAR4 set repacks it:
+/// WinRAR must accept the rewritten set and every volume must carry the new
+/// record (official `rar` refuses volume sets with "Cannot modify volume").
+#[test]
+fn official_unrar_validates_rar4_multivolume_recovery_change() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let dir = make_temp_dir();
+    let base = dir.path().join("mv-rr.rar");
+    let noise = |len: usize, seed: u64| -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    };
+    let p1 = noise(150_000, 0x77);
+    {
+        let mut writer = rar_rs::ArchiveWriter::create_with(
+            &base,
+            rar_rs::WriterOptions::default()
+                .compression(rar_rs::ArchiveVersion::V29)
+                .volume_size(64 * 1024)
+                .recovery_percent(3),
+        )
+        .unwrap();
+        writer
+            .add_bytes("a.bin", &p1, EntryWriteOptions::default())
+            .unwrap();
+        writer
+            .add_bytes("b.bin", &noise(120_000, 0x88), EntryWriteOptions::default())
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    let volumes = rar_rs::discover_volumes(&base);
+    assert!(volumes.len() > 1, "precondition: {volumes:?}");
+    {
+        let mut editor = rar_rs::ArchiveEditor::open(&volumes[0]).unwrap();
+        editor
+            .apply(rar_rs::EditPlan::new().set_recovery(20))
+            .unwrap();
+    }
+    let after = rar_rs::discover_volumes(&base);
+    assert!(
+        after.len() > 1,
+        "the set stopped being multi-volume: {after:?}"
+    );
+    let out = std::process::Command::new(&unrar)
+        .args(["t", "-idq"])
+        .arg(&after[0])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "unrar rejected the rewritten volume set:
+{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut reader = ArchiveReader::open(&after[0]).unwrap();
+    let id = reader.unique_entry("a.bin").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), p1);
+}
+
 /// Appending to a multi-volume RAR4 set repacks the whole set (official `rar`
 /// refuses with "Cannot modify volume"); WinRAR must validate the grown set
 /// and every member, old and new, must extract byte for byte.
