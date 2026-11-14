@@ -1,6 +1,6 @@
 # ADR 0009: 匹配器内核替换（压缩速度）
 
-- Status: proposed (2026-11)
+- Status: **rejected by measurement** (2026-11-14)，保留记录与后续方向
 - Date: 2026-11-14
 - Related: [ADR 0008](0008-one-way-family-layering.md)（编码侧分层）、
   `crates/rar/src/codec/modern/lzss_huff/encoder/`（匹配器与解析器）
@@ -89,3 +89,27 @@ syms=2238852  parse=918ms  huffman=44ms
 - 继续调 row-index 深度/DP 块：收益 <15%，已到顶
 - 移植顺序路径 BT4：顺序路径自身 1.7 s，更慢
 - 只用 greedy：快 1.7×，但体积 +14%
+
+## 实测结果（2026-11-14）：方案 A 被否决
+
+按上文决策 2 实现了“每 worker 本地 BT4 + 顺序 optimal parse”（复用
+`find_matches_optimal`，slice 的 tail 作为上下文，`lr_shared` 作为唯一跨
+slice 历史），单文件 6.6 MB、m3、`-mc-`：
+
+| 模型 | 体积 | 时间 |
+|---|---|---|
+| row-index + priced DP（现状） | 2,549,783 | 487 ms |
+| 每 worker BT4 + optimal（本 ADR） | 2,600,325 (+2.0%) | 684 ms |
+
+`rar t` 通过，说明流是合法的；但**更慢也更差**：每个 worker 重建 BT4 的成本
+加上“只能看到本 slice”的匹配损失，都超过 row-index 的共享索引收益。该实现
+已回滚，未进入代码库。
+
+据此修正结论：
+
+1. 共享 row-index 的架构方向是对的，不要换成每 worker BT4。
+2. 与官方的 10 ns/位置差距不在索引结构，而在**每位置的常数**（随机访问
+   次数、候选比较）。剩余可做的是把 row-index 查询本身做窄：单探测平表
+   （`head[hash]` 只存最新位置）用于 `-m1/-m2`，`-m3+` 保持多候选 DP。
+3. 若仍追求 m3 官方速度，下一个可测假设是“平表单探测 + 命中后再沿链取
+   2–4 个候选”，预期 2× 左右，体积 +3–5%；需要单独实验验证后再改 ADR。
