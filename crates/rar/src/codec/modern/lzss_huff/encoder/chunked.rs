@@ -228,6 +228,15 @@ fn encode_chunked_raw_inner(
 
     let level = (method as usize).clamp(1, 5);
     let (_, lazy_thresh, max_match) = LEVEL_PARAMS[level];
+    // `-m1` is the "fastest" rung; a 4 KiB match cap makes the greedy matcher
+    // extend every candidate up to 4 KiB, which dominated its run time (a
+    // 6.6 MiB DLL took 1.43 s versus 0.37 s with a 128-byte cap, at +0.12%
+    // size). Levels 2-5 keep the long cap: their priced parse uses it.
+    let max_match = if level == 1 {
+        max_match.min(128)
+    } else {
+        max_match
+    };
     // Experimental (issue 15, lever B.3): a priced parse with a bounded
     // candidate budget, which is what fills the gap between `-m1` (greedy)
     // and `-m2` (priced): those two sit 10-40x apart in time, and almost all
