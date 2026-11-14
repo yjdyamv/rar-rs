@@ -224,6 +224,10 @@ pub struct EncoderState {
     /// tail re-seed walked the cold array); persisting it keeps the array
     /// warm, with links rebased by the frame slide instead of re-seeding.
     tree: Option<match_finder::TreeMatchFinder>,
+    /// Distance-class finder (ADR 0011 P2) reused across chunks of a member
+    /// exactly like `tree`; `RAR_RS_CLASSES` selects it over BT4 and both are
+    /// never built for the same parse.
+    class: Option<parse::ClassMatchFinder>,
     /// Length of the previous chunk's `combined` frame; the persistent
     /// finder's links are rebased by `combined_len - keep` when the frame
     /// slides.
@@ -258,6 +262,7 @@ impl EncoderState {
             lr.reset();
         }
         self.tree = None;
+        self.class = None;
         self.combined_len = 0;
         self.short.clear();
         self.search.clear();
@@ -275,6 +280,7 @@ impl EncoderState {
     /// window tail, repeat cache and long-range history still carry over.
     pub(crate) fn begin_member(&mut self) {
         self.tree = None;
+        self.class = None;
         self.combined_len = 0;
     }
 
@@ -286,6 +292,7 @@ impl EncoderState {
         self.tail.is_empty()
             && self.combined_len == 0
             && self.tree.is_none()
+            && self.class.is_none()
             && self.dist_cache == [0; DIST_CACHE_SIZE]
             && self.last_length == 0
             && self

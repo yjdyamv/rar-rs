@@ -62,10 +62,13 @@ pub(super) const SHORT_PROBE: usize = 2;
 pub(super) const LR_PROBE: usize = 3;
 /// Length verifications (`match_length_at` calls) of tree reports.
 pub(super) const VERIFY: usize = 4;
+/// Full descents into a far distance class (the class matcher only).
+pub(super) const BAND: usize = 5;
 
-const COUNT_NAMES: [&str; 5] = ["positions", "searches", "short", "lr", "verify"];
+const COUNT_NAMES: [&str; 6] = ["positions", "searches", "short", "lr", "verify", "band"];
 
-static COUNTS: [AtomicU64; 5] = [
+static COUNTS: [AtomicU64; 6] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),

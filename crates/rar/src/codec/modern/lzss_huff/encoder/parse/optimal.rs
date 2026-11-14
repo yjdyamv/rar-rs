@@ -24,6 +24,7 @@ use super::collect::{
     BlockMatches, DISABLE_MATCHLESS_FAST_PATH, FAST_RECOVER_INTERVAL, NICE_MATCH_LENGTH,
     RELAXED_MATCHLESS_MAX_LEN, SearchState, ShortFinder, collect_block_matches, match_length_at,
 };
+use super::hashmatcher::ClassMatchFinder;
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
 use crate::codec::common::match_finder::MatchFinder;
 use crate::version::ArchiveVersion;
@@ -1470,28 +1471,60 @@ pub(crate) fn find_matches_optimal(
     // tree) seeds its tail, with budget-limited descents (their matches
     // are already encoded; only their place in the tree matters).
     let tree_window = window.min(combined.len());
-    let mut tree_finder = state.tree.get_or_insert_with(|| {
-        // The finder spans the whole combined slice, so the slider's
-        // rebase/trim never has to copy the son array mid-chunk.
-        match_finder::TreeMatchFinder::new(tree_window)
-    });
-    tree_finder.grow_to(tree_window);
     let keep = window.min(near_window_max()).min(combined.len());
+    // Two finders can serve the parse: BT4 (the incumbent) and the ADR 0011
+    // P2 distance-class matcher (`RAR_RS_CLASSES`, default off). Both persist
+    // across the chunks of a member: their links are frame offsets into
+    // `combined`, so as the frame slides (the tail drops its oldest bytes) the
+    // links are rebased by the slide amount instead of rebuilding the
+    // structure and re-seeding the tail — re-seeding cost hundreds of
+    // milliseconds per chunk on dense data. Only a fresh frame (or, for a
+    // structure that can only rebuild, a resize) seeds its tail, with
+    // budget-limited descents (their matches are already encoded; only their
+    // place in the structure matters).
+    //
+    // A class finder cannot grow in place (its blocks are sized by the window,
+    // so a resize invalidates every link), hence it is allocated for the whole
+    // window up front, exactly like BT4's tree: the ring of classes must cover
+    // the window, otherwise matches in the far half of it are unreachable.
+    let mut finder = match super::class_config() {
+        Some(config) => super::Finder::Class(state.class.get_or_insert_with(|| {
+            ClassMatchFinder::new(config.classes, window, config.far_shift)
+        })),
+        None => super::Finder::Tree(
+            state
+                .tree
+                .get_or_insert_with(|| match_finder::TreeMatchFinder::new(tree_window)),
+        ),
+    };
+    // The class ring must cover the whole window, and it is sized for it up
+    // front so that a growing frame never changes `block_len` (a resize
+    // invalidates every link and would force a reseed mid-member).
+    let structure_window = if finder.is_class() {
+        window
+    } else {
+        tree_window
+    };
+    let rebuilt = finder.grow_to(structure_window);
     // `combined_len == 0` marks a fresh frame: the first chunk of a member
     // (the multi-threaded workers no longer reach here — they run the
     // low-step chain tier; the tree is sequential-only now). In that case
-    // the head must be cleared — the tree may hold links from an earlier
-    // frame — and the tail seeded. A continued frame instead rebases the
-    // links by the slide amount, keeping the tail's positions valid without
-    // re-seeding.
-    if state.combined_len == 0 {
-        tree_finder.clear_head();
-        // The short tables only reach 8 KiB back, so seeding them costs a few
-        // thousand stores and never needs the budget the tree seed uses.
-        state.short.clear();
-        state.search.clear();
-        if tail_len > 0 {
-            state.short.seed(&combined, tail_len);
+    // the head must be cleared — the structure may hold links from an
+    // earlier frame — and the tail seeded. A continued frame instead rebases
+    // the links by the slide amount, keeping the tail's positions valid
+    // without re-seeding. A rebuilt structure has lost every link, so it
+    // reseeds like a fresh frame.
+    if state.combined_len == 0 || rebuilt {
+        finder.clear();
+        if state.combined_len == 0 {
+            // The short tables only reach 8 KiB back, so seeding them costs a
+            // few thousand stores and never needs the budget the tree seed
+            // uses.
+            state.short.clear();
+            state.search.clear();
+            if tail_len > 0 {
+                state.short.seed(&combined, tail_len);
+            }
         }
         if seed_tail && tail_len > 0 {
             // Flat fresh-frame seed: every tail position is inserted with a
@@ -1516,22 +1549,22 @@ pub(crate) fn find_matches_optimal(
                 } else {
                     chain_len.min(4)
                 };
-                tree_finder.matches(match_finder::MatchQuery {
+                finder.matches(match_finder::MatchQuery {
                     input: &combined,
                     pos,
                     len_limit: 4,
-                    max_distance: tree_window,
+                    max_distance: structure_window,
                     cut: budget,
                     out: &mut seed,
                 });
             }
         }
     } else if state.combined_len > keep {
-        tree_finder.rebase(state.combined_len - keep);
+        finder.rebase(state.combined_len - keep);
         state.short.shift(state.combined_len - keep);
     }
     profile::add(profile::PARSE_PREP, overall);
-    let finder_kind = &mut tree_finder;
+    let finder_kind = &mut finder;
     let short_kind = &mut state.short;
     let search_kind = &mut state.search;
 
@@ -1642,7 +1675,7 @@ pub(crate) fn find_matches_optimal(
 fn parse_one_block(
     combined: &[u8],
     block: std::ops::Range<usize>,
-    finder: &mut match_finder::TreeMatchFinder,
+    finder: &mut super::Finder<'_>,
     short: &mut ShortFinder,
     search: &mut SearchState,
     state: &mut EncoderMatchState,
@@ -1655,15 +1688,28 @@ fn parse_one_block(
     let variant = limits.variant;
     let ParseBuffers { matches, arrays } = buffers;
     let collect_started = Instant::now();
-    collect_block_matches(
-        finder,
-        short,
-        search,
-        combined,
-        block.clone(),
-        spec,
-        matches,
-    );
+    // One dispatch per block, not per position: the collector is generic, so
+    // each branch monomorphizes the loop for its finder.
+    match finder {
+        super::Finder::Tree(finder) => collect_block_matches(
+            *finder,
+            short,
+            search,
+            combined,
+            block.clone(),
+            spec,
+            matches,
+        ),
+        super::Finder::Class(finder) => collect_block_matches(
+            *finder,
+            short,
+            search,
+            combined,
+            block.clone(),
+            spec,
+            matches,
+        ),
+    }
     crate::codec::modern::lzss_huff::encoder::profile::add(
         crate::codec::modern::lzss_huff::encoder::profile::PARSE_COLLECT,
         collect_started,

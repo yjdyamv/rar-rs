@@ -620,6 +620,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // them against the wrong history (the silent corruption this project
     // already fixed once for cross-chunk growth).
     seed.tree = None;
+    seed.class = None;
     seed.combined_len = 0;
     Ok(output)
 }
