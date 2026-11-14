@@ -1129,7 +1129,7 @@ fn optimal_parse_tokens(
 
         let max_distance = pos.min(window);
         let max_length = (end - pos).min(max_match);
-        if max_distance == 0 || max_length < 4 {
+        if max_distance == 0 || max_length < 2 {
             continue;
         }
 
@@ -1152,8 +1152,8 @@ fn optimal_parse_tokens(
                 continue;
             }
             let length = match_length_at(combined, pos, repeat as usize, max_length);
-            if length >= 4 {
-                reaches.push((4, length as u32, repeat));
+            if length >= 2 {
+                reaches.push((2, length as u32, repeat));
             }
         }
 
@@ -1198,7 +1198,7 @@ fn optimal_parse_tokens(
             // so classify it once: the per-length step below only resolves
             // the length slot (and the repeat length's exact match).
             let pricer = SlotPricer::for_run(&state, distance, variant, prices);
-            let mut length = run_start.max(4);
+            let mut length = run_start.max(2);
             while length <= run_end {
                 if i != longest_idx {
                     if steps_left == 0 {
