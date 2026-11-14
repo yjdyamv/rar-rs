@@ -276,68 +276,8 @@ impl SearchState {
     }
 }
 
-/// The per-position match source [`collect_block_matches`] walks.
-///
-/// The collector is generic over it, so each finder monomorphizes into the
-/// code it would have had inline: BT4 keeps its software-pipelined
-/// `seed_for`/`matches_seeded` pair, and a finder with no such head resolution
-/// declares `PIPELINED = false` and pays nothing for it (the prefetch, the
-/// seeded call and the end-of-turn seed all vanish).
-pub(super) trait BlockFinder {
-    /// Whether [`Self::seed_for`] and [`Self::matches_seeded`] are used.
-    const PIPELINED: bool;
-
-    fn matches(&mut self, q: match_finder::MatchQuery<'_>);
-
-    fn matches_seeded(
-        &mut self,
-        q: match_finder::MatchQuery<'_>,
-        _current: usize,
-        _less: u32,
-        _greater: u32,
-    ) {
-        self.matches(q);
-    }
-
-    fn seed_for(&self, _input: &[u8], _pos: usize) -> (usize, u32, u32) {
-        (usize::MAX, u32::MAX, u32::MAX)
-    }
-
-    fn prefetch_head_for(&self, _input: &[u8], _pos: usize) {}
-}
-
-impl BlockFinder for match_finder::TreeMatchFinder {
-    const PIPELINED: bool = true;
-
-    #[inline]
-    fn matches(&mut self, q: match_finder::MatchQuery<'_>) {
-        match_finder::TreeMatchFinder::matches(self, q);
-    }
-
-    #[inline]
-    fn matches_seeded(
-        &mut self,
-        q: match_finder::MatchQuery<'_>,
-        current: usize,
-        less: u32,
-        greater: u32,
-    ) {
-        match_finder::TreeMatchFinder::matches_seeded(self, q, current, less, greater);
-    }
-
-    #[inline]
-    fn seed_for(&self, input: &[u8], pos: usize) -> (usize, u32, u32) {
-        match_finder::TreeMatchFinder::seed_for(self, input, pos)
-    }
-
-    #[inline]
-    fn prefetch_head_for(&self, input: &[u8], pos: usize) {
-        match_finder::TreeMatchFinder::prefetch_head_for(self, input, pos);
-    }
-}
-
-pub(super) fn collect_block_matches<F: BlockFinder>(
-    finder: &mut F,
+pub(super) fn collect_block_matches(
+    finder: &mut match_finder::TreeMatchFinder,
     short: &mut ShortFinder,
     search: &mut SearchState,
     combined: &[u8],
@@ -398,48 +338,37 @@ pub(super) fn collect_block_matches<F: BlockFinder>(
             // previous turn, so prefetching pos + 1 would only duplicate a
             // line this turn is about to read anyway. Far enough ahead that
             // the load has time to land.
-            if F::PIPELINED && pos + PREFETCH_AHEAD + 4 < combined.len() {
+            if pos + PREFETCH_AHEAD + 4 < combined.len() {
                 finder.prefetch_head_for(combined, pos + PREFETCH_AHEAD);
             }
             super::super::profile::count(super::super::profile::SEARCH, 1);
             let avail = combined.len() - pos;
             let len_limit = avail.min(verify_cap());
             scratch.clear();
-            if F::PIPELINED {
-                match pending.take() {
-                    Some((seed_pos, current, less, greater)) if seed_pos == pos => {
-                        finder.matches_seeded(
-                            match_finder::MatchQuery {
-                                input: combined,
-                                pos,
-                                len_limit,
-                                max_distance,
-                                cut: chain_len,
-                                out: &mut scratch,
-                            },
-                            current,
-                            less,
-                            greater,
-                        );
-                    }
-                    _ => finder.matches(match_finder::MatchQuery {
-                        input: combined,
-                        pos,
-                        len_limit,
-                        max_distance,
-                        cut: chain_len,
-                        out: &mut scratch,
-                    }),
+            match pending.take() {
+                Some((seed_pos, current, less, greater)) if seed_pos == pos => {
+                    finder.matches_seeded(
+                        match_finder::MatchQuery {
+                            input: combined,
+                            pos,
+                            len_limit,
+                            max_distance,
+                            cut: chain_len,
+                            out: &mut scratch,
+                        },
+                        current,
+                        less,
+                        greater,
+                    );
                 }
-            } else {
-                finder.matches(match_finder::MatchQuery {
+                _ => finder.matches(match_finder::MatchQuery {
                     input: combined,
                     pos,
                     len_limit,
                     max_distance,
                     cut: chain_len,
                     out: &mut scratch,
-                });
+                }),
             }
             // The descent reports exact prefix lengths: it compares whole
             // words and seals any node whose comparison ran into the end of
@@ -603,8 +532,7 @@ pub(super) fn collect_block_matches<F: BlockFinder>(
         let npos = pos + 1;
         let n_max_distance = npos.min(window);
         let n_max_length = (block.end - npos).min(max_match);
-        if F::PIPELINED
-            && npos >= committed_through
+        if npos >= committed_through
             && n_max_distance > 0
             && n_max_length >= 4
             && npos + 3 < combined.len()

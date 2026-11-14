@@ -19,7 +19,6 @@
 
 mod block;
 mod collect;
-mod hashmatcher;
 mod optimal;
 
 use crate::codec::common::match_finder;
@@ -85,66 +84,11 @@ pub(super) struct SequentialSearch<'a> {
     pub seed_tail: bool,
 }
 
-/// The finder a collector turn walks.
-///
-/// BT4 is the incumbent; `Class` is the ADR 0011 P2 distance-class matcher,
-/// selected by `RAR_RS_CLASSES` and default-off. The collector is generic over
-/// the finder ([`collect::BlockFinder`]) and this enum is matched once per
-/// parse block, so neither path pays a per-position branch for the other.
-pub(super) enum Finder<'a> {
-    Tree(&'a mut match_finder::TreeMatchFinder),
-    Class(&'a mut hashmatcher::ClassMatchFinder),
-}
-
-impl Finder<'_> {
-    /// Whether this finder is the distance-class matcher.
-    pub(super) fn is_class(&self) -> bool {
-        matches!(self, Self::Class(_))
-    }
-
-    /// Insert `q.pos` and collect its reports (see [`collect::BlockFinder`]).
-    pub(super) fn matches(&mut self, q: match_finder::MatchQuery<'_>) {
-        match self {
-            Self::Tree(finder) => finder.matches(q),
-            Self::Class(finder) => collect::BlockFinder::matches(*finder, q),
-        }
-    }
-
-    /// Drop every stored position (a fresh member frame).
-    pub(super) fn clear(&mut self) {
-        match self {
-            Self::Tree(finder) => finder.clear_head(),
-            Self::Class(finder) => finder.clear(),
-        }
-    }
-
-    /// Resize to `window`; `true` means the structure was rebuilt and the
-    /// caller must reseed the tail (the class matcher can only rebuild).
-    pub(super) fn grow_to(&mut self, window: usize) -> bool {
-        match self {
-            Self::Tree(finder) => {
-                finder.grow_to(window);
-                false
-            }
-            Self::Class(finder) => finder.grow_to(window),
-        }
-    }
-
-    /// The frame slid by `sub` bytes.
-    pub(super) fn rebase(&mut self, sub: usize) {
-        match self {
-            Self::Tree(finder) => finder.rebase(sub),
-            Self::Class(finder) => finder.rebase(sub),
-        }
-    }
-}
-
 pub(super) use block::{EMITTED_BLOCK_SIZE, find_block_end_adaptive};
 pub(super) use collect::COLLECT_MISS_THRESHOLD;
 #[cfg(test)]
 pub(crate) use collect::set_fast_path_enabled;
 pub(crate) use collect::{SearchState, ShortFinder};
-pub(super) use hashmatcher::{ClassMatchFinder, class_config};
 #[cfg(all(test, feature = "parallel"))]
 pub(crate) use optimal::set_price_carry_enabled;
 #[cfg(feature = "parallel")]
