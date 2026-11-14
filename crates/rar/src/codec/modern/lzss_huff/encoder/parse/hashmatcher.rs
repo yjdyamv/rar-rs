@@ -228,6 +228,38 @@ mod tests {
         assert!(out.len() <= 32, "search respects its budget");
     }
 
+    /// P1.3 decision input: how dense are block-local candidates, and what do
+    /// they cost per position? Printed with `-- --nocapture`.
+    #[test]
+    fn reports_candidate_density_and_cost() {
+        let data = text_block(1 << 20);
+        let block = 64 * 1024;
+        let mut matcher = HashMatcher::new();
+        let mut out = Vec::new();
+        let (mut offered, mut hits, mut searched) = (0usize, 0usize, 0usize);
+        let started = std::time::Instant::now();
+        for start in (0..data.len() - block).step_by(block) {
+            matcher.prepare(&data, start, block);
+            for pos in start..(start + block).min(data.len().saturating_sub(8)) {
+                matcher.search(&data, pos, pos.min(4096), 32, 64, &mut out);
+                searched += 1;
+                offered += out.len();
+                if out.last().is_some_and(|&(len, _)| len >= 16) {
+                    hits += 1;
+                }
+            }
+        }
+        let elapsed = started.elapsed();
+        println!(
+            "hashmatcher: {offered} candidates over {searched} positions ({:.2}/pos), \
+             {:.1}% reach 16 bytes, {:.1} ns/pos",
+            offered as f64 / searched as f64,
+            hits as f64 * 100.0 / searched as f64,
+            elapsed.as_nanos() as f64 / searched as f64,
+        );
+        assert!(offered > 0, "the block shape must offer something");
+    }
+
     #[test]
     fn matches_stay_inside_the_block() {
         let data = text_block(1 << 16);
