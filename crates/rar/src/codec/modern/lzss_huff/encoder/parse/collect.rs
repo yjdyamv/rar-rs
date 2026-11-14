@@ -88,6 +88,17 @@ impl BlockMatches {
     pub(super) fn at(&self, index: usize) -> &[(u32, u32)] {
         &self.runs[self.starts[index] as usize..self.starts[index + 1] as usize]
     }
+
+    /// Empty the block's runs and per-position starts, keeping the
+    /// allocations for the next block — a 64 KiB block needs a 64 KiB
+    /// `starts` array and up to as much again in runs, and there are two
+    /// hundred of them in a 13 MiB member.
+    pub(super) fn reset(&mut self, span: usize) {
+        self.runs.clear();
+        self.starts.clear();
+        self.runs.reserve(span);
+        self.starts.reserve(span + 1);
+    }
 }
 
 /// Collect the matches the optimal parse will price at each position of a
@@ -244,7 +255,8 @@ pub(super) fn collect_block_matches(
     combined: &[u8],
     block: std::ops::Range<usize>,
     spec: super::BlockSearch<'_>,
-) -> BlockMatches {
+    matches: &mut BlockMatches,
+) {
     let super::BlockSearch {
         tail_len,
         chain_len,
@@ -255,10 +267,7 @@ pub(super) fn collect_block_matches(
     let max_match = limits.max_match;
     let window = limits.window;
     let span = block.end - block.start;
-    let mut matches = BlockMatches {
-        runs: Vec::with_capacity(span),
-        starts: Vec::with_capacity(span + 1),
-    };
+    matches.reset(span);
     let mut committed_through = block.start;
     // Scratch for the tree finder's per-position reports.
     let mut scratch: Vec<(u32, u32)> = Vec::new();
@@ -502,7 +511,6 @@ pub(super) fn collect_block_matches(
         }
     }
     matches.starts.push(matches.runs.len() as u32);
-    matches
 }
 
 /// Length of the match at `pos` against `distance` bytes back, capped at

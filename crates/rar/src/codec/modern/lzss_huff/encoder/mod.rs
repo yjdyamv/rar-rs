@@ -118,7 +118,7 @@ pub(crate) fn set_price_tier_cut(cut: Option<usize>) {
     );
 }
 
-/// Parse tier for a level: `(chain_len, passes, miss_threshold)`.
+/// Parse tier for a level: `(chain_len, miss_threshold)`.
 ///
 /// Both parser entry points — the buffered chunked path and the filtered one
 /// ([`encode_with_filters`](filter::encode_with_filters), which serves every
@@ -126,19 +126,15 @@ pub(crate) fn set_price_tier_cut(cut: Option<usize>) {
 /// here. Keeping a second copy of the level lookup in the filtered path is how
 /// a tier ends up half-applied: binaries move, text does not, and the A/B
 /// quietly compares two different parsers.
-fn parse_tier(method: u8) -> (usize, usize, usize) {
+fn parse_tier(method: u8) -> (usize, usize) {
     let level = (method as usize).clamp(1, 5);
     let (chain_len, _, _) = LEVEL_PARAMS[level];
     let miss_threshold = parse::COLLECT_MISS_THRESHOLD[level];
     match price_tier_cut() {
         // Level 1 parses greedily and has no price table to work from, so the
         // tier cannot override it without turning it into level 2.
-        Some(cut) if level >= 2 => (cut, 1, miss_threshold),
-        _ => (
-            chain_len,
-            parse::OPTIMAL_PARSE_PASSES[level],
-            miss_threshold,
-        ),
+        Some(cut) if level >= 2 => (cut, miss_threshold),
+        _ => (chain_len, miss_threshold),
     }
 }
 

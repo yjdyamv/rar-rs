@@ -175,7 +175,7 @@ pub fn encode_with_filters_into(
     // ones with an automatic x86/delta filter, so a tier that only reached
     // `encode_chunked_raw_inner` would silently skip exactly the binaries the
     // tier was measured on.
-    let (chain_len, passes, miss_threshold) = super::parse_tier(method);
+    let (chain_len, miss_threshold) = super::parse_tier(method);
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
 
@@ -207,7 +207,6 @@ pub fn encode_with_filters_into(
                         variant,
                     },
                     chain_len,
-                    passes,
                     miss_threshold,
                     long_range,
                     lr_shared: None,

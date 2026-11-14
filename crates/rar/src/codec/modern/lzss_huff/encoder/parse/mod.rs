@@ -70,8 +70,6 @@ pub(super) struct SequentialSearch<'a> {
     pub limits: MatchLimits,
     /// Hash-chain budget for the near finder.
     pub chain_len: usize,
-    /// Pricing passes (levels 2-5).
-    pub passes: usize,
     /// Per-level dial: when the near search drops to the recovery cadence.
     pub miss_threshold: usize,
     /// Whether the level runs the long-range search at all.
@@ -97,4 +95,4 @@ pub(crate) use optimal::set_price_carry_enabled;
 pub(super) use optimal::{
     MT_DP_BLOCK_SIZE, RowIndex, find_matches_in_range, windowed_priced_parse,
 };
-pub(super) use optimal::{OPTIMAL_PARSE_PASSES, find_matches_optimal, find_matches_with_tail};
+pub(super) use optimal::{find_matches_optimal, find_matches_with_tail};

@@ -242,7 +242,7 @@ fn encode_chunked_raw_inner(
     // and `-m2` (priced): those two sit 10-40x apart in time, and almost all
     // of that jump is the collector, not the pricing. The decision itself
     // lives in `parse_tier` so the filtered path cannot drift from this one.
-    let (chain_len, passes, miss_threshold) = super::parse_tier(method);
+    let (chain_len, miss_threshold) = super::parse_tier(method);
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     // WinRAR applies the long range search to -m2..-m5 and ignores it
     // for -m1 (fastest); it is automatic (no -mcl switch needed) and
@@ -274,7 +274,6 @@ fn encode_chunked_raw_inner(
                         variant,
                     },
                     chain_len,
-                    passes,
                     miss_threshold,
                     long_range,
                     // Sequential path: the state's own long-range table is

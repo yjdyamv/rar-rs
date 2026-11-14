@@ -156,14 +156,18 @@ where
     // them parallel at all.
     let carry = !PRICE_CARRY_DISABLED.load(Ordering::Relaxed);
     let mut carried: Option<TokenPrices> = None;
+    // Re-used across the slice's blocks: a `BlockMatches` costs a `starts`
+    // entry per position and the DP tables 32 bytes per position.
+    let mut matches = BlockMatches {
+        runs: Vec::new(),
+        starts: Vec::new(),
+    };
+    let mut arrays = DpArrays::default();
     let mut block_start = start;
     while block_start < end {
         let block_end = (block_start + block_size).min(end);
         let span = block_end - block_start;
-        let mut matches = BlockMatches {
-            runs: Vec::with_capacity(span),
-            starts: Vec::with_capacity(span + 1),
-        };
+        matches.reset(span);
         let mut longest = 0usize;
         for pos in block_start..block_end {
             matches.starts.push(matches.runs.len() as u32);
@@ -214,6 +218,7 @@ where
                 carried.as_ref(),
                 &matches,
                 state,
+                &mut arrays,
             );
             let (block_symbols, (nc, dc, ldc, rc)) = convert_tokens(
                 &tokens,
@@ -578,13 +583,6 @@ const MAX_PARSE_STEPS_PER_POSITION: usize = 12;
 /// whatever the last pass chose, so a symbol that earns its place gets a
 /// real code.
 const UNUSED_SYMBOL_COST: usize = 15;
-
-/// How many times the optimal parse runs over a block. The first pass
-/// guesses prices; the rest reprice against the tables the pass before
-/// produced. Fewer passes is proportionally cheaper, so the ladder
-/// trades ratio for speed here: m2/m3 (fast/normal) do one reprice,
-/// m4 two and m5 three.
-pub(crate) const OPTIMAL_PARSE_PASSES: [usize; 6] = [0, 0, 2, 2, 3, 4];
 
 /// Base parse-block size; blocks extend up to [`MAX_BLOCK_SIZE`] while the
 /// byte distribution stays stable (see [`BlockSplitter`]).
@@ -1066,6 +1064,56 @@ impl<'a> SlotPricer<'a> {
     }
 }
 
+/// The optimal parse's per-position tables, kept across blocks. They are 32
+/// bytes per position (`price`, length, distance, four reps, last length), so
+/// a 64 KiB block would allocate and zero 2 MB before it prices its first
+/// candidate — 200 such blocks per 13 MiB member. Sizing them once per chunk
+/// and only re-filling the used prefix turns that into two memsets of the
+/// same memory, with no fresh pages to fault in.
+#[derive(Default)]
+pub(super) struct DpArrays {
+    price: Vec<u32>,
+    arrive_length: Vec<u32>,
+    arrive_distance: Vec<u32>,
+    arrive_reps: Vec<[u32; DIST_CACHE_SIZE]>,
+    arrive_last_length: Vec<u32>,
+}
+
+impl DpArrays {
+    fn reset(&mut self, span: usize) {
+        let reach = span + 1;
+        self.price.clear();
+        self.price.resize(reach, u32::MAX);
+        self.arrive_length.clear();
+        self.arrive_length.resize(reach, 0);
+        self.arrive_distance.clear();
+        self.arrive_distance.resize(reach, 0);
+        self.arrive_reps.clear();
+        self.arrive_reps.resize(reach, [0; DIST_CACHE_SIZE]);
+        self.arrive_last_length.clear();
+        self.arrive_last_length.resize(reach, 0);
+    }
+}
+
+/// Per-chunk scratch shared by the blocks of one parse: the collector's
+/// match table and the DP's per-position tables.
+pub(super) struct ParseBuffers {
+    matches: BlockMatches,
+    arrays: DpArrays,
+}
+
+impl Default for ParseBuffers {
+    fn default() -> Self {
+        Self {
+            matches: BlockMatches {
+                runs: Vec::new(),
+                starts: Vec::new(),
+            },
+            arrays: DpArrays::default(),
+        }
+    }
+}
+
 /// Prices every path through the block and keeps the cheapest (rars
 /// `optimal_tokens`, adapted). `prices` is `None` for the first pass, which
 /// guesses with [`estimated_match_cost`]. `initial` seeds the distance
@@ -1079,6 +1127,7 @@ fn optimal_parse_tokens(
     prices: Option<&TokenPrices>,
     matches: &BlockMatches,
     initial: EncoderMatchState,
+    arrays: &mut DpArrays,
 ) -> Vec<(u32, u32)> {
     let start = block.start;
     let end = block.end;
@@ -1087,19 +1136,21 @@ fn optimal_parse_tokens(
     let variant = limits.variant;
     let span = end - start;
 
-    let mut price = vec![u32::MAX; span + 1];
-    let mut arrive_length = vec![0u32; span + 1];
-    let mut arrive_distance = vec![0u32; span + 1];
-    let mut arrive_reps = vec![[0u32; DIST_CACHE_SIZE]; span + 1];
-    let mut arrive_last_length = vec![0u32; span + 1];
+    arrays.reset(span);
+    let DpArrays {
+        price,
+        arrive_length,
+        arrive_distance,
+        arrive_reps,
+        arrive_last_length,
+    } = arrays;
     price[0] = 0;
     arrive_reps[0] = initial.reps;
     arrive_last_length[0] = initial.last_length;
 
     // Runs of `(shortest, longest, distance)` from the position being
-    // priced, in the order the collector found them. Reused to keep one
-    // allocation.
-    let mut reaches: Vec<(u32, u32, u32)> = Vec::new();
+    // priced, in the order the collector found them.
+    let mut reaches: Vec<(u32, u32, u32)> = Vec::with_capacity(16);
     // The first position past a match the parse committed to; nothing is
     // priced before it. See [`NICE_MATCH_LENGTH`].
     let mut committed_through = 0usize;
@@ -1388,7 +1439,6 @@ pub(crate) fn find_matches_optimal(
     let super::SequentialSearch {
         limits,
         chain_len,
-        passes,
         miss_threshold,
         long_range,
         lr_shared,
@@ -1521,6 +1571,7 @@ pub(crate) fn find_matches_optimal(
     let mut splitter = BlockSplitter::new();
     let mut block_start = tail_len;
     let mut sub_start = tail_len;
+    let mut buffers = ParseBuffers::default();
     while sub_start < combined.len() {
         let sub_end = (sub_start + OPT_BLOCK_SIZE).min(combined.len());
         let sub = &combined[sub_start..sub_end];
@@ -1535,7 +1586,7 @@ pub(crate) fn find_matches_optimal(
                 search_kind,
                 &mut state_for_blocks,
                 block_spec,
-                passes,
+                &mut buffers,
             );
             symbols.extend(block_symbols);
             splitter = BlockSplitter::new();
@@ -1554,7 +1605,7 @@ pub(crate) fn find_matches_optimal(
             search_kind,
             &mut state_for_blocks,
             block_spec,
-            passes,
+            &mut buffers,
         );
         symbols.extend(block_symbols);
     }
@@ -1574,11 +1625,15 @@ pub(crate) fn find_matches_optimal(
     symbols
 }
 
-/// Parse one block with the optimal parse: collect matches once, then run
-/// [`OPTIMAL_PARSE_PASSES`] passes, each repricing against the tables the
-/// pass before produced. The last pass's tokens are converted to symbols
-/// with the live cache state (which is advanced, so cross-block and
-/// cross-chunk cache reuse is exact).
+/// Parse one block with the optimal parse: collect the block's matches once,
+/// price every path through them in one DP pass, then convert the winning
+/// tokens to symbols with the live cache state (which is advanced, so
+/// cross-block and cross-chunk cache reuse is exact).
+///
+/// `buffers` carries the block's `BlockMatches` and the DP's per-position
+/// tables across blocks: both are sized by the block span, so re-using them
+/// is what keeps a 13 MiB member from re-allocating and re-zeroing 2 MB per
+/// 64 KiB block.
 fn parse_one_block(
     combined: &[u8],
     block: std::ops::Range<usize>,
@@ -1587,13 +1642,22 @@ fn parse_one_block(
     search: &mut SearchState,
     state: &mut EncoderMatchState,
     spec: super::BlockSearch<'_>,
-    passes: usize,
+    buffers: &mut ParseBuffers,
 ) -> Vec<Symbol> {
     let limits = spec.limits;
     let max_match = limits.max_match;
     let window = limits.window;
     let variant = limits.variant;
-    let matches = collect_block_matches(finder, short, search, combined, block.clone(), spec);
+    let ParseBuffers { matches, arrays } = buffers;
+    collect_block_matches(
+        finder,
+        short,
+        search,
+        combined,
+        block.clone(),
+        spec,
+        matches,
+    );
 
     // Fast path: a block with no match candidates at all parses to pure
     // literals, deterministically — the pricing passes would price the
@@ -1684,27 +1748,15 @@ fn parse_one_block(
     }
 
     let initial = *state;
-    let mut tokens = optimal_parse_tokens(combined, block.clone(), limits, None, &matches, initial);
-    for _ in 1..passes {
-        let mut screen = *state;
-        let (_, (nc, dc, ldc, rc)) =
-            convert_tokens(&tokens, combined, block.clone(), &mut screen, variant);
-        let (nc_l, dc_l, ldc_l, rc_l) = prices_from_frequencies(&nc, &dc, &ldc, &rc);
-        let prices = TokenPrices::new(&nc_l, &dc_l, &ldc_l, &rc_l);
-        let repriced = optimal_parse_tokens(
-            combined,
-            block.clone(),
-            limits,
-            Some(&prices),
-            &matches,
-            initial,
-        );
-        let settled = repriced == tokens;
-        tokens = repriced;
-        if settled {
-            break;
-        }
-    }
+    let tokens = optimal_parse_tokens(
+        combined,
+        block.clone(),
+        limits,
+        None,
+        &matches,
+        initial,
+        arrays,
+    );
     let (symbols, _) = convert_tokens(&tokens, combined, block.clone(), state, variant);
     symbols
 }
