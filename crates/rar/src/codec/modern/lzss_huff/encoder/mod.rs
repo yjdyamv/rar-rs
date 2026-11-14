@@ -54,6 +54,7 @@ pub(crate) static MATCHLESS_FAST_PATH_USES: std::sync::atomic::AtomicUsize =
 
 use super::DIST_CACHE_SIZE;
 use crate::codec::common::match_finder;
+use parse::{SearchState, ShortFinder};
 
 // ── Shared parameters ──────────────────────────────────────────────────────
 
@@ -217,6 +218,14 @@ pub struct EncoderState {
     /// finder's links are rebased by `combined_len - keep` when the frame
     /// slides.
     combined_len: usize,
+    /// Nearest 2- and 3-byte prefix tables the collector consults where the
+    /// tree finds nothing (the tree hashes four bytes and cannot report a
+    /// shorter match). Coordinates are frame positions like the tree's, so the
+    /// frame slide shifts them; a fresh frame clears and re-seeds the tail.
+    short: ShortFinder,
+    /// Tree fast-mode state carried across parse blocks (see
+    /// [`parse::collect::SearchState`]).
+    search: SearchState,
     /// Cached hash-chain finder arrays (head/prev) for the MT low-step
     /// parse, reused across slices. The `combined` frame is reallocated per
     /// slice (the finder borrows it), but the two multi-MiB `head`/`prev`
@@ -240,6 +249,8 @@ impl EncoderState {
         }
         self.tree = None;
         self.combined_len = 0;
+        self.short.clear();
+        self.search.clear();
         self.chain_parts = None;
     }
 

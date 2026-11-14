@@ -101,8 +101,146 @@ impl BlockMatches {
 /// `combined` (which starts at `spec.tail_len`); the probe only runs where the
 /// tree found nothing useful (a good near match is never worse than a
 /// far one).
+/// Nearest-occurrence tables for the 2- and 3-byte prefixes.
+///
+/// The tree hashes four bytes, so a pair or triple that never grows to four
+/// bytes never enters its buckets — and those are a quarter of what the
+/// official encoder emits (it writes 135k two-byte and 188k three-byte
+/// matches into a 13 MiB binary, while the tree found none). Both tables are
+/// direct-mapped and hold one position per key: at a match this short the
+/// nearest occurrence is the only one worth having, and the length bonus
+/// bounds how far it can even be encoded (raw length 2 needs bonus 0, so
+/// distance <= 0x100; raw length 3 needs bonus <= 1, so <= 0x2000), which is
+/// why two 64k-slot tables cover the whole useful range.
+#[derive(Debug)]
+pub(crate) struct ShortFinder {
+    head2: Vec<u32>,
+    head3: Vec<u32>,
+}
+
+impl ShortFinder {
+    const BITS: u32 = 16;
+    const SIZE: usize = 1 << Self::BITS;
+    const NO_POS: u32 = u32::MAX;
+    const HASH3: u32 = 0x9E37_79B1;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            head2: vec![Self::NO_POS; Self::SIZE],
+            head3: vec![Self::NO_POS; Self::SIZE],
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.head2.fill(Self::NO_POS);
+        self.head3.fill(Self::NO_POS);
+    }
+
+    /// Move every stored position down by `delta` (the frame slide), dropping
+    /// the entries the slide pushed out of the frame.
+    pub(crate) fn shift(&mut self, delta: usize) {
+        let delta = delta as u32;
+        for table in [&mut self.head2, &mut self.head3] {
+            for slot in table.iter_mut() {
+                *slot = match slot.checked_sub(delta) {
+                    Some(moved) => moved,
+                    None => Self::NO_POS,
+                };
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn insert(&mut self, data: &[u8], pos: usize) {
+        let Some(triple) = data.get(pos..pos + 3) else {
+            return;
+        };
+        let pos = pos as u32;
+        self.head2[Self::key2(triple)] = pos;
+        self.head3[(Self::key3(triple) >> (32 - Self::BITS)) as usize] = pos;
+    }
+
+    /// Seed the frame's carried tail so the first bytes of the chunk can match
+    /// against history. Only the last `0x2000` bytes can ever matter (that is
+    /// the widest distance a short match encodes at).
+    pub(crate) fn seed(&mut self, data: &[u8], end: usize) {
+        let start = end.saturating_sub(0x2000);
+        for pos in start..end {
+            self.insert(data, pos);
+        }
+    }
+
+    /// Nearest occurrence of the 2-byte prefix at `pos` within
+    /// `max_distance` (the caller still has to confirm the bytes).
+    #[inline]
+    pub(crate) fn nearest2(&self, data: &[u8], pos: usize, max_distance: usize) -> Option<u32> {
+        let cand = self.head2[Self::key2(data.get(pos..pos + 3)?)];
+        Self::distance(pos, cand, max_distance)
+    }
+
+    /// Nearest occurrence of the 3-byte prefix at `pos` within
+    /// `max_distance`.
+    #[inline]
+    pub(crate) fn nearest3(&self, data: &[u8], pos: usize, max_distance: usize) -> Option<u32> {
+        let cand = self.head3[(Self::key3(data.get(pos..pos + 3)?) >> (32 - Self::BITS)) as usize];
+        Self::distance(pos, cand, max_distance)
+    }
+
+    #[inline]
+    fn distance(pos: usize, cand: u32, max_distance: usize) -> Option<u32> {
+        if cand == Self::NO_POS {
+            return None;
+        }
+        let cand = cand as usize;
+        let distance = pos.checked_sub(cand)?;
+        if distance == 0 || distance > max_distance {
+            return None;
+        }
+        Some(distance as u32)
+    }
+
+    #[inline]
+    fn key2(triple: &[u8]) -> usize {
+        u16::from_le_bytes([triple[0], triple[1]]) as usize
+    }
+
+    #[inline]
+    fn key3(triple: &[u8]) -> u32 {
+        let word = u32::from_le_bytes([triple[0], triple[1], triple[2], 0]);
+        word.wrapping_mul(Self::HASH3)
+    }
+}
+
+impl Default for ShortFinder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fast-mode state that outlives one parse block.
+///
+/// The collector drops to a recovery cadence once the tree has found nothing
+/// for `miss_threshold` positions in a row; that run used to restart at every
+/// 64 KiB block boundary, which on incompressible data meant paying a full
+/// search cadence (and, now, a short-table probe) at the head of every block.
+/// Carrying it across blocks keeps the mode engaged where the data is dense
+/// and costs nothing where it is not.
+#[derive(Debug, Default)]
+pub(crate) struct SearchState {
+    tree_misses: usize,
+    fast_tree: bool,
+}
+
+impl SearchState {
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub(super) fn collect_block_matches(
     finder: &mut match_finder::TreeMatchFinder,
+    short: &mut ShortFinder,
+    search: &mut SearchState,
     combined: &[u8],
     block: std::ops::Range<usize>,
     spec: super::BlockSearch<'_>,
@@ -126,8 +264,8 @@ pub(super) fn collect_block_matches(
     let mut scratch: Vec<(u32, u32)> = Vec::new();
     let mut lr_fast = false;
     let mut lr_misses = 0usize;
-    let mut tree_misses = 0usize;
-    let mut fast_tree = false;
+    let tree_misses = &mut search.tree_misses;
+    let fast_tree = &mut search.fast_tree;
     // The next gated position's first tree step (its head-resolved
     // descendant and that node's child pair), computed at the end of the
     // preceding iteration so its DRAM reads overlap the bookkeeping.
@@ -155,7 +293,7 @@ pub(super) fn collect_block_matches(
             && max_distance > 0
             && max_length >= 4
             && pos + 3 < combined.len()
-            && (!fast_tree || (pos & (FAST_RECOVER_INTERVAL - 1)) == 0)
+            && (!*fast_tree || (pos & (FAST_RECOVER_INTERVAL - 1)) == 0)
         {
             // Warm the next position's head slot while this descent runs;
             // the seed computed at the tail then hits. Harmless when the
@@ -224,11 +362,62 @@ pub(super) fn collect_block_matches(
                 }
             }
         }
-        let mut longest = matches.runs[before..]
+        let longest = matches.runs[before..]
             .iter()
             .map(|&(len, _)| len as usize)
             .max()
             .unwrap_or(0);
+        // Best length offered to the parse so far (the tree's, the short
+        // tables', the long-range probe's). `longest` stays the tree's alone,
+        // because the fast-mode counter below must keep accumulating while
+        // only spurious 2-3 byte pairs remain.
+        let mut offered = longest;
+        // The tree hashes four bytes, so a pair or triple that stops short of
+        // four never enters its buckets; the official encoder writes such
+        // matches by the hundreds of thousands. Ask the short tables only
+        // where the tree found nothing at all: a run that does reach four
+        // bytes already prices lengths 2-3 at its own (nearer) distance, and
+        // the parse prices lengths in ascending order, so a short candidate
+        // can only ever be appended to an empty run list.
+        if longest < 4
+            && searching
+            && *tree_misses < 32
+            && max_distance > 0
+            && max_length >= 2
+            && !*fast_tree
+            && pos + 3 <= combined.len()
+        {
+            // Encodable windows, straight from the length bonus: raw length 2
+            // needs bonus 0 (distance <= 0x100), raw length 3 needs bonus <= 1
+            // (distance <= 0x2000).
+            for (limit, min_length) in [(0x100usize, 2usize), (0x2000, 3)] {
+                if max_length < min_length {
+                    continue;
+                }
+                let reach_limit = max_distance.min(limit);
+                let candidate = if min_length == 2 {
+                    short.nearest2(combined, pos, reach_limit)
+                } else {
+                    short.nearest3(combined, pos, reach_limit)
+                };
+                let Some(distance) = candidate else {
+                    continue;
+                };
+                let length = match_length_at(combined, pos, distance as usize, max_length);
+                if length >= min_length && length > offered {
+                    matches.runs.push((length as u32, distance));
+                    offered = length;
+                }
+            }
+        }
+        // Every position goes in, stepped-over ones included (the tree skips
+        // them, but a nearest-occurrence table wants the most recent copy of a
+        // pair or triple whatever the parse did with it), and only *after* the
+        // probe above: the newest entry for this position's own key is the
+        // position itself.
+        if max_distance > 0 && !*fast_tree {
+            short.insert(combined, pos);
+        }
         // Fast mode gates on the tree finding *nothing at all* (`longest
         // == 0`), not on a short match: on text-like data 4-15 byte
         // matches are real signal (word prefixes) and must keep the full
@@ -236,13 +425,13 @@ pub(super) fn collect_block_matches(
         // hash-collision match is ~2^-32 per position, so the miss run
         // still accumulates and the mode engages as quickly as ever.
         if longest == 0 {
-            tree_misses += 1;
-            if !fast_tree && tree_misses >= miss_threshold {
-                fast_tree = true;
+            *tree_misses += 1;
+            if !*fast_tree && *tree_misses >= miss_threshold {
+                *fast_tree = true;
             }
         } else {
-            tree_misses = 0;
-            fast_tree = false;
+            *tree_misses = 0;
+            *fast_tree = false;
         }
         // Long-range probe gating: the probe misses in a multi-MiB
         // random-access table, so once it has failed for a long run of
@@ -264,10 +453,10 @@ pub(super) fn collect_block_matches(
                 anchor,
                 near_max + 1,
                 max_length,
-            ) && ll > longest
+            ) && ll > offered
             {
                 matches.runs.push((ll as u32, ld));
-                longest = ll;
+                offered = ll;
             }
             if matches.runs.len() > before {
                 lr_fast = false;
@@ -287,7 +476,7 @@ pub(super) fn collect_block_matches(
         }
         // The parse can only take a match the block still has room for, so
         // the reach it will commit to is measured the way it measures it.
-        let reach = longest.min(block.end - pos).min(max_match);
+        let reach = offered.min(block.end - pos).min(max_match);
         if reach >= NICE_MATCH_LENGTH {
             committed_through = pos + reach;
         }
@@ -304,7 +493,7 @@ pub(super) fn collect_block_matches(
             && n_max_distance > 0
             && n_max_length >= 4
             && npos + 3 < combined.len()
-            && (!fast_tree || (npos & (FAST_RECOVER_INTERVAL - 1)) == 0)
+            && (!*fast_tree || (npos & (FAST_RECOVER_INTERVAL - 1)) == 0)
         {
             let (current, less, greater) = finder.seed_for(combined, npos);
             pending = Some((npos, current, less, greater));

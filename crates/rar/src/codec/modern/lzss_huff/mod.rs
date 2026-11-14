@@ -236,12 +236,13 @@ mod fast_path_tests {
                 // hands it to the DP); it is here to compare bytes on that
                 // shape, and the aggregate below still catches a path that
                 // stopped firing altogether.
-                if name == "random" {
-                    assert!(
-                        fired > 0,
-                        "{name} l{level} dict{dict_log}: the fast path must fire on dense collisions"
-                    );
-                }
+                // The 2- and 3-byte prefix tables price short matches the tree
+                // cannot see, so a block that holds one has to go through the
+                // DP even when every candidate is trivial; "must fire" is no
+                // longer a property of this corpus. Byte identity is asserted
+                // above for every configuration, and the aggregate below still
+                // catches a path that stopped firing altogether.
+                let _ = fired;
             }
         }
         assert!(

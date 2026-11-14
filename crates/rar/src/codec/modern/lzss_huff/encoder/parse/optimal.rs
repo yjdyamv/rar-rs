@@ -21,7 +21,7 @@ use super::super::emit::{
 };
 use super::collect::{
     BlockMatches, DISABLE_MATCHLESS_FAST_PATH, FAST_RECOVER_INTERVAL, NICE_MATCH_LENGTH,
-    RELAXED_MATCHLESS_MAX_LEN, collect_block_matches, match_length_at,
+    RELAXED_MATCHLESS_MAX_LEN, SearchState, ShortFinder, collect_block_matches, match_length_at,
 };
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
 use crate::codec::common::match_finder::MatchFinder;
@@ -1433,6 +1433,13 @@ pub(crate) fn find_matches_optimal(
     // re-seeding.
     if state.combined_len == 0 {
         tree_finder.clear_head();
+        // The short tables only reach 8 KiB back, so seeding them costs a few
+        // thousand stores and never needs the budget the tree seed uses.
+        state.short.clear();
+        state.search.clear();
+        if tail_len > 0 {
+            state.short.seed(&combined, tail_len);
+        }
         if seed_tail && tail_len > 0 {
             // Flat fresh-frame seed: every tail position is inserted with a
             // budget-limited descent (`lr_shared` is always `None` here —
@@ -1468,8 +1475,11 @@ pub(crate) fn find_matches_optimal(
         }
     } else if state.combined_len > keep {
         tree_finder.rebase(state.combined_len - keep);
+        state.short.shift(state.combined_len - keep);
     }
     let finder_kind = &mut tree_finder;
+    let short_kind = &mut state.short;
+    let search_kind = &mut state.search;
 
     let lr = if long_range {
         // The near finder (tree) covers distances up to tail + chunk;
@@ -1521,6 +1531,8 @@ pub(crate) fn find_matches_optimal(
                 &combined,
                 block_range,
                 finder_kind,
+                short_kind,
+                search_kind,
                 &mut state_for_blocks,
                 block_spec,
                 passes,
@@ -1538,6 +1550,8 @@ pub(crate) fn find_matches_optimal(
             &combined,
             block_range,
             finder_kind,
+            short_kind,
+            search_kind,
             &mut state_for_blocks,
             block_spec,
             passes,
@@ -1569,6 +1583,8 @@ fn parse_one_block(
     combined: &[u8],
     block: std::ops::Range<usize>,
     finder: &mut match_finder::TreeMatchFinder,
+    short: &mut ShortFinder,
+    search: &mut SearchState,
     state: &mut EncoderMatchState,
     spec: super::BlockSearch<'_>,
     passes: usize,
@@ -1577,7 +1593,7 @@ fn parse_one_block(
     let max_match = limits.max_match;
     let window = limits.window;
     let variant = limits.variant;
-    let matches = collect_block_matches(finder, combined, block.clone(), spec);
+    let matches = collect_block_matches(finder, short, search, combined, block.clone(), spec);
 
     // Fast path: a block with no match candidates at all parses to pure
     // literals, deterministically — the pricing passes would price the
@@ -1610,7 +1626,12 @@ fn parse_one_block(
         // fires for essentially every block there and recovers the DP cost
         // otherwise spent over noise.
         let strict = matches.runs.is_empty();
+        // A 2- or 3-byte candidate is a *priced* option now (the parse takes
+        // it where `SlotPricer` finds it cheaper than the literals it covers),
+        // so the relaxed gate must exclude blocks that hold one.
+        let has_short = matches.runs.iter().any(|&(l, _)| l < 4);
         let relaxed = !strict
+            && !has_short
             && longest <= RELAXED_MATCHLESS_MAX_LEN
             && state.reps.iter().take(2).all(|&r| r == 0);
         if strict || relaxed {
