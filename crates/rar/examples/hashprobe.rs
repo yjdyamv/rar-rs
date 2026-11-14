@@ -14,11 +14,7 @@ use std::time::Instant;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let path = args.next().ok_or("usage: hashprobe <file> [repeats]")?;
-    let repeats: usize = args
-        .next()
-        .map(|raw| raw.parse())
-        .transpose()?
-        .unwrap_or(3);
+    let repeats: usize = args.next().map(|raw| raw.parse()).transpose()?.unwrap_or(3);
     let data = std::fs::read(&path)?;
     let n = data.len().saturating_sub(8);
 
@@ -44,7 +40,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let per_pos = best as f64 / n as f64;
     let (in_block, whole) = probe_reads(&data, 64 * 1024, 1 << 20);
-    println!("reads: {in_block:.1} ns/lookup inside a 64 KiB block slice, {whole:.1} ns/lookup across the whole member");
+    println!(
+        "reads: {in_block:.1} ns/lookup inside a 64 KiB block slice, {whole:.1} ns/lookup across the whole member"
+    );
     println!(
         "precompute {n} positions: {} ms ({} ns/position, 2 tables, {} KiB written)",
         best / 1000,

@@ -19,6 +19,7 @@
 
 mod block;
 mod collect;
+mod hashmatcher;
 mod optimal;
 
 use crate::codec::common::match_finder;
