@@ -19,6 +19,7 @@ use super::super::emit::{
     apply_length_bonus, cache_find, cache_push, cache_touch, encode_distance_slot,
     encode_length_slot, ensure_nonzero, remove_length_bonus,
 };
+use super::super::profile;
 use super::collect::{
     BlockMatches, DISABLE_MATCHLESS_FAST_PATH, FAST_RECOVER_INTERVAL, NICE_MATCH_LENGTH,
     RELAXED_MATCHLESS_MAX_LEN, SearchState, ShortFinder, collect_block_matches, match_length_at,
@@ -26,6 +27,7 @@ use super::collect::{
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
 use crate::codec::common::match_finder::MatchFinder;
 use crate::version::ArchiveVersion;
+use std::time::Instant;
 
 /// Fresh-frame tail seeding shape from the MT worker path (issue 12): the
 /// newest `MT_NEAR_TIGHT_FRONTIER` tail bytes are seeded densely, and the
@@ -1436,6 +1438,7 @@ pub(crate) fn find_matches_optimal(
     chunk: &[u8],
     spec: super::SequentialSearch<'_>,
 ) -> Vec<Symbol> {
+    let overall = Instant::now();
     let super::SequentialSearch {
         limits,
         chain_len,
@@ -1527,6 +1530,7 @@ pub(crate) fn find_matches_optimal(
         tree_finder.rebase(state.combined_len - keep);
         state.short.shift(state.combined_len - keep);
     }
+    profile::add(profile::PARSE_PREP, overall);
     let finder_kind = &mut tree_finder;
     let short_kind = &mut state.short;
     let search_kind = &mut state.search;
@@ -1622,6 +1626,7 @@ pub(crate) fn find_matches_optimal(
     state.dist_cache = state_for_blocks.reps;
     state.last_length = state_for_blocks.last_length;
     state.combined_len = combined.len();
+    profile::add(profile::PARSE_TOTAL, overall);
     symbols
 }
 
@@ -1649,6 +1654,7 @@ fn parse_one_block(
     let window = limits.window;
     let variant = limits.variant;
     let ParseBuffers { matches, arrays } = buffers;
+    let collect_started = Instant::now();
     collect_block_matches(
         finder,
         short,
@@ -1657,6 +1663,10 @@ fn parse_one_block(
         block.clone(),
         spec,
         matches,
+    );
+    crate::codec::modern::lzss_huff::encoder::profile::add(
+        crate::codec::modern::lzss_huff::encoder::profile::PARSE_COLLECT,
+        collect_started,
     );
 
     // Fast path: a block with no match candidates at all parses to pure
@@ -1748,6 +1758,7 @@ fn parse_one_block(
     }
 
     let initial = *state;
+    let parse_started = Instant::now();
     let tokens = optimal_parse_tokens(
         combined,
         block.clone(),
@@ -1757,7 +1768,16 @@ fn parse_one_block(
         initial,
         arrays,
     );
+    crate::codec::modern::lzss_huff::encoder::profile::add(
+        crate::codec::modern::lzss_huff::encoder::profile::PARSE_DP,
+        parse_started,
+    );
+    let convert_started = Instant::now();
     let (symbols, _) = convert_tokens(&tokens, combined, block.clone(), state, variant);
+    crate::codec::modern::lzss_huff::encoder::profile::add(
+        crate::codec::modern::lzss_huff::encoder::profile::PARSE_CONVERT,
+        convert_started,
+    );
     symbols
 }
 

@@ -235,6 +235,7 @@ pub fn encode_with_filters_into(
             first_chunk = false;
         }
 
+        let emit_started = std::time::Instant::now();
         let mut block_start = 0usize;
         while block_start < symbols.len() {
             let (block_end, _) = find_block_end_adaptive(&symbols, block_start, EMITTED_BLOCK_SIZE);
@@ -248,11 +249,13 @@ pub fn encode_with_filters_into(
             }
             block_start = block_end;
         }
+        super::profile::add(super::profile::EMIT, emit_started);
         if output.len() > data.len() {
             break;
         }
         chunk_start = chunk_end;
     }
+    super::profile::dump();
     Ok(output)
 }
 

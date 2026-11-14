@@ -310,6 +310,34 @@ Only test targets are affected — `cargo build` keeps the debug profile — and
 `debug-assertions`/`overflow-checks` are still inherited from `dev`, so
 arithmetic panics and `debug_assert!` fire exactly as before.
 
+## Profiling an encode
+
+The encoder carries phase timers (`crates/rar/src/codec/modern/lzss_huff/encoder/profile.rs`),
+off unless `RAR_RS_PROFILE` is set. They cost one `OnceLock` load per block or
+position and are there because guessing which phase dominates was wrong twice:
+
+```sh
+RAR_RS_PROFILE=1 rar a -m3 -md32m -mt1 -idq -y /tmp/p.rar big.exe
+# PROF counts positions=14704000 searches=13614703 short=6482254 lr=215237 verify=20838965
+# PROF total        4412.7 ms
+# PROF   prep        382.1 ms (  8.7%)
+# PROF   collect    2913.1 ms ( 66.0%)
+# PROF   dp          978.4 ms ( 22.2%)
+# PROF   convert      29.3 ms (  0.7%)
+# PROF emit          114.4 ms (  2.6%)
+```
+
+On `ntoskrnl.exe` (13.9 MB, `-m3`) the block collector is two thirds of the
+parse and the priced DP one fifth — the DP was assumed to be the hot spot.
+Counters are cumulative across the run (the last `total` line is the whole
+run), phases are exclusive.
+
+Measurement seams next to it, all defaulting to the shipped behaviour:
+`RAR_RS_CAP` caps how far a tree report is measured out (`NICE_MATCH_LENGTH`),
+`RAR_RS_COMMIT` sets the length at which the parse stops pricing covered bytes
+(64), and the existing `RAR_RS_SEQ_PRICE_TIER` sets the tree's candidate
+budget for `-m2`..`-m5`.
+
 ## Where the time goes
 
 Measured with `cargo nextest run` on a 16-core host, `--all-features`.

@@ -25,11 +25,39 @@ use std::sync::atomic::Ordering;
 /// afterwards), and the parse stops pricing positions it covers.
 pub(crate) const NICE_MATCH_LENGTH: usize = 64;
 
+/// Minimum match length whose covered bytes the parse stops pricing. Separate
+/// from [`NICE_MATCH_LENGTH`], which also caps how far the finder measures:
+/// raising this one trades ratio for fewer tree descents, because a committed
+/// match skips the descent of every byte it covers. `RAR_RS_COMMIT` overrides
+/// it for measurement.
+fn verify_cap() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("RAR_RS_CAP")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(NICE_MATCH_LENGTH)
+    })
+}
+
+fn commit_threshold() -> usize {
+    static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("RAR_RS_COMMIT")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(NICE_MATCH_LENGTH)
+    })
+}
+
 /// Full-search cadence inside fast mode (power of two): every this many
 /// literal positions a real long-range probe runs, so the mode recovers
 /// when compressible data returns (without it the first 64 KiB
 /// incompressible run would lock the probe off for the whole member).
 pub(super) const FAST_RECOVER_INTERVAL: usize = 128;
+
+/// How many positions ahead the tree's head slot is warmed.
+pub(super) const PREFETCH_AHEAD: usize = 16;
 
 /// Consecutive failed tree probes before the block collector's tree walk
 /// drops to the [`FAST_RECOVER_INTERVAL`] cadence, **by level**: this is the
@@ -282,6 +310,7 @@ pub(super) fn collect_block_matches(
     for pos in block.clone() {
         matches.starts.push(matches.runs.len() as u32);
         let searching = pos >= committed_through;
+        super::super::profile::count(super::super::profile::POS, 1);
         let max_distance = pos.min(window);
         let max_length = (block.end - pos).min(max_match);
         let before = matches.runs.len();
@@ -304,14 +333,17 @@ pub(super) fn collect_block_matches(
             && pos + 3 < combined.len()
             && (!*fast_tree || (pos & (FAST_RECOVER_INTERVAL - 1)) == 0)
         {
-            // Warm the next position's head slot while this descent runs;
-            // the seed computed at the tail then hits. Harmless when the
-            // next position ends up unseeded/skipped.
-            if pos + 4 < combined.len() {
-                finder.prefetch_head_for(combined, pos + 1);
+            // Warm a *later* position's head slot: the next position is
+            // already resolved by the `seed_for` computed at the end of the
+            // previous turn, so prefetching pos + 1 would only duplicate a
+            // line this turn is about to read anyway. Far enough ahead that
+            // the load has time to land.
+            if pos + PREFETCH_AHEAD + 4 < combined.len() {
+                finder.prefetch_head_for(combined, pos + PREFETCH_AHEAD);
             }
+            super::super::profile::count(super::super::profile::SEARCH, 1);
             let avail = combined.len() - pos;
-            let len_limit = avail.min(NICE_MATCH_LENGTH);
+            let len_limit = avail.min(verify_cap());
             scratch.clear();
             match pending.take() {
                 Some((seed_pos, current, less, greater)) if seed_pos == pos => {
@@ -350,6 +382,7 @@ pub(super) fn collect_block_matches(
             let mut w = 0usize;
             for r in 0..scratch.len() {
                 let (_len, dist) = scratch[r];
+                super::super::profile::count(super::super::profile::VERIFY, 1);
                 let actual = match_length_at(combined, pos, dist as usize, len_limit);
                 if actual >= 4 {
                     scratch[w] = (actual as u32, dist);
@@ -399,6 +432,7 @@ pub(super) fn collect_block_matches(
             // Encodable windows, straight from the length bonus: raw length 2
             // needs bonus 0 (distance <= 0x100), raw length 3 needs bonus <= 1
             // (distance <= 0x2000).
+            super::super::profile::count(super::super::profile::SHORT_PROBE, 2);
             for (limit, min_length) in [(0x100usize, 2usize), (0x2000, 3)] {
                 if max_length < min_length {
                     continue;
@@ -456,6 +490,7 @@ pub(super) fn collect_block_matches(
         {
             let chunk_off = pos - tail_len;
             let before = matches.runs.len();
+            super::super::profile::count(super::super::profile::LR_PROBE, 1);
             if let Some((ld, ll)) = long_range.find_from(
                 &combined[tail_len..],
                 chunk_off,
@@ -486,7 +521,7 @@ pub(super) fn collect_block_matches(
         // The parse can only take a match the block still has room for, so
         // the reach it will commit to is measured the way it measures it.
         let reach = offered.min(block.end - pos).min(max_match);
-        if reach >= NICE_MATCH_LENGTH {
+        if reach >= commit_threshold() {
             committed_through = pos + reach;
         }
         // Seed the next position's first tree step. Its values are settled

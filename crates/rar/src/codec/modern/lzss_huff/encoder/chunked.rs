@@ -225,6 +225,9 @@ fn encode_chunked_raw_inner(
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
     }
+    if super::profile::enabled() {
+        eprintln!("PROF entry seq {} B", data.len());
+    }
 
     let level = (method as usize).clamp(1, 5);
     let (_, lazy_thresh, max_match) = LEVEL_PARAMS[level];
@@ -284,7 +287,8 @@ fn encode_chunked_raw_inner(
                 },
             )
         } else {
-            find_matches_with_tail(
+            let greedy_started = std::time::Instant::now();
+            let greedy = find_matches_with_tail(
                 state,
                 chunk,
                 chain_len,
@@ -292,7 +296,9 @@ fn encode_chunked_raw_inner(
                 max_match,
                 dict_size,
                 long_range,
-            )
+            );
+            super::profile::add(super::profile::GREEDY, greedy_started);
+            greedy
         };
         // Filter records of a filtered member lead the first chunk's symbol
         // stream (read before any output, member-relative positions).
@@ -304,6 +310,7 @@ fn encode_chunked_raw_inner(
             symbols = joined;
         }
 
+        let emit_started = std::time::Instant::now();
         let mut block_start = 0usize;
         while block_start < symbols.len() {
             let (block_end, _) = find_block_end_adaptive(&symbols, block_start, EMITTED_BLOCK_SIZE);
@@ -318,6 +325,7 @@ fn encode_chunked_raw_inner(
             }
             block_start = block_end;
         }
+        super::profile::add(super::profile::EMIT, emit_started);
         if output.len() > data.len() {
             break;
         }
@@ -331,6 +339,7 @@ fn encode_chunked_raw_inner(
         }
     }
 
+    super::profile::dump();
     Ok(output)
 }
 
