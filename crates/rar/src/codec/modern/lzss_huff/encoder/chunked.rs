@@ -600,7 +600,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // (seeded with the entry tail so it spans windows like sequential
     // mode), long-range state swaps in the shared table, repeat-distance
     // cache resets (documented divergence from the sequential path).
-    let keep = dict_size.min(NEAR_WINDOW_MAX);
+    let keep = dict_size.min(near_window_max());
     if keep <= data.len() {
         seed.tail = data[data.len() - keep..].to_vec();
     } else {
@@ -785,7 +785,7 @@ fn encode_mt_slice(
     // Issue 15 step ③: with the shared row index there is no lookbehind frame
     // to build at all — the index already holds every position of the member,
     // so the slice copy, the tail seeding and the per-slice finder disappear.
-    let want = NEAR_WINDOW_MAX.min(dict_size);
+    let want = near_window_max().min(dict_size);
     let tail_ctx: Vec<u8> = if index.is_some() {
         Vec::new()
     } else if s0 >= want {

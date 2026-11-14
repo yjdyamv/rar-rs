@@ -335,8 +335,10 @@ run), phases are exclusive.
 Measurement seams next to it, all defaulting to the shipped behaviour:
 `RAR_RS_CAP` caps how far a tree report is measured out (`NICE_MATCH_LENGTH`),
 `RAR_RS_COMMIT` sets the length at which the parse stops pricing covered bytes
-(64), and the existing `RAR_RS_SEQ_PRICE_TIER` sets the tree's candidate
-budget for `-m2`..`-m5`.
+(64), `RAR_RS_NEAR` sets the near-window cap in KiBs (8192) — which is also the
+size of the tree's `son` array, so lowering it is the cheapest way to trade
+ratio for speed — and the existing `RAR_RS_SEQ_PRICE_TIER` sets the tree's
+candidate budget for `-m2`..`-m5`.
 
 ## Where the time goes
 

@@ -101,7 +101,7 @@ pub(crate) fn find_matches_with_tail(
     // longer distances come from the sampled long-range history. Capping
     // the tail keeps the per-chunk rebuild cost (inserting the whole
     // tail into the hash chain) bounded instead of O(window) per chunk.
-    let keep = window.min(NEAR_WINDOW_MAX).min(combined.len());
+    let keep = window.min(near_window_max()).min(combined.len());
     state.tail = combined[combined.len() - keep..].to_vec();
     state.dist_cache = dist_cache;
     state.last_length = last_length;
@@ -1476,7 +1476,7 @@ pub(crate) fn find_matches_optimal(
         match_finder::TreeMatchFinder::new(tree_window)
     });
     tree_finder.grow_to(tree_window);
-    let keep = window.min(NEAR_WINDOW_MAX).min(combined.len());
+    let keep = window.min(near_window_max()).min(combined.len());
     // `combined_len == 0` marks a fresh frame: the first chunk of a member
     // (the multi-threaded workers no longer reach here — they run the
     // low-step chain tier; the tree is sequential-only now). In that case
@@ -1621,7 +1621,7 @@ pub(crate) fn find_matches_optimal(
         lr.push(chunk);
     }
 
-    let keep = window.min(NEAR_WINDOW_MAX).min(combined.len());
+    let keep = window.min(near_window_max()).min(combined.len());
     state.tail = combined[combined.len() - keep..].to_vec();
     state.dist_cache = state_for_blocks.reps;
     state.last_length = state_for_blocks.last_length;

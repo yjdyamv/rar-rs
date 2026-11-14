@@ -142,7 +142,20 @@ fn parse_tier(method: u8) -> (usize, usize) {
 /// Near-window (tail) context cap shared by the sequential and parallel
 /// encoders: the hash-chain matcher only needs short distances, longer
 /// ones come from the sampled long-range history.
-const NEAR_WINDOW_MAX: usize = 8 * 1024 * 1024;
+///
+/// It also sets the tree's `son` size (two `u32` per byte), so it decides how
+/// far a descent's random reads have to travel. `RAR_RS_NEAR` overrides it in
+/// KiBs for measurement.
+fn near_window_max() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("RAR_RS_NEAR")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .map(|kib| kib * 1024)
+            .unwrap_or(8 * 1024 * 1024)
+    })
+}
 
 /// A RAR5 output filter applied to a region of the decompressed member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
