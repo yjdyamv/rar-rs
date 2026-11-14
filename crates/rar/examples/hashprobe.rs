@@ -43,6 +43,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let per_pos = best as f64 / n as f64;
+    let (in_block, whole) = probe_reads(&data, 64 * 1024, 1 << 20);
+    println!("reads: {in_block:.1} ns/lookup inside a 64 KiB block slice, {whole:.1} ns/lookup across the whole member");
     println!(
         "precompute {n} positions: {} ms ({} ns/position, 2 tables, {} KiB written)",
         best / 1000,
@@ -50,4 +52,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         n * 8 / 1024
     );
     Ok(())
+}
+
+/// Second P1 gate: after the stream is written, what does a descent-cost
+/// *read* pattern cost — inside one 64 KiB block's slice (512 KiB of tables,
+/// L2/L3 resident) versus against the whole-member table (108 MB, cold)?
+#[allow(dead_code)]
+fn probe_reads(data: &[u8], block: usize, lookups: usize) -> (f64, f64) {
+    let n = data.len().saturating_sub(8);
+    let mut hashes = vec![0u32; n];
+    for (pos, slot) in hashes.iter_mut().enumerate() {
+        let word = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        *slot = (word.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) as u32;
+    }
+    let in_block = |spread: usize| {
+        let start = Instant::now();
+        let mut acc = 0u64;
+        let mut cursor = 0x1234_5678u32;
+        for _ in 0..lookups {
+            cursor = cursor.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let pos = (cursor as usize % spread).min(n - 1);
+            acc = acc.wrapping_add(hashes[pos] as u64);
+        }
+        black_box(acc);
+        start.elapsed().as_nanos() as f64 / lookups as f64
+    };
+    (in_block(block.min(n)), in_block(n))
 }
