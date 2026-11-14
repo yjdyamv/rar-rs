@@ -29,7 +29,7 @@ use crate::version::ArchiveVersion;
 /// Default input chunk size for the encoder. Processing input in bounded
 /// slices keeps the symbol table (and match finder) memory proportional to
 /// the chunk size instead of the whole file.
-pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// The encode dimensions a chunked call runs under: the compression method and
 /// dictionary, the chunking, the stream's finality and distance table, plus the
