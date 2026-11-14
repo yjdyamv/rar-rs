@@ -43,19 +43,26 @@ impl HashMatcher {
         Self::default()
     }
 
-    /// Prepare the block at `start..start + len` of `data` (absolute offsets).
+    /// Reserve the block at `start..start + len` without linking anything.
     ///
-    /// Each position's link is resolved immediately; the search then reads
-    /// nothing but `head`/`prev`, which is what keeps it at 1.2 ns a hop.
-    pub(crate) fn prepare(&mut self, data: &[u8], start: usize, len: usize) {
-        let end = (start + len).min(data.len().saturating_sub(8));
-        let len = end.saturating_sub(start);
+    /// `insert` only accepts positions inside the reserved range, so the parser
+    /// reserves the block it is about to walk and then links positions as it
+    /// covers them — the tables never grow mid-block, which is what keeps them
+    /// block-local and L2-resident.
+    pub(crate) fn reserve(&mut self, start: usize, len: usize) {
         self.base = start;
         self.len = len;
         self.head.clear();
         self.head.resize(HEAD_SIZE, NONE);
         self.prev.clear();
         self.prev.resize(len, NONE);
+    }
+
+    /// Reserve the block at `start..start + len` and link every position in it
+    /// in one streaming pass (the P1 bulk shape: ~11 ms per 13.9 M positions).
+    pub(crate) fn prepare(&mut self, data: &[u8], start: usize, len: usize) {
+        let end = (start + len).min(data.len().saturating_sub(8));
+        self.reserve(start, end.saturating_sub(start));
         for pos in start..end {
             self.link(data, pos);
         }
@@ -80,6 +87,9 @@ impl HashMatcher {
     #[inline]
     fn link(&mut self, data: &[u8], pos: usize) {
         let at = pos - self.base;
+        if at >= self.prev.len() {
+            return;
+        }
         let slot = hash8(load_u64(data, pos));
         self.prev[at] = self.head[slot];
         self.head[slot] = at as u32;
@@ -188,17 +198,19 @@ mod tests {
         let mut matcher = HashMatcher::new();
         let mut out = Vec::new();
 
-        // Walk the block the way the parser will: prepare, then search every
-        // position and insert it after searching.
+        // Walk the block the way the parser will: reserve the range, then
+        // search every position and insert it after searching.
         let start = 0;
-        matcher.prepare(&data, start, 0);
+        matcher.reserve(start, data.len());
         let mut inserted = start;
+        let mut offered = 0usize;
         for pos in start..data.len().saturating_sub(8) {
             while inserted < pos {
                 matcher.insert(&data, inserted);
                 inserted += 1;
             }
             matcher.search(&data, pos, pos.min(4096), 32, 64, &mut out);
+            offered += out.len();
             let mut last = 0u32;
             for &(length, distance) in &out {
                 assert!(length >= 4, "short candidate at {pos}");
@@ -212,14 +224,15 @@ mod tests {
                 );
             }
         }
-        assert!(out.len() < 32 + 1, "search respects its budget");
+        assert!(offered > 1024, "a repetitive block must offer candidates");
+        assert!(out.len() <= 32, "search respects its budget");
     }
 
     #[test]
     fn matches_stay_inside_the_block() {
         let data = text_block(1 << 16);
         let mut matcher = HashMatcher::new();
-        matcher.prepare(&data, 0, 0);
+        matcher.reserve(0, data.len());
         let mut out = Vec::new();
         // Nothing is inserted, so the block has no candidates at all: the
         // matcher must not fall back to positions it never linked.
