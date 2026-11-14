@@ -268,7 +268,14 @@ fn filtered_and_plain_pipelines_share_the_emitted_block_policy() {
             .blocks
             .len()
     };
-    assert_eq!(blocks(&plain), 2, "a 5 MiB run splits at the 4 MiB cap");
+    let expected = data
+        .len()
+        .div_ceil(crate::codec::modern::lzss_huff::encoder::DEFAULT_CHUNK_SIZE);
+    assert_eq!(
+        blocks(&plain),
+        expected,
+        "a 5 MiB run splits at the encoder chunk bound"
+    );
     assert_eq!(
         blocks(&filtered),
         blocks(&plain),
