@@ -1111,6 +1111,17 @@ impl TreeMatchFinder {
         let mut len0 = 0usize;
         let mut len1 = 0usize;
         let mut longest = Self::MIN_MATCH - 1;
+        // Bytes past the end of `input` cannot be compared, so a position near
+        // the end inserts with a truncated prefix. Such a node must never adopt
+        // a subtree: adoption claims the node's whole comparable prefix
+        // matched, and a truncated prefix proves nothing about the bytes beyond
+        // it, which would leave the tree unordered and make later walks
+        // overstate their lengths. `bound` is what can actually be compared at
+        // `pos`; the budget-limited descent below stays exact without it only
+        // because callers pass a limit within the input. It does not: the
+        // collector passes `avail.min(verify_cap())`, i.e. the frame's last
+        // bytes get a truncated limit.
+        let bound = len_limit.min(input.len() - pos);
         let mut budget = cut;
         let mut floor = pos;
         loop {
@@ -1140,7 +1151,7 @@ impl TreeMatchFinder {
                 // word compare fetches the same cache lines but with a
                 // fraction of the loop iterations; the trailing_zeros
                 // finds the exact divergence inside the word.
-                while len + 8 <= len_limit {
+                while len + 8 <= bound {
                     let a = u64::from_le_bytes(
                         input[current + len..current + len + 8].try_into().unwrap(),
                     );
@@ -1151,7 +1162,7 @@ impl TreeMatchFinder {
                     }
                     len += 8;
                 }
-                while len < len_limit && input[current + len] == input[pos + len] {
+                while len < bound && input[current + len] == input[pos + len] {
                     len += 1;
                 }
                 if len > longest {
@@ -1168,6 +1179,14 @@ impl TreeMatchFinder {
                         self.son[ptr0] = child_greater;
                         return;
                     }
+                }
+                if len >= bound {
+                    // The comparison ran into the end of the input, so this
+                    // subtree's order relative to `pos` is unknown: seal the
+                    // attachment points instead of guessing a side.
+                    self.son[ptr0] = NO_LINK;
+                    self.son[ptr1] = NO_LINK;
+                    return;
                 }
             }
             if input[current + len] < input[pos + len] {

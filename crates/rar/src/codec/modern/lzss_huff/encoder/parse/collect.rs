@@ -441,26 +441,24 @@ pub(super) fn collect_block_matches<F: BlockFinder>(
                     out: &mut scratch,
                 });
             }
-            // The tree's internal ordering invariants can break when it is
-            // reused across chunks (budget-limited descents against a dense
-            // persistent tree — the DLL reproduction hit this: a bogus
-            // match copied the MZ header over real code, and the corrupt
-            // member was silently written). Verify every report byte-exactly
-            // before the parse can price it; a report whose bytes do not
-            // actually match is dropped, a short over-report is truncated to
-            // the true length. Cheap: the descent already compared these
-            // bytes, and matches are sparse relative to positions.
-            let mut w = 0usize;
-            for r in 0..scratch.len() {
-                let (_len, dist) = scratch[r];
-                super::super::profile::count(super::super::profile::VERIFY, 1);
-                let actual = match_length_at(combined, pos, dist as usize, len_limit);
-                if actual >= 4 {
-                    scratch[w] = (actual as u32, dist);
-                    w += 1;
-                }
+            // The descent reports exact prefix lengths: it compares whole
+            // words and seals any node whose comparison ran into the end of
+            // the input, so a truncated limit can never make it adopt a
+            // subtree on a prefix it could not check. Nothing here re-reads
+            // the bytes the descent just compared — that used to be a full
+            // `match_length_at` pass over every report, paying for the same
+            // comparison twice to drop the bogus reports an unordered tree
+            // produced. The seal is what made that pass redundant; the debug
+            // check below keeps it honest without costing release builds.
+            #[cfg(debug_assertions)]
+            for &(len, dist) in scratch.iter() {
+                let check = (len as usize).min(len_limit);
+                debug_assert_eq!(
+                    match_length_at(combined, pos, dist as usize, check),
+                    check,
+                    "tree reported a {len}-byte match at {pos} (distance {dist}) that does not hold"
+                );
             }
-            scratch.truncate(w);
             matches.runs.extend(scratch.iter().copied());
             // Measure the last report out to its real end: the tree
             // stops comparing at the limit, and a match reaching it
@@ -469,6 +467,7 @@ pub(super) fn collect_block_matches<F: BlockFinder>(
                 && length as usize == len_limit
                 && len_limit < avail.min(max_match)
             {
+                super::super::profile::count(super::super::profile::VERIFY, 1);
                 let full = match_length_at(combined, pos, distance as usize, avail.min(max_match));
                 if let Some(last) = matches.runs.last_mut() {
                     last.0 = full as u32;
