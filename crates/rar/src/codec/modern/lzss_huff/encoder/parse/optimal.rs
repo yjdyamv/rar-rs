@@ -1897,68 +1897,52 @@ fn interleaved_tokens(
     // greedily. Insertion is one store per table, so we can afford the same.
     let mut tokens: Vec<(u32, u32)> = Vec::with_capacity(block.end - block.start);
     let mut scratch: Vec<(u32, u32)> = Vec::with_capacity(16);
-    let mut pos = block.start;
     // Ablation switches, hoisted: reading the environment per position costs
     // more than what it is supposed to measure.
     let use_rep = std::env::var_os("RAR_RS_NOREP").is_none();
     let use_tables = std::env::var_os("RAR_RS_NOTABLES").is_none();
+    // The official precomputes the short-match tables for the whole window
+    // before searching; keeping the two `last` maps hot in L2 is the point of
+    // doing the pass separately instead of on the way through the loop.
+    if use_tables {
+        tables.prepare(combined, block);
+    }
+    let mut pos = block.start;
     // The previous position's match, deferred one step: the official calls this
     // `+0x300dc` / `+0x300d0`.
     let mut pending: Option<(u32, u32)> = None;
     while pos < block.end {
         super::super::profile::count(super::super::profile::POS, 1);
-        // Fill the three tables for every position passed over, skipped ones
-        // included: the official precomputes them for the whole window.
-        if use_tables {
-            tables.fill_to(combined, pos);
-        }
         let max_distance = pos.min(window);
         let available = (block.end - pos).min(max_match);
         let mut best = (0u32, 0u32);
         let mut cands: Vec<(u32, u32)> = Vec::with_capacity(8);
+        let offset = pos - block.start;
         if max_distance > 0 && available >= 2 && pos + 2 <= combined.len() {
             let len_limit = available.min(combined.len() - pos);
             // Short candidates first, with the official's distance bounds: a
-            // 2-byte match only inside 0x100, 3 bytes inside 0x2000, 4 bytes
-            // inside 0x40000, each demanding to be much closer than whatever is
-            // already held (`dist < best_dist << 7` / `<< 6` in the original).
-            let two = u16::from_le_bytes([combined[pos], combined[pos + 1]]) as usize;
-            if use_tables
-                && len_limit >= 2
-                && let slot = tables.prev2[two]
-                && slot != 0
-                && (slot as usize) < pos
-            {
-                let distance = pos - slot as usize;
-                if distance <= 0x100 && distance <= max_distance {
+            // 2-byte match only inside 0x100, 3 bytes inside 0x2000, each
+            // demanding to be much closer than whatever is already held
+            // (`dist < best_dist << 7` in the original).
+            if use_tables && len_limit >= 2 {
+                let distance = tables.prev2[offset] as usize;
+                if distance != 0 && distance <= 0x100 && distance <= max_distance {
                     let length = match_length_at(combined, pos, distance, len_limit.min(4)) as u32;
                     if length >= 2 {
                         cands.push((length, distance as u32));
                     }
                 }
             }
-            if use_tables && len_limit >= 3 && pos + 4 <= combined.len() {
-                let key = u32::from_le_bytes([
-                    combined[pos],
-                    combined[pos + 1],
-                    combined[pos + 2],
-                    combined[pos + 3],
-                ]);
-                let hash = (key.wrapping_mul(0x9E37_79B1) >> 16) as usize & 0xffff;
-                if let slot = tables.prev3[hash]
-                    && slot != 0
-                    && (slot as usize) < pos
+            if use_tables && len_limit >= 3 {
+                let distance = tables.prev3[offset] as usize;
+                if distance != 0
+                    && distance <= 0x2000
+                    && distance <= max_distance
+                    && (best.0 < 2 || (distance as u64) < (best.1 as u64) << 7)
                 {
-                    let distance = pos - slot as usize;
-                    if distance <= 0x2000
-                        && distance <= max_distance
-                        && (best.0 < 2 || (distance as u64) < (best.1 as u64) << 7)
-                    {
-                        let length =
-                            match_length_at(combined, pos, distance, len_limit.min(8)) as u32;
-                        if length >= 3 {
-                            cands.push((length, distance as u32));
-                        }
+                    let length = match_length_at(combined, pos, distance, len_limit.min(8)) as u32;
+                    if length >= 3 {
+                        cands.push((length, distance as u32));
                     }
                 }
             }
@@ -2017,7 +2001,7 @@ fn interleaved_tokens(
         // longer (`len * 4 >= best_len * 3`). When it is one to three bytes
         // shorter, the byte it gives up is only worth it if the alternative's
         // distance is past the matching distance class (255/2047/32767).
-        if best.0 >= 2 && available >= 2 && use_rep {
+        if best.0 >= 2 && best.0 < 12 && available >= 2 && use_rep {
             // Only the first `best + 4` bytes can change the verdict below, so
             // the scan stops there: a rep match is often thousands of bytes long
             // and comparing all of it costs more than the whole decision.
@@ -2438,22 +2422,33 @@ fn price_of(distance: u32) -> i64 {
 /// calloc'd (`vec![0; n]`), which matters — they are 4.5 MB total.
 #[derive(Default)]
 pub(super) struct ShortTables {
+    /// Distance back to the previous position holding the same 2-byte pair
+    /// (`prev2`) or the same 3-byte hash (`prev3`), indexed by block offset.
+    /// One sequential load yields the candidate and the pass that builds them
+    /// writes sequentially too -- that is why `+0xb1e8`/`+0xb1f0` in the
+    /// original are position indexed instead of hash buckets.
     prev2: Vec<u32>,
     prev3: Vec<u32>,
-    filled: usize,
+    /// Last position seen for each key; kept across blocks so a candidate can
+    /// point into the tail.
+    last2: Vec<u32>,
+    last3: Vec<u32>,
 }
 
 impl ShortTables {
-    fn fill_to(&mut self, combined: &[u8], upto: usize) {
-        if self.prev2.is_empty() {
-            self.prev2 = vec![0; 1 << 16];
-            self.prev3 = vec![0; 1 << 16];
+    fn prepare(&mut self, combined: &[u8], block: &std::ops::Range<usize>) {
+        if self.last2.is_empty() {
+            self.last2 = vec![u32::MAX; 1 << 16];
+            self.last3 = vec![u32::MAX; 1 << 16];
         }
-        if self.filled > upto {
-            self.filled = upto;
-        }
-        while self.filled < upto && self.filled + 4 <= combined.len() {
-            let at = self.filled;
+        self.prev2.clear();
+        self.prev2.resize(block.len(), 0);
+        self.prev3.clear();
+        self.prev3.resize(block.len(), 0);
+        for at in block.clone() {
+            if at + 4 > combined.len() {
+                continue;
+            }
             let two = u16::from_le_bytes([combined[at], combined[at + 1]]) as usize;
             let key = u32::from_le_bytes([
                 combined[at],
@@ -2461,11 +2456,20 @@ impl ShortTables {
                 combined[at + 2],
                 combined[at + 3],
             ]);
-            let hashed = key.wrapping_mul(0x9E37_79B1);
-            self.prev2[two] = at as u32;
-            self.prev3[(hashed >> 16) as usize & 0xffff] = at as u32;
-
-            self.filled += 1;
+            let hashed = (key.wrapping_mul(0x9E37_79B1) >> 16) as usize & 0xffff;
+            let index = at - block.start;
+            if let last = self.last2[two]
+                && (last as usize) < at
+            {
+                self.prev2[index] = (at - last as usize) as u32;
+            }
+            if let last = self.last3[hashed]
+                && (last as usize) < at
+            {
+                self.prev3[index] = (at - last as usize) as u32;
+            }
+            self.last2[two] = at as u32;
+            self.last3[hashed] = at as u32;
         }
     }
 }
