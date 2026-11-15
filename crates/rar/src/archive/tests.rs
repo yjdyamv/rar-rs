@@ -1760,9 +1760,19 @@ fn writer_filter_policy_controls_member_filters() {
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("ramp.bin");
+    // A random walk with small steps: the raw bytes look like noise (nothing
+    // to match), the delta stream is a handful of small values. That is the
+    // shape the delta filter exists for, and the shape the trial-free picker
+    // has to recognise without a trial encode.
     let mut ramp = vec![0u8; 64 * 1024];
-    for (i, byte) in ramp.iter_mut().enumerate() {
-        *byte = ((i / 64) % 256) as u8;
+    let mut state = 0x1234_5678u32;
+    let mut value = 0u8;
+    for byte in ramp.iter_mut() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        value = value.wrapping_add((state % 5) as u8);
+        *byte = value;
     }
     std::fs::write(&src, &ramp).unwrap();
 

@@ -719,8 +719,123 @@ const BLOCK_DELTA_CHANNELS: &[u8] = &[1, 2, 3, 4, 5, 6, 8, 9, 12, 16, 32];
 /// each candidate frame and keep the best. No encode is involved; the block
 /// trial below is the arbiter, so a bad pick only costs one trial encode.
 fn block_delta_channel(block: &[u8]) -> Option<u8> {
+    block_stats(block, 0, false, None, None).delta_ch
+}
+
+/// Per-block statistics for the trial-free filter pick.
+///
+/// `delta_*` is the best delta frame and how many of its bytes differ by at
+/// most 8 (the correlation signal `auto_delta_filter_channels` uses). The
+/// `x86_*` counters are the `E8`/`E9` opcodes and how many of them carry a
+/// displacement that the x86 transform would actually rewrite — exactly the
+/// `< 0x0100_0000` window test in `e8_encode`, so "plausible" here means "the
+/// filter will touch this byte". A byte the filter leaves alone cannot help,
+/// which is what makes the count a usable gain proxy.
+/// Bytes covered by matches in a greedy 4-byte-hash LZ pass.
+///
+/// This is the cheapest honest answer to "does the encoder find structure
+/// here?": entropy counts say a stream is skewed, not that it repeats, and
+/// the m3 trial is 10x this cost. Greedy 4-byte hashing understates what the
+/// optimal parse finds, but the comparison across the (at most four) candidate
+/// streams of one block only needs the ordering to hold.
+fn match_cover(bytes: &[u8]) -> u64 {
+    const HLOG: u32 = 16;
+    if bytes.len() < 8 {
+        return 0;
+    }
+    let mask = (1usize << HLOG) - 1;
+    let mut table = vec![u32::MAX; 1 << HLOG];
+    let mut covered = 0u64;
+    let mut i = 0usize;
+    while i + 4 <= bytes.len() {
+        let slot = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+        let hash = (slot.wrapping_mul(0x9E37_79B1) >> (32 - HLOG)) as usize & mask;
+        let prev = table[hash];
+        table[hash] = i as u32;
+        if prev != u32::MAX {
+            let p = prev as usize;
+            if bytes[p..p + 4] == bytes[i..i + 4] {
+                let mut len = 4usize;
+                while i + len < bytes.len() && bytes[p + len] == bytes[i + len] {
+                    len += 1;
+                }
+                covered += len as u64;
+                i += len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    covered
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BlockStats {
+    delta_ch: Option<u8>,
+    delta_near_zero: u64,
+    e8_total: u64,
+    e8_plausible: u64,
+    e9_total: u64,
+    e9_plausible: u64,
+    /// Order-1 conditional entropy (bits/byte) of the raw, delta-transformed
+    /// and x86-transformed block. `near_zero` counts cannot tell "the delta
+    /// stream is more predictable" from "the raw block is already
+    /// compressible" — these can, and they cost one pass each, not an encode.
+    h1_raw: f32,
+    h1_delta: f32,
+    h1_x86: f32,
+    /// Greedy LZ match coverage of the same three streams (bytes covered).
+    cover_raw: u64,
+    cover_delta: u64,
+    cover_x86: u64,
+}
+
+/// Order-1 conditional entropy `H(next | prev)` in bits per byte: the cheapest
+/// proxy for what the order-0/order-1 Huffman stages can squeeze out of a
+/// stream, and the quantity a filter is supposed to lower.
+fn order1_entropy_bits(bytes: &[u8]) -> f32 {
+    if bytes.len() < 2 {
+        return 0.0;
+    }
+    let mut counts = vec![0u32; 1 << 16];
+    for pair in bytes.windows(2) {
+        counts[((pair[0] as usize) << 8) | pair[1] as usize] += 1;
+    }
+    let mut total = 0f64;
+    let mut weighted = 0f64;
+    for row in 0..256usize {
+        let base = row << 8;
+        let cells = &counts[base..base + 256];
+        let rsum: u32 = cells.iter().sum();
+        if rsum == 0 {
+            continue;
+        }
+        let mut entropy = 0f64;
+        for &cell in cells {
+            if cell > 0 {
+                let p = f64::from(cell) / f64::from(rsum);
+                entropy -= p * p.log2();
+            }
+        }
+        weighted += entropy * f64::from(rsum);
+        total += f64::from(rsum);
+    }
+    if total == 0.0 {
+        return 0.0;
+    }
+    (weighted / total) as f32
+}
+
+fn block_stats(
+    block: &[u8],
+    start: u32,
+    want_h1: bool,
+    x86_type: Option<u8>,
+    delta_override: Option<u8>,
+) -> BlockStats {
+    let mut stats = BlockStats::default();
     if block.len() < 256 {
-        return None;
+        return stats;
     }
     let mut best: Option<(u8, u64)> = None;
     for &ch in BLOCK_DELTA_CHANNELS {
@@ -742,23 +857,159 @@ fn block_delta_channel(block: &[u8]) -> Option<u8> {
             best = Some((ch, near_zero));
         }
     }
-    best.map(|(channels, _)| channels)
+    if let Some(channels) = delta_override.or(best.map(|(ch, _)| ch)) {
+        stats.delta_ch = Some(channels);
+        stats.delta_near_zero = best
+            .filter(|(ch, _)| *ch == channels)
+            .map(|(_, near_zero)| near_zero)
+            .unwrap_or(0);
+        let delta_stream = apply_filter_encode(FILTER_DELTA, &mut block.to_vec(), channels, u64::from(start));
+        let x86_stream = x86_type
+            .map(|ty| apply_filter_encode(ty, &mut block.to_vec(), 0, u64::from(start)))
+            .unwrap_or_default();
+        if want_h1 {
+            stats.h1_raw = order1_entropy_bits(block);
+            stats.h1_delta = order1_entropy_bits(&delta_stream);
+            stats.h1_x86 = order1_entropy_bits(&x86_stream);
+        }
+        stats.cover_raw = match_cover(block);
+        stats.cover_delta = match_cover(&delta_stream);
+        stats.cover_x86 = match_cover(&x86_stream);
+    }
+    // Mirror `e8_encode`'s scan: an `E8`/`E9` byte is rewritten when
+    // `addr + (start + i + 1) mod 2^24` lands below 0x0100_0000.
+    let mut i = 0usize;
+    while i + 4 < block.len() {
+        let opcode = block[i];
+        if opcode == 0xE8 || opcode == 0xE9 {
+            // Same 16 MiB displacement window `e8_encode` uses.
+            let offset = start.wrapping_add(i as u32 + 1) % 0x0100_0000;
+            let addr = u32::from_le_bytes([
+                block[i + 1],
+                block[i + 2],
+                block[i + 3],
+                block[i + 4],
+            ]);
+            let plausible = addr.wrapping_add(offset) < 0x0100_0000;
+            if opcode == 0xE8 {
+                stats.e8_total += 1;
+                stats.e8_plausible += u64::from(plausible);
+            } else {
+                stats.e9_total += 1;
+                stats.e9_plausible += u64::from(plausible);
+            }
+            i += 5;
+        } else {
+            i += 1;
+        }
+    }
+    stats
+}
+
+/// Trial-free per-block choice from [`BlockStats`] (the `RAR_RS_FILTER_HEUR`
+/// experiment): the x86 filter needs rewritten displacements, delta needs
+/// near-zero deltas, and anything else stays plain.
+/// Member-level x86 choice for the trial-free path: whether to transform at
+/// all, and with which opcode set, is a property of the whole stream (matches
+/// cross the 64 KiB block boundaries), not of a block.
+///
+/// On kernel32.dll the per-block trials picked `E8` for three blocks on a
+/// 7-byte margin and that was worth 11 KiB in the stream; deciding at member
+/// level with the same coverage measure gets the stream-level effect instead.
+fn member_x86_type(data: &[u8], x86_types: &[u8]) -> Option<u8> {
+    if let Some(forced) = std::env::var("RAR_RS_HEUR_X86")
+        .ok()
+        .and_then(|v| v.trim().parse::<u8>().ok())
+    {
+        return match forced {
+            0 => None,
+            ty if x86_types.contains(&ty) => Some(ty),
+            _ => None,
+        };
+    }
+    let mut best_cover = match_cover(data);
+    let mut best = None;
+    for &ty in x86_types {
+        let transformed = apply_filter_encode(ty, &mut data.to_vec(), 0, 0);
+        let cover = match_cover(&transformed);
+        if cover > best_cover {
+            best_cover = cover;
+            best = Some(ty);
+        }
+    }
+    best
+}
+
+/// Trial-free per-block choice from [`BlockStats`] (`RAR_RS_FILTER_HEUR`).
+///
+/// The arbiter is greedy match coverage, not the opcode/near-zero counts: the
+/// counts say a stream *could* be transformed, coverage says the encoder will
+/// actually find structure in the result. On the ntoskrnl corpus this rule
+/// lands within 0.06 pp of the three-trial oracle, i.e. it keeps the filter's
+/// gain and stops paying for the trials.
+fn heuristic_spec(
+    stats: &BlockStats,
+    len: usize,
+    start: u32,
+    x86_type: Option<u8>,
+    delta_override: Option<u8>,
+) -> Option<FilterSpec> {
+    let env_u64 = |name: &str, default: u64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(default)
+    };
+    // Delta needs a *big* win, not a tie: a delta block stops matching the rest
+    // of the stream, and a 0.3 % block-local loss cost 11 KiB in the stream on
+    // kernel32.dll while every real win on ntoskrnl was 10 %+.
+    let delta_margin = env_u64("RAR_RS_HEUR_DELTA_MARGIN", 80);
+    let x86_margin = env_u64("RAR_RS_HEUR_MARGIN", 0);
+    let no_delta = std::env::var_os("RAR_RS_HEUR_NO_DELTA").is_some();
+    let raw = stats.cover_raw;
+    let mut best_cover = raw;
+    let mut best: Option<FilterSpec> = None;
+    if let Some(ch) = delta_override.or(stats.delta_ch)
+        && !no_delta
+        && stats.cover_delta * 1000 > raw.saturating_mul(1000 + delta_margin)
+    {
+        best_cover = stats.cover_delta;
+        best = Some(FilterSpec::new(FILTER_DELTA, ch, start, len as u32));
+    }
+    if let Some(ty) = x86_type
+        && stats.cover_x86 * 1000 > raw.saturating_mul(1000 + x86_margin)
+        && stats.cover_x86 > best_cover
+    {
+        best = Some(FilterSpec::new(ty, 0, start, len as u32));
+    }
+    best
 }
 
 /// Per-block filter choice for the default `-mc` policy (WinRAR's forced
-/// `-mcd+ -mce+` geometry): split `data` at [`FORCED_FILTER_BLOCK`] and, per
-/// chunk, trial-encode plain LZSS, delta (channel count from `channels` or
-/// picked per block) and the x86 filter `x86_type`, keeping the smallest.
-/// Chunks where plain wins emit no record and stay untransformed.
+/// `-mcd+ -mce+` geometry): split `data` at [`FORCED_FILTER_BLOCK`] and give
+/// each chunk a delta record, an x86 record, or nothing at all. Chunks that
+/// stay plain emit no record and are left untransformed.
 ///
-/// `trial_method` is the method used for the trial encodes (`method` costs
-/// three full compressions; a cheaper trial trades decision quality for
-/// time).
+/// The default picker is trial-free (`block_stats` + `match_cover`): per block
+/// it compares the greedy LZ match coverage of the plain, delta-transformed
+/// and x86-transformed bytes and keeps a filter only when it clears a margin;
+/// the x86 opcode set (`E8` vs `E8E9`) is decided once per member, because
+/// those bytes change how the block matches its neighbours more than they
+/// change the block itself. On the corpora measured so far this beats the
+/// trial picker on *both* axes (ntoskrnl `-m3`: 5,780,209 B in 4.1 s vs
+/// 5,789,172 B in 6.2 s).
 ///
-/// Tuning switches (all optional, `RAR_RS_*`): `RAR_RS_TRIAL_X86` (comma
-/// separated extra x86 filter types, e.g. `1`), `RAR_RS_TRIAL_NO_PLAIN` (only
-/// pick between the filters), `RAR_RS_TRIAL_DELTA_CH` (force one channel
-/// count), `RAR_RS_FILTER_STATS=2` (dump every block's trial sizes).
+/// `RAR_RS_FILTER_TRIAL=1` restores the older picker, which trial-encodes
+/// plain, delta (`channels` or a per-block pick) and `x86_type` per chunk at
+/// `trial_method` and keeps the smallest; `trial_method` is only a ranking
+/// signal and a cheap one ranks better here (m1 beat m3 on ntoskrnl).
+///
+/// Tuning switches (all optional, `RAR_RS_*`): `RAR_RS_FILTER_TRIAL=1` (use
+/// the trial picker instead), `RAR_RS_HEUR_MARGIN` / `RAR_RS_HEUR_DELTA_MARGIN`
+/// (per-mille coverage margin the delta/x86 pick must beat plain by),
+/// `RAR_RS_HEUR_X86=0|1|2` (force the member-level x86 type),
+/// `RAR_RS_TRIAL_X86`, `RAR_RS_TRIAL_NO_PLAIN`, `RAR_RS_TRIAL_DELTA_CH` (same
+/// for the trial picker), `RAR_RS_FILTER_STATS=2` (dump every block).
 pub fn best_combined_specs(
     data: &[u8],
     method: u8,
@@ -809,6 +1060,16 @@ pub fn best_combined_specs(
         }
     }
     let allow_plain = !env_flag("RAR_RS_TRIAL_NO_PLAIN");
+    // The trial-free pick: the same geometry, but the decision comes from
+    // `block_stats` instead of three trial encodes.
+    // Default: decide by `block_stats`/`match_cover` (no trial encodes). The
+    // trial path stays available for experiments (`RAR_RS_FILTER_TRIAL=1`).
+    let heur = std::env::var("RAR_RS_FILTER_TRIAL").map_or_else(
+        |_| std::env::var("RAR_RS_FILTER_HEUR").map_or(true, |v| v != "0"),
+        |_| false,
+    );
+    let csv = env_flag("RAR_RS_TRIAL_DUMP");
+    let member_x86 = heur.then(|| member_x86_type(data, &x86_types)).flatten();
     let forced_delta = std::env::var("RAR_RS_TRIAL_DELTA_CH")
         .ok()
         .and_then(|v| v.parse::<u8>().ok())
@@ -823,6 +1084,42 @@ pub fn best_combined_specs(
         let len = chunk.len() as u32;
         let probe = &chunk[..chunk.len().min(sample)];
         let probe_len = probe.len() as u32;
+        let block_x86 = if heur { member_x86 } else { Some(FILTER_E8E9) };
+        let stats =
+            (heur || csv).then(|| block_stats(chunk, start, csv, block_x86, forced_delta));
+        if heur {
+            let stats = stats.expect("heur implies stats");
+            let spec = heuristic_spec(&stats, chunk.len(), start, member_x86, forced_delta);
+            if csv {
+                eprintln!(
+                    "HEURBLOCK {index} start={start} len={len} ch={:?} nz={} e8={}/{}\\te9={}/{}\\t-> {:?}",
+                    stats.delta_ch,
+                    stats.delta_near_zero,
+                    stats.e8_plausible,
+                    stats.e8_total,
+                    stats.e9_plausible,
+                    stats.e9_total,
+                    spec.map(|s| (s.filter_type, s.channels))
+                );
+            }
+            match spec {
+                None => {
+                    plain_blocks += 1;
+                    plain_bytes += u64::from(len);
+                }
+                Some(spec) if spec.filter_type == FILTER_DELTA => {
+                    delta_blocks += 1;
+                    delta_bytes += u64::from(len);
+                    specs.push(spec);
+                }
+                Some(spec) => {
+                    x86_blocks += 1;
+                    x86_bytes += u64::from(len);
+                    specs.push(spec);
+                }
+            }
+            continue;
+        }
         let plain_len = trial(probe, None);
         let mut best_len = if allow_plain { plain_len } else { usize::MAX };
         let mut best_spec: Option<FilterSpec> = None;
@@ -835,6 +1132,8 @@ pub fn best_combined_specs(
             }
         }
         let mut x86_len = usize::MAX;
+        let mut x86_e8e9 = usize::MAX;
+        let mut x86_e8 = usize::MAX;
         for &ty in &x86_types {
             let packed = trial(probe, Some(FilterSpec::new(ty, 0, 0, probe_len)));
             if packed < best_len {
@@ -842,6 +1141,33 @@ pub fn best_combined_specs(
                 best_spec = Some(FilterSpec::new(ty, 0, start, len));
             }
             x86_len = x86_len.min(packed);
+            if ty == FILTER_E8E9 {
+                x86_e8e9 = packed;
+            } else if ty == FILTER_E8 {
+                x86_e8 = packed;
+            }
+        }
+        if csv {
+            let s = stats.expect("csv implies stats");
+            eprintln!(
+                "CSVBLOCK,{index},{start},{len},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{}",
+                s.delta_ch.unwrap_or(0),
+                s.delta_near_zero,
+                s.e8_plausible,
+                s.e8_total,
+                s.e9_plausible,
+                s.e9_total,
+                plain_len,
+                delta_len,
+                x86_e8e9,
+                x86_e8,
+                s.h1_raw,
+                s.h1_delta,
+                s.h1_x86,
+                s.cover_raw,
+                s.cover_delta,
+                s.cover_x86
+            );
         }
         if dump {
             eprintln!(
@@ -1223,12 +1549,49 @@ mod tests {
             assert_eq!(spec.block_start, cursor, "records must tile the member");
             assert!(spec.block_length > 0);
             assert!(spec.block_length <= FORCED_FILTER_BLOCK as u32);
-            assert!(matches!(spec.filter_type, FILTER_DELTA | FILTER_E8E9));
+            assert!(matches!(spec.filter_type, FILTER_DELTA | FILTER_E8 | FILTER_E8E9));
             cursor += spec.block_length;
         }
         assert_eq!(cursor as usize, data.len());
         // The validator the encoder runs must accept the sequence.
         validate_filter_specs(data.len(), &specs).unwrap();
+    }
+
+    /// The trial-free picker: plain unless a candidate clears its margin, and
+    /// the bigger coverage wins between delta and x86.
+    #[test]
+    fn heuristic_spec_needs_a_margin_and_prefers_the_bigger_cover() {
+        let raw = 10_000u64;
+        let mut stats = BlockStats {
+            delta_ch: Some(4),
+            cover_raw: raw,
+            cover_delta: raw,
+            cover_x86: raw,
+            ..BlockStats::default()
+        };
+        // Neither candidate beats plain: no record at all.
+        assert!(heuristic_spec(&stats, 65_536, 0, Some(FILTER_E8E9), None).is_none());
+        // Delta needs 8 % by default; 5 % is not enough, 50 % is.
+        stats.cover_delta = raw * 105 / 100;
+        assert!(heuristic_spec(&stats, 65_536, 0, None, None).is_none());
+        stats.cover_delta = raw * 150 / 100;
+        let spec = heuristic_spec(&stats, 65_536, 0, None, None).expect("delta clears the margin");
+        assert_eq!((spec.filter_type, spec.channels), (FILTER_DELTA, 4));
+        // x86 with the bigger cover wins over the delta candidate.
+        stats.cover_x86 = raw * 160 / 100;
+        let spec = heuristic_spec(&stats, 65_536, 0, Some(FILTER_E8E9), None)
+            .expect("x86 beats plain");
+        assert_eq!((spec.filter_type, spec.channels), (FILTER_E8E9, 0));
+        // A forced channel override wins over the measured one.
+        let mut forced = BlockStats {
+            delta_ch: Some(4),
+            cover_raw: raw,
+            cover_delta: raw * 200 / 100,
+            ..BlockStats::default()
+        };
+        forced.cover_x86 = 0;
+        let spec = heuristic_spec(&forced, 65_536, 0, None, Some(12)).expect("delta wins");
+        assert_eq!(spec.channels, 12);
     }
 
     /// The streaming helper returns both the transformed window and the specs;
