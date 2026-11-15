@@ -50,6 +50,45 @@ fn commit_threshold() -> usize {
     })
 }
 
+/// Step cap for one descent under the stall tier.
+///
+/// Splitting the decision out keeps the environment plumbing away from the
+/// hot loop and lets the thresholds be tested without a process-wide knob.
+fn stall_cut(tier: Option<(usize, usize)>, stall: usize, chain_len: usize) -> usize {
+    match tier {
+        Some((threshold, stalled)) if stall >= threshold => stalled.min(chain_len),
+        _ => chain_len,
+    }
+}
+
+/// Stall tier: `(stall_threshold, stalled_cut)`.
+///
+/// `RAR_RS_STALL` = how many consecutive empty descents turn the tier on
+/// (0 or absent = off, the shipped behaviour). `RAR_RS_STALL_CUT` = the step
+/// cap used while it is on (default 8: about one cache line of nodes, enough
+/// to keep the node the next position would have wanted).
+///
+/// This is the honoured part of the official matcher's counter-driven fast
+/// mode: `Rar.exe` quarters its budget when its miss counters run ahead
+/// (`FUN_1400468d4` reads `+0x300b8`/`+0x300bc` before picking the budget).
+/// Spending *fewer steps* on a stretch that yields nothing is a different
+/// lever from skipping the position outright (`fast_tree`), which throws the
+/// insertion away with the search and needs a recovery cadence.
+fn stall_config() -> Option<(usize, usize)> {
+    static CONFIG: std::sync::OnceLock<Option<(usize, usize)>> = std::sync::OnceLock::new();
+    *CONFIG.get_or_init(|| {
+        let threshold = std::env::var("RAR_RS_STALL").ok()?.parse().ok()?;
+        if threshold == 0 {
+            return None;
+        }
+        let cut = std::env::var("RAR_RS_STALL_CUT")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(8);
+        Some((threshold, cut))
+    })
+}
+
 /// Full-search cadence inside fast mode (power of two): every this many
 /// literal positions a real long-range probe runs, so the mode recovers
 /// when compressible data returns (without it the first 64 KiB
@@ -268,6 +307,12 @@ impl Default for ShortFinder {
 pub(crate) struct SearchState {
     tree_misses: usize,
     fast_tree: bool,
+    /// Consecutive positions whose descent yielded nothing at all. Drives
+    /// the stall tier: a walk that keeps coming up empty in the same stretch
+    /// of data is spending its steps on a part of the tree that has nothing
+    /// to give, so it continues with a shorter step cap until a candidate
+    /// shows up again (see [`stall_config`]).
+    stall: usize,
 }
 
 impl SearchState {
@@ -302,6 +347,8 @@ pub(super) fn collect_block_matches(
     let mut lr_fast = false;
     let mut lr_misses = 0usize;
     let tree_misses = &mut search.tree_misses;
+    let stall = &mut search.stall;
+    let stall_tier = stall_config();
     let fast_tree = &mut search.fast_tree;
     // The next gated position's first tree step (its head-resolved
     // descendant and that node's child pair), computed at the end of the
@@ -342,6 +389,7 @@ pub(super) fn collect_block_matches(
                 finder.prefetch_head_for(combined, pos + PREFETCH_AHEAD);
             }
             super::super::profile::count(super::super::profile::SEARCH, 1);
+            let cut = stall_cut(stall_tier, *stall, chain_len);
             let avail = combined.len() - pos;
             let len_limit = avail.min(verify_cap());
             scratch.clear();
@@ -353,7 +401,7 @@ pub(super) fn collect_block_matches(
                             pos,
                             len_limit,
                             max_distance,
-                            cut: chain_len,
+                            cut,
                             out: &mut scratch,
                         },
                         current,
@@ -366,7 +414,7 @@ pub(super) fn collect_block_matches(
                     pos,
                     len_limit,
                     max_distance,
-                    cut: chain_len,
+                    cut,
                     out: &mut scratch,
                 }),
             }
@@ -520,6 +568,15 @@ pub(super) fn collect_block_matches(
         // The parse can only take a match the block still has room for, so
         // the reach it will commit to is measured the way it measures it.
         let reach = offered.min(block.end - pos).min(max_match);
+        // Stall bookkeeping for the next position: any candidate at all
+        // clears the run, an empty position advances it.
+        if stall_tier.is_some() {
+            if offered >= 4 {
+                *stall = 0;
+            } else {
+                *stall += 1;
+            }
+        }
         if reach >= commit_threshold() {
             committed_through = pos + reach;
         }
@@ -570,4 +627,24 @@ pub(super) fn match_length_at(
         l += 1;
     }
     l
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stall_cut;
+
+    #[test]
+    fn stall_tier_keeps_the_full_cap_below_its_threshold() {
+        assert_eq!(stall_cut(None, 10_000, 96), 96);
+        assert_eq!(stall_cut(Some((2, 4)), 1, 96), 96);
+        assert_eq!(stall_cut(Some((2, 4)), 2, 96), 4);
+        assert_eq!(stall_cut(Some((2, 4)), 2_000, 96), 4);
+    }
+
+    #[test]
+    fn stall_tier_never_raises_the_tier_cap() {
+        // Method 1 parses with a 4-step cap; a stalled cap above it must not
+        // hand the descent more steps than the method allows.
+        assert_eq!(stall_cut(Some((1, 64)), 5, 4), 4);
+    }
 }
