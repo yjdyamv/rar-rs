@@ -1187,6 +1187,46 @@ impl TreeMatchFinder {
         }
     }
 
+    /// Second pipeline stage: read the head slot for `pos` (warmed sixteen
+    /// positions ago by [`Self::prefetch_head_for`]) and warm the node's child
+    /// pair plus the input byte its first compare needs. On its own this read
+    /// would be the miss; after the first stage it is a hit, and the two loads
+    /// it points at are the ones that actually stall. No-op off x86-64.
+    pub(crate) fn prefetch_node_for(&self, input: &[u8], pos: usize) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if pos + Self::MIN_MATCH > input.len() {
+                return;
+            }
+            let hash = self.hash4(input, pos);
+            let current = resolve(pos, self.head_link(hash));
+            if current == usize::MAX || current >= pos || pos - current > self.mask {
+                return;
+            }
+            let pair = (current & self.mask) << 1;
+            let son = self.son.as_ptr();
+            let bytes = input.as_ptr();
+            // SAFETY: `pair` and `pair + 1` are inside `son` (same bound
+            // `prefetch_children` relies on), and `current + MIN_MATCH` is
+            // inside `input` because `current < pos` and
+            // `pos + MIN_MATCH <= input.len()`. `prefetcht0` never faults.
+            unsafe {
+                std::arch::x86_64::_mm_prefetch(
+                    son.add(pair).cast::<std::os::raw::c_char>(),
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
+                std::arch::x86_64::_mm_prefetch(
+                    bytes.add(current).cast::<std::os::raw::c_char>(),
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (input, pos);
+        }
+    }
+
     /// The shared descent of [`Self::matches`] and [`Self::matches_seeded`].
     /// `pos` is both the position being inserted (its byte stream is
     /// compared against candidates, its ring slots are the attachment

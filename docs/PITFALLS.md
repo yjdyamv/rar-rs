@@ -786,3 +786,7 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   token，树的两级访存全掉到 DRAM，每次搜索 243 ns 而 `walkbench` 里只有 15.8 ns/步；在
   `pos + 16` 处 `prefetch_head_for` 后 seq 2192 → 1847 ms、比例一位不变。串行 collector 早就在
   做同一件事（`PREFETCH_AHEAD`），只是当时没有「跳读」把它逼出来。
+- **预取要分两级、且不能推太深**：一级 `prefetch_head_for(pos + 16)` 只藏住桶头（2192 → 1847 ms）；
+  再加 `prefetch_node_for(pos + 16)`（读上一步预热过的桶头、预取该节点的 `son` 对与输入字节）并把
+  桶头推到 `pos + 32`，才把 183 ns/次的节点缺失藏住（→ 1734–1784 ms）。都推到 +48/+32 反而退回
+  1883 ms：提前读到的桶头在用到之前已被刷掉。

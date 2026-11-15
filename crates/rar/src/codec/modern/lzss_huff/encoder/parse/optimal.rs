@@ -1951,8 +1951,11 @@ fn interleaved_tokens(
                 // Prefetch the bucket we will descend in sixteen positions, as the
                 // serial collector does: the fused loop keeps the short tables and
                 // the emitted tokens in flight, which evicts the head table.
+                if pos + 32 + 4 < combined.len() {
+                    finder.prefetch_head_for(combined, pos + 32);
+                }
                 if pos + 16 + 4 < combined.len() {
-                    finder.prefetch_head_for(combined, pos + 16);
+                    finder.prefetch_node_for(combined, pos + 16);
                 }
                 scratch.clear();
                 super::super::profile::count(super::super::profile::SEARCH, 1);
