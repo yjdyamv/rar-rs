@@ -40,6 +40,29 @@ fn verify_cap() -> usize {
     })
 }
 
+/// Hash-table-first mode (`RAR_RS_HASH4`): the four-byte nearest-occurrence
+/// table hands over a candidate in one load, and the tree is only descended
+/// where that candidate is shorter than [`hash4_taper`]. This is the
+/// official's split between its short tables and its hash chains — the table
+/// answers most positions, the tree spends its steps on the rest.
+fn hash4_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| std::env::var_os("RAR_RS_HASH4").is_some_and(|v| v != "0"))
+}
+
+/// Length at or above which the table's match stands in for the tree descent.
+/// Below it the descent still runs, because a table hit that short leaves the
+/// lengths between it and the true best unpriced.
+fn hash4_taper() -> usize {
+    static TAPER: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *TAPER.get_or_init(|| {
+        std::env::var("RAR_RS_HASH4_TAPER")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(24)
+    })
+}
+
 fn commit_threshold() -> usize {
     static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *THRESHOLD.get_or_init(|| {
@@ -194,11 +217,22 @@ impl BlockMatches {
 pub(crate) struct ShortFinder {
     head2: Vec<u32>,
     head3: Vec<u32>,
+    /// Nearest occurrence of every four-byte prefix (`RAR_RS_HASH4`): the
+    /// official's primary candidate source. The tree hashes four bytes too,
+    /// but reaching a candidate costs a descent; this table hands one over in
+    /// a single load, which is what lets the collector skip the descent where
+    /// the table already found a long match.
+    head4: Vec<u32>,
 }
 
 impl ShortFinder {
     const BITS: u32 = 16;
     const SIZE: usize = 1 << Self::BITS;
+    /// Four-byte table width: 4 Mi slots is 16 MiB, a quarter of the tree's
+    /// son array at the default window, and keeps a slot collision near the
+    /// four-byte hash's own odds.
+    const BITS4: u32 = 22;
+    const SIZE4: usize = 1 << Self::BITS4;
     const NO_POS: u32 = u32::MAX;
     const HASH3: u32 = 0x9E37_79B1;
 
@@ -206,19 +240,32 @@ impl ShortFinder {
         Self {
             head2: vec![Self::NO_POS; Self::SIZE],
             head3: vec![Self::NO_POS; Self::SIZE],
+            // Allocated on first use: the mode is off by default and 16 MiB
+            // of never-read slots would be most of the finder's footprint.
+            head4: Vec::new(),
+        }
+    }
+
+    /// Allocate the four-byte table for `RAR_RS_HASH4`. Idempotent, and cheap
+    /// when the table is already up (one length check).
+    pub(crate) fn enable_hash4(&mut self) {
+        if self.head4.len() < Self::SIZE4 {
+            self.head4.clear();
+            self.head4.resize(Self::SIZE4, Self::NO_POS);
         }
     }
 
     pub(crate) fn clear(&mut self) {
         self.head2.fill(Self::NO_POS);
         self.head3.fill(Self::NO_POS);
+        self.head4.fill(Self::NO_POS);
     }
 
     /// Move every stored position down by `delta` (the frame slide), dropping
     /// the entries the slide pushed out of the frame.
     pub(crate) fn shift(&mut self, delta: usize) {
         let delta = delta as u32;
-        for table in [&mut self.head2, &mut self.head3] {
+        for table in [&mut self.head2, &mut self.head3, &mut self.head4] {
             for slot in table.iter_mut() {
                 *slot = match slot.checked_sub(delta) {
                     Some(moved) => moved,
@@ -262,6 +309,32 @@ impl ShortFinder {
     pub(crate) fn nearest3(&self, data: &[u8], pos: usize, max_distance: usize) -> Option<u32> {
         let cand = self.head3[(Self::key3(data.get(pos..pos + 3)?) >> (32 - Self::BITS)) as usize];
         Self::distance(pos, cand, max_distance)
+    }
+
+    /// Record this position as the nearest occurrence of its four-byte
+    /// prefix. O(1) by design: the point of the table is that the positions
+    /// the tree descent steps over can still be inserted.
+    #[inline]
+    pub(crate) fn insert4(&mut self, data: &[u8], pos: usize) {
+        let Some(word) = data.get(pos..pos + 4) else {
+            return;
+        };
+        self.head4[Self::key4(word)] = pos as u32;
+    }
+
+    /// Nearest occurrence of the four-byte prefix at `pos` within
+    /// `max_distance` (the caller still has to measure the length).
+    #[inline]
+    pub(crate) fn nearest4(&self, data: &[u8], pos: usize, max_distance: usize) -> Option<u32> {
+        let cand = self.head4[Self::key4(data.get(pos..pos + 4)?)];
+        Self::distance(pos, cand, max_distance)
+    }
+
+    #[inline]
+    fn key4(word: &[u8]) -> usize {
+        let mixed =
+            u32::from_le_bytes([word[0], word[1], word[2], word[3]]).wrapping_mul(Self::HASH3);
+        (mixed >> (32 - Self::BITS4)) as usize
     }
 
     #[inline]
@@ -349,6 +422,11 @@ pub(super) fn collect_block_matches(
     let tree_misses = &mut search.tree_misses;
     let stall = &mut search.stall;
     let stall_tier = stall_config();
+    let hash4 = hash4_mode();
+    let hash4_taper = hash4_taper();
+    if hash4 {
+        short.enable_hash4();
+    }
     let fast_tree = &mut search.fast_tree;
     // The next gated position's first tree step (its head-resolved
     // descendant and that node's child pair), computed at the end of the
@@ -374,10 +452,26 @@ pub(super) fn collect_block_matches(
         // for a full recovery search every FAST_RECOVER_INTERVAL
         // positions, and resume when any real match (>= 16 bytes, past
         // spurious 4-byte hash coincidences) shows up.
+        // Table-first candidate: one load, one length measurement, and the
+        // position is inserted either way (that insert is the table's whole
+        // maintenance cost).
+        let mut hash4_len = 0usize;
+        let mut hash4_dist = 0u32;
+        if hash4 && searching && max_distance > 0 && max_length >= 4 && pos + 3 < combined.len() {
+            if let Some(distance) = short.nearest4(combined, pos, max_distance) {
+                let length = match_length_at(combined, pos, distance as usize, max_length);
+                if length >= 4 {
+                    hash4_len = length;
+                    hash4_dist = distance;
+                }
+            }
+            short.insert4(combined, pos);
+        }
         if searching
             && max_distance > 0
             && max_length >= 4
             && pos + 3 < combined.len()
+            && (!hash4 || hash4_len < hash4_taper)
             && (!*fast_tree || (pos & (FAST_RECOVER_INTERVAL - 1)) == 0)
         {
             // Warm a *later* position's head slot: the next position is
@@ -461,6 +555,12 @@ pub(super) fn collect_block_matches(
         // because the fast-mode counter below must keep accumulating while
         // only spurious 2-3 byte pairs remain.
         let mut offered = longest;
+        // The table's match joins the tree's runs — appended, so the list stays
+        // ascending in length and the parse prices it as the longest run.
+        if hash4_len > offered {
+            matches.runs.push((hash4_len as u32, hash4_dist));
+            offered = hash4_len;
+        }
         // The tree hashes four bytes, so a pair or triple that stops short of
         // four never enters its buckets; the official encoder writes such
         // matches by the hundreds of thousands. Ask the short tables only
