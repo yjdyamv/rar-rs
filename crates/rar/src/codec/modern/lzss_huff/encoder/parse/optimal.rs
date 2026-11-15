@@ -1907,6 +1907,7 @@ fn interleaved_tokens(
     // (`FUN_140044794`: `pos += best_len`), and the per-token search count is
     // what separates its 3.4 M searches from our 5.8 M.
     let greedy = std::env::var_os("RAR_RS_GREEDY").is_some();
+    let lazy2 = std::env::var_os("RAR_RS_LAZY2").is_some();
     // Pick by length (nearest wins ties) instead of by estimated price: the
     // official records a candidate only when it is longer than the best so far
     // and accepts a farther one only when it is longer (`dist >> 5`).
@@ -2067,7 +2068,18 @@ fn interleaved_tokens(
         if let Some((pending_len, pending_dist)) = pending
             && best.0 >= 2
             && best.0 > pending_len
-            && !extends_at(combined, pos, pending_len, pending_dist)
+            && if lazy2 {
+                // Official FUN_14004600c: a cached (free) distance is emitted at
+                // once; otherwise the deferred match is dropped only when the
+                // new one is clearly longer (`best_len + 1 < len`), or near
+                // enough to pay for it (`dist * 4 < best_dist`), and never when
+                // it is more than 128x farther.
+                !reps.contains(&pending_dist)
+                    && (best.1 as u64) <= (pending_dist as u64) * 128
+                    && (pending_len + 1 < best.0 || (best.1 as u64) * 4 < pending_dist as u64)
+            } else {
+                !extends_at(combined, pos, pending_len, pending_dist)
+            }
         {
             tokens.push((0, u32::from(combined[pos - 1])));
             pending = Some(best);
