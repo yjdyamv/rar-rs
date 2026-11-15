@@ -1902,6 +1902,15 @@ fn interleaved_tokens(
     let use_rep = std::env::var_os("RAR_RS_NOREP").is_none();
     let use_tables = std::env::var_os("RAR_RS_NOTABLES").is_none();
     let use_tree = std::env::var_os("RAR_RS_NOTREE").is_none();
+    // Greedy: emit the match at once instead of parking it for one position to
+    // see whether the next position extends it. The official's loop is greedy
+    // (`FUN_140044794`: `pos += best_len`), and the per-token search count is
+    // what separates its 3.4 M searches from our 5.8 M.
+    let greedy = std::env::var_os("RAR_RS_GREEDY").is_some();
+    // Pick by length (nearest wins ties) instead of by estimated price: the
+    // official records a candidate only when it is longer than the best so far
+    // and accepts a farther one only when it is longer (`dist >> 5`).
+    let pick_longest = std::env::var_os("RAR_RS_PICKLONG").is_some();
     let fused_cut = std::env::var("RAR_RS_FUSED_CUT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -2002,6 +2011,12 @@ fn interleaved_tokens(
             // longest candidate (`FUN_140047698`), it takes the one whose saved
             // bits beat the distance it costs.
             for &(length, distance) in cands.iter() {
+                if pick_longest {
+                    if length > best.0 || (length == best.0 && distance < best.1) {
+                        best = (length, distance);
+                    }
+                    continue;
+                }
                 let score = (length as i64) * 8 - price_of(distance);
                 let held = (best.0 as i64) * 8 - if best.0 == 0 { 0 } else { price_of(best.1) };
                 if best.0 == 0 || score > held {
@@ -2078,7 +2093,22 @@ fn interleaved_tokens(
                 debug_assert!(pos <= block.end, "parked match overran its block");
             }
             None => {
-                if best.0 >= 2 {
+                if best.0 >= 2 && greedy {
+                    // Emit now: the parked form would visit the next position
+                    // only to re-derive the same match and then skip it.
+                    let (length, distance) = best;
+                    tokens.push(best);
+                    if !(distance == reps[0] && length == last_length) {
+                        if let Some(index) = reps.iter().position(|&d| d == distance) {
+                            reps[..=index].rotate_right(1);
+                        } else {
+                            reps.rotate_right(1);
+                        }
+                        reps[0] = distance;
+                        last_length = length;
+                    }
+                    pos += length as usize;
+                } else if best.0 >= 2 {
                     pending = Some(best);
                     pos += 1;
                 } else {
