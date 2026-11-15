@@ -1913,6 +1913,11 @@ fn interleaved_tokens(
     // official records a candidate only when it is longer than the best so far
     // and accepts a farther one only when it is longer (`dist >> 5`).
     let pick_longest = std::env::var_os("RAR_RS_PICKLONG").is_some();
+    // The official refuses short matches at long distances outright: its 2-, 3-
+    // and 4-byte chains are only ever read inside 0x100 / 0x2000 / 0x40000 (see
+    // the gates in `FUN_140044794`). Its 5-byte chain is what reaches the far
+    // distances, so a match of five or more bytes needs no gate.
+    let length_gate = std::env::var_os("RAR_RS_LENGATE").is_some();
     let fused_cut = std::env::var("RAR_RS_FUSED_CUT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -1988,6 +1993,9 @@ fn interleaved_tokens(
                     out: &mut scratch,
                 });
                 for &(length, distance) in scratch.iter() {
+                    if length_gate && (distance as usize) >= length_distance_gate(length) {
+                        continue;
+                    }
                     let encodable = reps.contains(&distance)
                         || length >= length_bonus(distance).saturating_add(2);
                     if encodable {
@@ -2464,10 +2472,34 @@ fn min_match_config() -> u32 {
     })
 }
 
+/// Multiplier on the distance-slot bits in `price_of` (`RAR_RS_PRICE_COEF`,
+/// default 2). Higher values make the greedy fused path prefer nearer matches
+/// and shorter ones over fetch-not-worth-it far matches.
+fn price_coef() -> i64 {
+    static COEF: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *COEF.get_or_init(|| {
+        std::env::var("RAR_RS_PRICE_COEF")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(2)
+    })
+}
+
+/// The official's per-length distance ceiling: 2-byte matches only inside
+/// 0x100, 3-byte inside 0x2000, 4-byte inside 0x40000, longer ones anywhere.
+fn length_distance_gate(length: u32) -> usize {
+    match length {
+        2 => 0x100,
+        3 => 0x2000,
+        4 => 0x40000,
+        _ => usize::MAX,
+    }
+}
+
 /// Rough bit price of a match at `distance`: the distance slot plus overhead.
 fn price_of(distance: u32) -> i64 {
     let bits = 32 - (distance | 1).leading_zeros() as i64;
-    8 + bits * 2
+    8 + bits * price_coef()
 }
 
 /// The official's three recent-occurrence tables (`+0xb1e8` byte, `+0xb1f0`

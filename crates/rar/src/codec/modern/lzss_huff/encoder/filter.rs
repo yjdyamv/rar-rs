@@ -959,12 +959,33 @@ fn block_stats_all(
     delta_override: Option<u8>,
     want_h1: bool,
 ) -> Vec<BlockStats> {
+    // Blocks are independent, and this sweep is the one serial piece left in
+    // front of the encoder: on ntoskrnl at `-mt8` it was 354 ms of a 1714 ms
+    // run (measured as mt8 with filters minus mt8 `-mc-`). Hand the blocks to
+    // the pool; the measurement per block is unchanged, so the decision is
+    // byte-identical.
+    let measure = |index: usize, chunk: &[u8]| {
+        let start = (index * FORCED_FILTER_BLOCK) as u32;
+        block_stats(chunk, start, want_h1, x86_types, delta_override)
+    };
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let pool = crate::parallel::compression_pool();
+        if pool.current_num_threads() > 1 {
+            let blocks: Vec<&[u8]> = data.chunks(FORCED_FILTER_BLOCK).collect();
+            return pool.install(|| {
+                blocks
+                    .par_iter()
+                    .enumerate()
+                    .map(|(index, chunk)| measure(index, chunk))
+                    .collect()
+            });
+        }
+    }
     data.chunks(FORCED_FILTER_BLOCK)
         .enumerate()
-        .map(|(index, chunk)| {
-            let start = (index * FORCED_FILTER_BLOCK) as u32;
-            block_stats(chunk, start, want_h1, x86_types, delta_override)
-        })
+        .map(|(index, chunk)| measure(index, chunk))
         .collect()
 }
 

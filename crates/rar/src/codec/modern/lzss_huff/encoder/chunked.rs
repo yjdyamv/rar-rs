@@ -466,7 +466,14 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let cs = {
         let caller = chunk_size.max(1);
         let by_count = data.len() / (threads.max(1) * 2);
-        let floored = by_count.max(caller.min(2 * 1024 * 1024));
+        // `RAR_RS_MT_MIN_SLICE` lowers the 2 MiB floor so the thread count can
+        // actually buy slices: with the floor a 13.9 MB member is always 7
+        // slices, and mt8/mt16/mt24 all run at the same speed.
+        let floor = std::env::var("RAR_RS_MT_MIN_SLICE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(2 * 1024 * 1024);
+        let floored = by_count.max(caller.min(floor));
         caller.min(floored).max(1)
     };
 
@@ -521,8 +528,14 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // built once per call. With it the workers never build a lookbehind frame,
     // so the per-slice insert of up to 8 MiB per 2 MiB slice disappears and the
     // priced DP becomes affordable at MT speed.
+    let mt_clock = std::env::var_os("RAR_RS_MTTIME").is_some();
+    let mt_start = std::time::Instant::now();
     let row_index = super::parse::RowIndex::build(data);
     let row_index_ref = &row_index;
+    if mt_clock {
+        eprintln!("MTTIME row_index={}ms", mt_start.elapsed().as_millis());
+    }
+    let mt_waves = std::time::Instant::now();
 
     let pool = crate::parallel::compression_pool();
     // Rayon's Scope::spawn returns nothing; each worker deposits its
@@ -594,6 +607,13 @@ pub(crate) fn encode_chunked_mt_with_progress(
             cb(bounds[last] as u64, data.len() as u64);
         }
         first = last;
+    }
+
+    if mt_clock {
+        eprintln!(
+            "MTTIME waves={}ms slices={n} workers={n_workers}",
+            mt_waves.elapsed().as_millis()
+        );
     }
 
     // Continue the chain after this window: tail = suffix of the window
