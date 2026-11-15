@@ -84,7 +84,7 @@ pub(super) struct SequentialSearch<'a> {
     pub seed_tail: bool,
 }
 
-pub(super) use block::{EMITTED_BLOCK_SIZE, find_block_end_adaptive};
+pub(super) use block::{emitted_block_cap, find_block_end_adaptive};
 pub(super) use collect::COLLECT_MISS_THRESHOLD;
 #[cfg(test)]
 pub(crate) use collect::set_fast_path_enabled;

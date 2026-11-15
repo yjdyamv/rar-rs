@@ -11,6 +11,19 @@ pub(crate) mod common;
 pub(crate) mod legacy;
 pub(crate) mod modern;
 
+/// Serializes every test that toggles a process-global codec switch: the
+/// matchless fast path, the price-table carry, the price tier, and the
+/// incompressibility screen. They are all process-global, so two tests flipping
+/// different ones still race — a smoke test comparing its "off" arm against its
+/// "on" arm would pick up another test's toggle and report a divergence that
+/// does not exist. The counter deltas (`MATCHLESS_FAST_PATH_USES`) need the same
+/// exclusion for their before/after pairs.
+#[cfg(test)]
+pub(crate) fn toggle_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 // The public `codec::lzss_huff` path (used by the crate re-exports and
 // examples) is kept as a re-export alias.
 pub use modern::lzss_huff;

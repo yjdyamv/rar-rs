@@ -16,7 +16,7 @@ use super::emit::{encode_block, encode_empty_block};
 #[cfg(feature = "parallel")]
 use super::parse::find_matches_in_range;
 use super::parse::{
-    EMITTED_BLOCK_SIZE, find_block_end_adaptive, find_matches_optimal, find_matches_with_tail,
+    emitted_block_cap, find_block_end_adaptive, find_matches_optimal, find_matches_with_tail,
 };
 
 #[cfg(feature = "parallel")]
@@ -313,7 +313,7 @@ fn encode_chunked_raw_inner(
         let emit_started = std::time::Instant::now();
         let mut block_start = 0usize;
         while block_start < symbols.len() {
-            let (block_end, _) = find_block_end_adaptive(&symbols, block_start, EMITTED_BLOCK_SIZE);
+            let (block_end, _) = find_block_end_adaptive(&symbols, block_start, emitted_block_cap());
             let is_last = is_final && chunk_end >= data.len() && block_end >= symbols.len();
             let block_data = encode_block(&symbols[block_start..block_end], is_last, variant);
             output.extend(block_data);
@@ -844,7 +844,7 @@ fn encode_mt_slice(
     let mut out = Vec::new();
     let mut bs = 0usize;
     while bs < symbols.len() {
-        let (be, _) = find_block_end_adaptive(&symbols, bs, EMITTED_BLOCK_SIZE);
+        let (be, _) = find_block_end_adaptive(&symbols, bs, emitted_block_cap());
         let is_last = is_last_block_of_member && be >= symbols.len();
         out.extend(encode_block(&symbols[bs..be], is_last, variant));
         bs = be;

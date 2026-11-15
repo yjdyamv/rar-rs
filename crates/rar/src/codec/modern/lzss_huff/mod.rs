@@ -37,8 +37,8 @@ pub(crate) use encode::{
     FILTER_PROBE_LEN, FilterProbe, filter_transform_wins, member_filter_probes,
 };
 pub(crate) use encoder::{
-    Symbol, delta_stream_window, forced_combined_specs, forced_combined_stream_window,
-    merge_ranges, x86_stream_window,
+    Symbol, best_combined_specs, delta_stream_window, forced_combined_specs,
+    forced_combined_stream_window, merge_ranges, x86_stream_window,
 };
 // The shared match finder (`codec::common`) reports descent steps into the
 // encoder's profile counters; it reads the same switch the phases do.
@@ -127,7 +127,8 @@ pub const BLOCK_CHECKSUM_SEED: u8 = 0x5A;
 pub const NIBBLE_ESCAPE: u8 = 15;
 
 /// Serializes every test that toggles a process-global encoder switch: the
-/// matchless fast path, the price-table carry and the price tier. They are all
+/// matchless fast path, the price-table carry, the price tier, and the
+/// incompressibility screen ([`crate::codec::toggle_test_lock`]). They are all
 /// process-global, so two tests flipping different ones still race — a smoke
 /// test comparing its "off" arm against its "on" arm would pick up another
 /// test's toggle and report a divergence that does not exist. The counter
@@ -135,8 +136,7 @@ pub const NIBBLE_ESCAPE: u8 = 15;
 /// before/after pairs.
 #[cfg(test)]
 fn codec_toggle_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    crate::codec::toggle_test_lock()
 }
 
 /// Cheap default-suite guard for the matchless fast path (see

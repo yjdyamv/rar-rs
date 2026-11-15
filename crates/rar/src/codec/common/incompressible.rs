@@ -105,13 +105,18 @@ pub(crate) fn samples_look_structured(samples: &[&[u8]]) -> bool {
 #[cfg(test)]
 static SCREEN_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The screen switch is process-global, so the tests that read or flip it must
-/// not run next to each other (the same reason the napi `set_var` tests take a
-/// lock). The probe's verdicts do not depend on it, so no other test needs it.
+/// The screen switch is process-global, and so is the encoder's fast-path seam,
+/// so the tests that read or flip either must not run next to each other: they
+/// all take [`crate::codec::toggle_test_lock`]. (Same lock as
+/// `lzss_huff`'s `codec_toggle_lock`: a probe test comparing its screened arm
+/// against its raw arm must not observe another test's fast-path toggle, which
+/// changes the parse and therefore the bytes.) The probe's verdicts do not
+/// depend on either switch, so no other test needs it.
 #[cfg(test)]
 pub(crate) fn screen_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::codec::toggle_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Test seam: turn the cheap screen off, so the sample encodes run exactly as

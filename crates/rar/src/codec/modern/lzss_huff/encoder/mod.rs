@@ -31,10 +31,10 @@ pub use chunked::{
     DEFAULT_CHUNK_SIZE, encode_chunked_mt, encode_chunked_raw, encode_raw, encode_with_progress_raw,
 };
 pub use filter::{
-    FILTER_PROBE_LEN, FilterProbe, MAX_FILTER_BLOCK_LENGTH, encode_with_auto_delta_filter,
-    encode_with_auto_x86_filter, encode_with_filters, encode_with_filters_continue,
-    encode_with_filters_mt, filter_transform_wins, forced_combined_specs, member_filter_probes,
-    pick_delta_channel,
+    FILTER_PROBE_LEN, FilterProbe, MAX_FILTER_BLOCK_LENGTH, best_combined_specs,
+    encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
+    encode_with_filters_continue, encode_with_filters_mt, filter_transform_wins,
+    forced_combined_specs, member_filter_probes, pick_delta_channel,
 };
 pub(crate) use filter::{
     delta_stream_window, forced_combined_stream_window, merge_ranges, solid_filter_specs,
@@ -70,6 +70,18 @@ const LEVEL_PARAMS: [(usize, usize, usize); 6] = [
 ];
 
 const MAX_BLOCK_SIZE: usize = 0x20000; // 128 KB (parse block cap; prices stay localised)
+/// Parse-block cap, overridable with `RAR_RS_BLOCK` (KiB) so the adaptive
+/// splitter can be swept without a rebuild.
+fn max_block_size() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("RAR_RS_BLOCK")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .map(|kib| (kib * 1024).max(4096))
+            .unwrap_or(MAX_BLOCK_SIZE)
+    })
+}
 
 /// Cut budget for the experimental priced tier, or `None` (the default) to
 /// keep the level's own parameters.

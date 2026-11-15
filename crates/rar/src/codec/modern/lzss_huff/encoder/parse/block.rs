@@ -22,6 +22,18 @@ use super::super::*;
 /// is its splitter.
 pub(crate) const EMITTED_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
+/// Emitted-block cap, overridable with `RAR_RS_EMIT_BLOCK` (KiB) for sweeps.
+pub(crate) fn emitted_block_cap() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("RAR_RS_EMIT_BLOCK")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .map(|kib| (kib * 1024).max(16 * 1024))
+            .unwrap_or(EMITTED_BLOCK_SIZE)
+    })
+}
+
 /// Group symbols into emitted blocks of up to `cap` uncompressed bytes, but
 /// close the block early when the symbol stream's *local* literal/match
 /// distribution drifts between adjacent ~64 KiB sub-spans.

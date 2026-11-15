@@ -143,6 +143,21 @@ fn print_analysis(a: &rar_rs::codec::lzss_huff::StreamAnalysis, packed: &[u8]) {
         );
         let first: Vec<(u64, u64, u8, u8)> = a.filter_records.iter().copied().take(4).collect();
         println!("    first filters (start, len, type, ch): {first:?}");
+        let mut bytes = 0u64;
+        for &(_, len, _, _) in &a.filter_records {
+            bytes += len;
+        }
+        println!(
+            "    filter bytes: {} of {} ({:.2}%)",
+            bytes,
+            a.unpacked,
+            bytes as f64 * 100.0 / a.unpacked as f64
+        );
+        if std::env::var_os("RAR_RS_DUMP_FILTERS").is_some() {
+            for &(start, len, ty, ch) in &a.filter_records {
+                println!("    filter start={start} len={len} type={ty} ch={ch}");
+            }
+        }
     }
     // Block-size distribution summary.
     let mut sizes: Vec<u32> = a.blocks.iter().map(|b| b.block_size).collect();

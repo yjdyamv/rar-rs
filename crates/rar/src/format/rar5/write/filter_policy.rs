@@ -80,6 +80,43 @@ pub(super) fn encode_with_filter_policy(
             data, method, dsl, &specs, variant, threads, cancel,
         )?));
     }
+    if policy.delta == FilterMode::Auto && policy.x86 == FilterMode::Auto {
+        // Default `-mc`: WinRAR's forced-combined geometry — one filter per
+        // 64 KiB block, delta vs x86 chosen by trial encode, and no record
+        // at all where plain LZSS stays smallest.
+        let combined = std::env::var("RAR_RS_FILTER_COMBINED")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if combined {
+            // Trial encodes run at the cheapest method on measured grounds:
+            // on ntoskrnl m3 an m1 trial packed 5,789,172 bytes while a
+            // method-3 trial managed 5,850,197 (at m3 "plain" wins more
+            // often, so the trial over-picks no-filter), and a full-method
+            // trial also costs a second full compression (~1.2 s here).
+            // The trial is only a ranking signal, and the cheap one ranks
+            // better; `RAR_RS_TRIAL_METHOD` overrides it for experiments.
+            let trial_method = std::env::var("RAR_RS_TRIAL_METHOD")
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok())
+                .filter(|&m| (1..=5).contains(&m))
+                .unwrap_or(1);
+            let specs = lzss_huff::best_combined_specs(
+                data,
+                method,
+                dsl,
+                variant,
+                None,
+                lzss_huff::FILTER_E8E9,
+                trial_method,
+            );
+            if specs.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(lzss_huff::encode_with_filters_mt(
+                data, method, dsl, &specs, variant, threads, cancel,
+            )?));
+        }
+    }
     if policy.delta != FilterMode::Disabled
         && let Some(channels) = lzss_huff::pick_delta_channel(data, method, dsl, variant)?
         && lzss_huff::filter_transform_wins(

@@ -541,6 +541,21 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   曲线单调：8/4 = 44.67%/−2.5%，1/4 = 45.01%/−10%，1/1 = 45.62%/−25%（比既有的
   `RAR_RS_COMMIT=16` 的 +0.53pp/−17% 更划算，两者可叠加）。默认关闭。
   见 [ADR 0011](adr/0011-official-shaped-matcher.md) 的「停滞降档」一节。
+- **滤镜选择靠试验，就必须为试验付钱**：forced-combined（`best_combined_specs`，每 64 KiB 块
+  plain/delta/E8/E8E9 各压一遍取最小）在 ntoskrnl m3 上 5,828,867 → 5,789,172 B
+  （−0.3 pp），但试验本身是 3 份 13.9 MB 的 m1 编码、约 1.2 s（`RAR_RS_TRIAL_SAMPLE`
+  压到 16 KiB 能省 0.9 s、赔 0.10 pp）。官方那 220 条记录是**检测**出来的，不是
+  压出来的；要让滤镜免费，得改成按 E8/E9 密度与块内差值统计定点。见
+  [ADR 0011](adr/0011-official-shaped-matcher.md) 的「滤镜默认路径」一节。
+- **试验编码的方法不等于真编码的方法**：用 m3 试验比用 m1 试验**更差**
+  （ntoskrnl 5,850,197 vs 5,789,172 B）——高方法下 plain 更容易赢，块被判成不用滤镜。
+  试验只是排序信号，便宜的那个反而更准。
+- **逐块 delta 不要加前置阈值**：`block_delta_channel` 只按「差值 ≤ 8 的字节数」挑帧，
+  不设「占比够高才用」的门（60 % 门会让 ntoskrnl 的 .rsrc 段少 7 个 delta 块、
+  多 35 KB）。试验已经是仲裁者，阈值只会把好块挡掉。
+- **`RAR_RS_STALL` 是单个整数，不是 `a/b`**：停滞档位是 `RAR_RS_STALL=<空降次数>` +
+  `RAR_RS_STALL_CUT=<步数>`；把 ADR 里「2/2」的写法直接传给 `RAR_RS_STALL` 会
+  `parse` 失败、静默关闭，看起来像「这个旋钮没效果」。
 - **逐块分配是可见成本**：DP 的 per-position 状态 32 B（price/长度/距离/
   四个 rep/上次长度），64 KiB 块约 2 MB，13 MiB 成员有 200 多个块；改成按
   chunk 复用的 `DpArrays` 后，只保留同量的 memset，不再每次都新映射页面。

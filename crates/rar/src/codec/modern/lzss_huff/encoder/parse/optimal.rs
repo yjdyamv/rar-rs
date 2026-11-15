@@ -6,6 +6,7 @@
 //! [`super::collect`].
 
 use super::super::*;
+use super::super::max_block_size;
 
 #[cfg(feature = "parallel")]
 use std::sync::atomic::AtomicBool;
@@ -895,7 +896,7 @@ impl BlockSplitter {
         if open == 0 || chunk.is_empty() {
             return false;
         }
-        if open + chunk.len() as u64 > MAX_BLOCK_SIZE as u64 {
+        if open + chunk.len() as u64 > max_block_size() as u64 {
             return false;
         }
         let mut counts = [0u32; 256];

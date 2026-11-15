@@ -11,7 +11,7 @@ use super::*;
 use super::super::{FILTER_ARM, FILTER_DELTA, FILTER_E8, FILTER_E8E9};
 use super::emit::{encode_block, encode_empty_block};
 use super::parse::{
-    EMITTED_BLOCK_SIZE, find_block_end_adaptive, find_matches_optimal, find_matches_with_tail,
+    emitted_block_cap, find_block_end_adaptive, find_matches_optimal, find_matches_with_tail,
 };
 use crate::codec::common::filters::apply_filter_encode;
 use crate::error::{RarError, RarResult};
@@ -238,7 +238,7 @@ pub fn encode_with_filters_into(
         let emit_started = std::time::Instant::now();
         let mut block_start = 0usize;
         while block_start < symbols.len() {
-            let (block_end, _) = find_block_end_adaptive(&symbols, block_start, EMITTED_BLOCK_SIZE);
+            let (block_end, _) = find_block_end_adaptive(&symbols, block_start, emitted_block_cap());
             let is_last = is_final && block_end >= symbols.len();
             let block_data = encode_block(&symbols[block_start..block_end], is_last, variant);
             output.extend(block_data);
@@ -707,6 +707,175 @@ pub fn forced_combined_stream_window(
         }
     }
     (transformed, specs)
+}
+
+/// Delta frame sizes tried per block by [`best_combined_specs`]: the auto
+/// list plus the wider frames WinRAR emits in x86 resource sections (5 and
+/// 32 appear in its ntoskrnl records).
+const BLOCK_DELTA_CHANNELS: &[u8] = &[1, 2, 3, 4, 5, 6, 8, 9, 12, 16, 32];
+
+/// Cheap per-block delta channel pick: count deltas of magnitude at most 8
+/// (the "is this correlated?" signal `auto_delta_filter_channels` uses) for
+/// each candidate frame and keep the best. No encode is involved; the block
+/// trial below is the arbiter, so a bad pick only costs one trial encode.
+fn block_delta_channel(block: &[u8]) -> Option<u8> {
+    if block.len() < 256 {
+        return None;
+    }
+    let mut best: Option<(u8, u64)> = None;
+    for &ch in BLOCK_DELTA_CHANNELS {
+        let ch_usize = ch as usize;
+        if block.len() < ch_usize * 4 {
+            continue;
+        }
+        let mut prev = [0u8; 32];
+        let mut near_zero = 0u64;
+        for (i, &byte) in block.iter().enumerate() {
+            let lane = i % ch_usize;
+            let delta = prev[lane].wrapping_sub(byte) as i32;
+            if delta.unsigned_abs() <= 8 {
+                near_zero += 1;
+            }
+            prev[lane] = byte;
+        }
+        if best.is_none_or(|(_, b)| near_zero > b) {
+            best = Some((ch, near_zero));
+        }
+    }
+    best.map(|(channels, _)| channels)
+}
+
+/// Per-block filter choice for the default `-mc` policy (WinRAR's forced
+/// `-mcd+ -mce+` geometry): split `data` at [`FORCED_FILTER_BLOCK`] and, per
+/// chunk, trial-encode plain LZSS, delta (channel count from `channels` or
+/// picked per block) and the x86 filter `x86_type`, keeping the smallest.
+/// Chunks where plain wins emit no record and stay untransformed.
+///
+/// `trial_method` is the method used for the trial encodes (`method` costs
+/// three full compressions; a cheaper trial trades decision quality for
+/// time).
+///
+/// Tuning switches (all optional, `RAR_RS_*`): `RAR_RS_TRIAL_X86` (comma
+/// separated extra x86 filter types, e.g. `1`), `RAR_RS_TRIAL_NO_PLAIN` (only
+/// pick between the filters), `RAR_RS_TRIAL_DELTA_CH` (force one channel
+/// count), `RAR_RS_FILTER_STATS=2` (dump every block's trial sizes).
+pub fn best_combined_specs(
+    data: &[u8],
+    method: u8,
+    dsl: u8,
+    variant: ArchiveVersion,
+    channels: Option<u8>,
+    x86_type: u8,
+    trial_method: u8,
+) -> Vec<FilterSpec> {
+    let env_flag = |name: &str| std::env::var_os(name).is_some();
+    // A zero trial method means "same as the real encode".
+    let trial_method = if trial_method == 0 { method } else { trial_method };
+    // The trial window is one 64 KiB block, so a dictionary larger than that
+    // cannot change its decision — but it does size the encoder's tables, and
+    // allocating them per trial dominated the cost of the first version.
+    let trial_dsl = dsl.min(16);
+    // Optional head sample per block: the trials then pack only the first
+    // `sample` bytes instead of the whole 64 KiB block.
+    let sample = std::env::var("RAR_RS_TRIAL_SAMPLE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1024)
+        .unwrap_or(FORCED_FILTER_BLOCK);
+    let trial = |bytes: &[u8], spec: Option<FilterSpec>| {
+        let specs: &[FilterSpec] = spec.as_slice();
+        encode_with_filters(bytes, trial_method, trial_dsl, specs, variant)
+            .map(|packed| packed.len())
+            .unwrap_or(usize::MAX)
+    };
+    // Both x86 variants are candidates by default: on ntoskrnl the mixed
+    // choice packs ~20 KB smaller than E8E9 alone.
+    let mut x86_types = vec![x86_type];
+    if x86_type != FILTER_E8 {
+        x86_types.push(FILTER_E8);
+    }
+    if let Ok(extra) = std::env::var("RAR_RS_TRIAL_X86") {
+        x86_types.clear();
+        for part in extra.split(",") {
+            if let Ok(ty) = part.trim().parse::<u8>()
+                && matches!(ty, FILTER_E8 | FILTER_E8E9)
+                && !x86_types.contains(&ty)
+            {
+                x86_types.push(ty);
+            }
+        }
+        if x86_types.is_empty() {
+            x86_types.push(x86_type);
+        }
+    }
+    let allow_plain = !env_flag("RAR_RS_TRIAL_NO_PLAIN");
+    let forced_delta = std::env::var("RAR_RS_TRIAL_DELTA_CH")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .or(channels);
+    let verbose = std::env::var("RAR_RS_FILTER_STATS").ok();
+    let dump = verbose.as_deref() == Some("2");
+    let mut specs = Vec::new();
+    let (mut plain_blocks, mut delta_blocks, mut x86_blocks) = (0u64, 0u64, 0u64);
+    let (mut plain_bytes, mut delta_bytes, mut x86_bytes) = (0u64, 0u64, 0u64);
+    for (index, chunk) in data.chunks(FORCED_FILTER_BLOCK).enumerate() {
+        let start = (index * FORCED_FILTER_BLOCK) as u32;
+        let len = chunk.len() as u32;
+        let probe = &chunk[..chunk.len().min(sample)];
+        let probe_len = probe.len() as u32;
+        let plain_len = trial(probe, None);
+        let mut best_len = if allow_plain { plain_len } else { usize::MAX };
+        let mut best_spec: Option<FilterSpec> = None;
+        let mut delta_len = usize::MAX;
+        if let Some(ch) = forced_delta.or_else(|| block_delta_channel(chunk)) {
+            delta_len = trial(probe, Some(FilterSpec::new(FILTER_DELTA, ch, 0, probe_len)));
+            if delta_len < best_len {
+                best_len = delta_len;
+                best_spec = Some(FilterSpec::new(FILTER_DELTA, ch, start, len));
+            }
+        }
+        let mut x86_len = usize::MAX;
+        for &ty in &x86_types {
+            let packed = trial(probe, Some(FilterSpec::new(ty, 0, 0, probe_len)));
+            if packed < best_len {
+                best_len = packed;
+                best_spec = Some(FilterSpec::new(ty, 0, start, len));
+            }
+            x86_len = x86_len.min(packed);
+        }
+        if dump {
+            eprintln!(
+                "FILTERBLOCK {index} start={start} len={len} plain={plain_len} delta={delta_len} x86={x86_len} -> {:?}",
+                best_spec.map(|s| (s.filter_type, s.channels))
+            );
+        }
+        match best_spec {
+            None => {
+                plain_blocks += 1;
+                plain_bytes += u64::from(len);
+            }
+            Some(spec) if spec.filter_type == FILTER_DELTA => {
+                delta_blocks += 1;
+                delta_bytes += u64::from(len);
+                specs.push(spec);
+            }
+            Some(spec) => {
+                x86_blocks += 1;
+                x86_bytes += u64::from(len);
+                specs.push(spec);
+            }
+        }
+    }
+    if verbose.is_some() {
+        eprintln!(
+            "FILTERSTATS blocks: plain={plain_blocks} ({} B) delta={delta_blocks} ({} B) x86={x86_blocks} ({} B) records={}",
+            plain_bytes,
+            delta_bytes,
+            x86_bytes,
+            specs.len()
+        );
+    }
+    specs
 }
 
 /// Merge overlapping or adjacent ranges (the x86 scan can return a broad
