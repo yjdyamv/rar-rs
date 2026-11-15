@@ -22,10 +22,13 @@ path = "src/bin/unrar.rs"
 rar-rs = { workspace = true, features = ["parallel"] }
 clap = { workspace = true }
 crc32fast = { workspace = true }
-windows-sys = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Only `#[cfg(windows)]` code uses it; see the note in `crates/rar/Cargo.toml`.
+windows-sys = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

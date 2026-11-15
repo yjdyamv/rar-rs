@@ -926,18 +926,18 @@ impl PpmdDecoder {
             index: 0,
         };
 
-        for i in 0..128 {
+        for (i, row) in self.bin_summ.iter_mut().enumerate() {
             for (k, &init_bin_esc) in INIT_BIN_ESC.iter().enumerate() {
                 let value = BIN_SCALE - u32::from(init_bin_esc) / (i as u32 + 2);
                 for m in (0..64).step_by(8) {
-                    self.bin_summ[i][k + m] = value as u16;
+                    row[k + m] = value as u16;
                 }
             }
         }
-        for i in 0..25 {
+        for (i, row) in self.see.iter_mut().enumerate() {
             let summ = ((5 * i + 10) << (PERIOD_BITS - 4)) as u16;
-            for k in 0..16 {
-                self.see[i][k] = See {
+            for slot in row.iter_mut() {
+                *slot = See {
                     summ,
                     shift: PERIOD_BITS - 4,
                     count: 4,
