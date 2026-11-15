@@ -2,6 +2,7 @@
 //! long-range sample table and the four-slot repeat-distance cache.
 
 use crate::codec::lzss_huff::DIST_CACHE_SIZE;
+use crate::codec::lzss_huff::profile;
 
 /// Sampling step of the long-range hash table: one 4-byte sample per
 /// `LONG_RANGE_STEP` bytes of history. Finer steps catch more matches at
@@ -834,25 +835,49 @@ pub struct TreeMatchFinder {
     /// first, then the greater-or-equal one, in LZMA's layout.
     son: Vec<u32>,
     mask: usize,
+    /// How far the mixed four-byte key is shifted to index `head`. Sized so
+    /// that a bucket holds the positions sharing four bytes with roughly one
+    /// window slot: wider buckets grow every tree deeper and cost a step
+    /// each, while a table larger than the window working set costs a cache
+    /// miss on the same load.
+    head_shift: u32,
 }
 
 impl TreeMatchFinder {
-    const HASH_BITS: u32 = 20;
+    /// Bucket-count bounds. The official matcher sizes its head from the
+    /// dictionary (`min(dict, 8 MiB)` entries); scaling with the window is
+    /// the same idea, because what a bucket holds is *positions that share
+    /// four bytes*, not positions in general.
+    const HASH_BITS_MIN: u32 = 23;
+    const HASH_BITS_MAX: u32 = 24;
     const MIN_MATCH: usize = 4;
 
     /// Builds a finder that remembers the last `window` positions, at
     /// eight bytes of links per byte of window.
     pub fn new(window: usize) -> Self {
         let window = window.max(1).next_power_of_two();
+        let bits = Self::head_bits_for(window);
         Self {
-            head: vec![NO_LINK; 1 << Self::HASH_BITS],
+            // Zero is the empty marker here (a bucket holds `pos + 1`), so
+            // the table is an untouched zeroed allocation: it is sized from
+            // the window the finder will eventually span, and only the
+            // buckets a member actually hashes ever fault in.
+            head: vec![0; 1 << bits],
             // Zero rather than the sentinel: a slot is always written
             // during its position's own insertion before any link can lead
             // to it, and untouched zeroes let the allocator defer the
             // pages.
             son: vec![0; window * 2],
             mask: window - 1,
+            head_shift: 32 - bits,
         }
+    }
+
+    /// One bucket per window position, clamped (see `HASH_BITS_MIN`).
+    fn head_bits_for(window: usize) -> u32 {
+        window
+            .trailing_zeros()
+            .clamp(Self::HASH_BITS_MIN, Self::HASH_BITS_MAX)
     }
 
     /// Grow the window in place, keeping every existing link (positions
@@ -880,6 +905,29 @@ impl TreeMatchFinder {
             self.son = grown;
         }
         self.mask = window - 1;
+        // A wider window earns a wider head, but the stored roots were mixed
+        // into buckets of the old width: resizing would leave every slot
+        // disagreeing with the key that now points at it, so the table is
+        // emptied instead and rebuilt by the positions that insert from here
+        // on. Stale `son` links stay unreachable because no head reaches
+        // them. Only growth applies: the caller creates the finder at the
+        // window it will grow to, and a frame that starts narrower keeps the
+        // wider table rather than throwing its tree away.
+        let bits = Self::head_bits_for(window);
+        if bits > 32 - self.head_shift {
+            self.head = vec![0; 1 << bits];
+            self.head_shift = 32 - bits;
+        }
+    }
+
+    /// The head entry for `hash`, as a link (`NO_LINK` for an empty bucket).
+    /// Positions are stored offset by one so that a zeroed table reads empty.
+    #[inline]
+    fn head_link(&self, hash: usize) -> u32 {
+        match self.head[hash] {
+            0 => NO_LINK,
+            link => link - 1,
+        }
     }
 
     /// Clear the head table, keeping the `son` array (a slot is always
@@ -888,7 +936,7 @@ impl TreeMatchFinder {
     /// Used when a reused finder starts a fresh frame (multi-threaded
     /// worker slices) instead of rebasing a continued one.
     pub fn clear_head(&mut self) {
-        self.head.fill(NO_LINK);
+        self.head.fill(0);
     }
 
     /// Shift every stored link back by `sub`, dropping positions below it:
@@ -916,7 +964,7 @@ impl TreeMatchFinder {
         // stays; the parse overwrites it on the next insertion of that
         // hash).
         for slot in self.head.iter_mut() {
-            if *slot != NO_LINK {
+            if *slot != 0 {
                 *slot = slot.wrapping_sub(sub);
             }
         }
@@ -941,10 +989,10 @@ impl TreeMatchFinder {
     }
 
     #[inline]
-    fn hash4(input: &[u8], pos: usize) -> usize {
+    fn hash4(&self, input: &[u8], pos: usize) -> usize {
         let value =
             u32::from_le_bytes([input[pos], input[pos + 1], input[pos + 2], input[pos + 3]]);
-        (value.wrapping_mul(0x9E37_79B1) >> (32 - Self::HASH_BITS)) as usize
+        (value.wrapping_mul(0x9E37_79B1) >> self.head_shift) as usize
     }
 
     /// Finds the matches at `pos` and inserts `pos`, in one descent.
@@ -970,9 +1018,9 @@ impl TreeMatchFinder {
         if pos + Self::MIN_MATCH > input.len() {
             return;
         }
-        let hash = Self::hash4(input, pos);
-        let current = resolve(pos, self.head[hash]);
-        self.head[hash] = pos as u32;
+        let hash = self.hash4(input, pos);
+        let current = resolve(pos, self.head_link(hash));
+        self.head[hash] = pos as u32 + 1;
         self.descent(
             MatchQuery {
                 input,
@@ -1013,8 +1061,8 @@ impl TreeMatchFinder {
         if pos + Self::MIN_MATCH > input.len() {
             return;
         }
-        let hash = Self::hash4(input, pos);
-        self.head[hash] = pos as u32;
+        let hash = self.hash4(input, pos);
+        self.head[hash] = pos as u32 + 1;
         self.descent(
             MatchQuery {
                 input,
@@ -1036,8 +1084,8 @@ impl TreeMatchFinder {
     /// floor/window check the descent starts with, so a head sentinel or a
     /// wrapped link yields placeholder links that the guard then consumes.
     pub(crate) fn seed_for(&self, input: &[u8], pos: usize) -> (usize, u32, u32) {
-        let hash = Self::hash4(input, pos);
-        let current = resolve(pos, self.head[hash]);
+        let hash = self.hash4(input, pos);
+        let current = resolve(pos, self.head_link(hash));
         if current >= pos || pos - current > self.mask {
             return (current, NO_LINK, NO_LINK);
         }
@@ -1052,15 +1100,15 @@ impl TreeMatchFinder {
     pub(crate) fn prefetch_head_for(&self, input: &[u8], pos: usize) {
         #[cfg(target_arch = "x86_64")]
         {
-            let hash = Self::hash4(input, pos);
+            let hash = self.hash4(input, pos);
             // SAFETY: the pointer is `head`'s base offset by `hash`.
-            // `hash4` shifts the product right by `32 - HASH_BITS`, so
-            // `hash < 1 << HASH_BITS == head.len()` and the address stays
-            // inside the allocation. `prefetcht0` only warms the cache — it
-            // never faults and never dereferences — so a stale `head` entry
-            // is harmless. The caller's `pos + 3 < input.len()` guard is
-            // what makes `hash4`'s own 4-byte read sound; that is a separate
-            // bound from the one this pointer needs.
+            // `hash4` shifts the product right by `head_shift`, so
+            // `hash < 1 << (32 - head_shift) == head.len()` and the address
+            // stays inside the allocation. `prefetcht0` only warms the cache
+            // — it never faults and never dereferences — so a stale `head`
+            // entry is harmless. The caller's `pos + 3 < input.len()` guard
+            // is what makes `hash4`'s own 4-byte read sound; that is a
+            // separate bound from the one this pointer needs.
             unsafe {
                 std::arch::x86_64::_mm_prefetch(
                     self.head.as_ptr().add(hash).cast::<std::os::raw::c_char>(),
@@ -1137,6 +1185,7 @@ impl TreeMatchFinder {
                 return;
             }
             budget -= 1;
+            profile::count(profile::STEPS, 1);
             floor = current;
             let pair = (current & self.mask) << 1;
             let (child_less, child_greater) = match seed.take() {

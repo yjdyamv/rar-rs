@@ -40,6 +40,9 @@ pub(crate) use encoder::{
     Symbol, delta_stream_window, forced_combined_specs, forced_combined_stream_window,
     merge_ranges, x86_stream_window,
 };
+// The shared match finder (`codec::common`) reports descent steps into the
+// encoder's profile counters; it reads the same switch the phases do.
+pub(crate) use encoder::profile;
 
 // ── Tables / format constants ──────────────────────────────────────────────
 

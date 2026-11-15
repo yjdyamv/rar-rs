@@ -487,6 +487,12 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   砍成 7 字节，所以一直当成“树不可靠、需要复核”而不是“树被写坏”。现在下降遇到
   `input.len()` 就割断两个挂接点、既不猜方向也不收养，复核那趟整趟删掉（
   collect -3.3%，比例不变）。改动：`match_finder.rs` 的 `descent`，提交 `9cbb354`。
+- **表头位宽随窗口走，不是固定 2^20**：`head_bits_for(window) = window.trailing_zeros().clamp(23, 24)`，
+  表头存 `pos + 1`、0 表示空，于是 `vec![0; 1 << bits]` 走 calloc 惰性缺页；`grow_to` 只增不减。
+  位宽只决定桶深（= 白走的步数），不影响候选质量：2^20/2^22/2^24 三种位宽的比例都是
+  44.61%，collect 却是 3380/2824/2677 ms。总收益 ntoskrnl m3 -14.3%、d2d1 -8%、
+  小文件不回归。下限 23 由 `long_range_matches_compress_distant_repeats` 看守：2^21 时树
+  太浅，长距探针抓不到 2 MiB 外的副本。见 [ADR 0011](adr/0011-official-shaped-matcher.md)。
 - **距离类被两种形态各证否一次**：8 棵独立的类树 = +18% collect / -0.56pp 比例；
   官方真形态（一份位置索引 `son` + 8 份 head 快照 + 共享远预算）= +193% collect /
   比例持平。原因是**入口免费、远走行贵**：远快照的入口点在窗口末尾往回一块，每步

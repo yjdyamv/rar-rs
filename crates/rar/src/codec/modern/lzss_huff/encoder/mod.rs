@@ -19,7 +19,7 @@ mod chunked;
 mod emit;
 mod filter;
 mod parse;
-pub(super) mod profile;
+pub(crate) mod profile;
 #[cfg(test)]
 mod tests;
 

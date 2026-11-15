@@ -1470,8 +1470,7 @@ pub(crate) fn find_matches_optimal(
     // tree) seeds its tail, with budget-limited descents (their matches
     // are already encoded; only their place in the tree matters).
     let tree_window = window.min(combined.len());
-    let keep = window.min(near_window_max()).min(combined.len());
-    // BT4 is the only finder: the ADR 0011 P2 distance-class matcher was
+    let keep = window.min(near_window_max()).min(combined.len()); // BT4 is the only finder: the ADR 0011 P2 distance-class matcher was
     // measured and rejected (see the P2 sections of that ADR), so this is the
     // shape that shipped before it. The tree persists across the chunks of a
     // member: its links are frame offsets into `combined`, so as the frame
@@ -1480,9 +1479,23 @@ pub(crate) fn find_matches_optimal(
     // tail — re-seeding cost hundreds of milliseconds per chunk on dense data.
     // Only a fresh frame seeds its tail, with budget-limited descents (their
     // matches are already encoded; only their place in the tree matters).
+    // The head table's bucket count is fixed when the finder is built (see
+    // `TreeMatchFinder::head_bits_for`), while a member's frame ramps up to
+    // `keep + chunk`: building it at the frame's current length would leave
+    // the buckets narrow for the whole member, and widening them later means
+    // rehashing, which throws the tree away mid-parse. So build it at the
+    // window it will span — four times what is on the frame now, which is
+    // already the whole window for a member larger than a chunk (a small
+    // member is not going to grow past four times its own length, and a table
+    // bigger than the data is just cache misses). Only the buckets a member
+    // hashes ever fault in.
+    let tree_sizing = window
+        .min(near_window_max() + chunk.len())
+        .min(combined.len() * 4)
+        .max(4);
     let tree_finder = state
         .tree
-        .get_or_insert_with(|| match_finder::TreeMatchFinder::new(tree_window));
+        .get_or_insert_with(|| match_finder::TreeMatchFinder::new(tree_sizing));
     tree_finder.grow_to(tree_window);
     // `combined_len == 0` marks a fresh frame: the first chunk of a member
     // (the multi-threaded workers no longer reach here — they run the

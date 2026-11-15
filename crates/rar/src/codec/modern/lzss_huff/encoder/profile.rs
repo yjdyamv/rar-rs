@@ -62,10 +62,15 @@ pub(super) const SHORT_PROBE: usize = 2;
 pub(super) const LR_PROBE: usize = 3;
 /// Length verifications (`match_length_at` calls) of tree reports.
 pub(super) const VERIFY: usize = 4;
+/// Tree descent steps (one byte compare each): the unit cost the whole
+/// matcher's price is built from. Steps per position × ns per step is where
+/// the collector's time actually goes.
+pub(crate) const STEPS: usize = 5;
 
-const COUNT_NAMES: [&str; 5] = ["positions", "searches", "short", "lr", "verify"];
+const COUNT_NAMES: [&str; 6] = ["positions", "searches", "short", "lr", "verify", "steps"];
 
-static COUNTS: [AtomicU64; 5] = [
+static COUNTS: [AtomicU64; 6] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -85,7 +90,7 @@ static NANOS: [AtomicU64; 7] = [
 
 /// Record `n` events of `slot`.
 #[inline]
-pub(super) fn count(slot: usize, n: u64) {
+pub(crate) fn count(slot: usize, n: u64) {
     if enabled() {
         COUNTS[slot].fetch_add(n, Ordering::Relaxed);
     }
