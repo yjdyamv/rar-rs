@@ -14,7 +14,8 @@ RAR/UNRAR binary is required at runtime.
   read / extract; RAR 1.3 / 1.4 / 1.5 / 2.x / 4.x creation (`-ma13` / `-ma14` /
   `-ma15` / `-ma2` / `-ma4`), including legacy codecs, solid chains and volumes.
 - **Compression** — native LZSS+Huffman and PPMd, levels 0–5, dictionary
-  controls, delta/x86 filters, solid archives, parallel compression, verification and extraction.
+  controls, delta/x86 filters, solid archives, parallel compression,
+  verification and extraction.
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
   comments, SFX handling, string search, symlinks and hardlinks.
 - **Encryption** — file-level AES-256 with a chained HMAC-SHA256 KDF, plus
@@ -117,19 +118,20 @@ Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   ([ADR 0005](docs/adr/0005-rar4-edit-architecture.md)). Deleting from a
   multi-volume set repacks the whole set at its original volume size, keeping
   the numbering, solid flag, comment and per-volume recovery records. Appending
-  (`a`/`u`/`f`) takes the same whole-set repack for both RAR4 and RAR5 sets, so a
-  set grows while keeping its shape, and an explicit recovery-strength change (`rar rr`, `-rr<N>`)
-  rebuilds every volume's record and the `.rev` volumes; replacing every member
-  recreates the archive from the surviving metadata (format, volume size, solid
-  flag, comment, header encryption and recovery record) instead of collapsing or
-  dropping them, and RAR5 volume-set comments are editable too. An explicit
-  volume-size change (`-v` on an existing archive) is still refused.
-- **RAR5 header-encrypted (`-hp`) sets**: rename, `ch`, archive comments,
-  delete (single- and multi-volume) and `-k`/lock all work — rewritten headers
-  are re-encrypted and the comment rides as a plaintext data area. Inline
-  recovery records may be combined with `-hp` (they are rebuilt on every
-  edit), and the lock patch stages a full rewrite with a freshly encrypted
-  main header, so the flags vint may grow.
+  (`a`/`u`/`f`) takes the same whole-set repack for both RAR4 and RAR5 sets, so
+  a set grows while keeping its shape, and an explicit recovery-strength change
+  (`rar rr`, `-rr<N>`) rebuilds every volume's record and the `.rev` volumes;
+  replacing every member recreates the archive from the surviving metadata
+  (format, volume size, solid flag, comment, header encryption and recovery
+  record) instead of collapsing or dropping them, and RAR5 volume-set comments
+  are editable too. An explicit volume-size change (`-v` on an existing archive)
+  is still refused.
+- **RAR5 header-encrypted (`-hp`) sets**: rename, `ch`, archive comments, delete
+  (single- and multi-volume) and `-k`/lock all work — rewritten headers are
+  re-encrypted and the comment rides as a plaintext data area. Inline recovery
+  records may be combined with `-hp` (they are rebuilt on every edit), and the
+  lock patch stages a full rewrite with a freshly encrypted main header, so the
+  flags vint may grow.
 - **RAR4 solid chains** stay sequential; only RAR5 gets chunk-level MT.
 - Filter types 4–7 are rejected; KDF strength is capped at 2²⁴ iterations
   (default 2¹⁵).

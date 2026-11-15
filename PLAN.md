@@ -149,11 +149,11 @@ UTF-16LE；未开开发者模式让 `cli_directory_symlinks_are_stored_as_redire
 
 ### 性能（已 park，未关闭议题）
 
-- [x] **匹配器/解析器整体重写——已尝试，**否决并回退**（2026-11-14，ADR 0010）**：
-      把 BT4 + `RowIndex` 换成哈希环 / 位置索引链 + 融合单遍 DP，三种形态全部
-      实测：环 48.18%/4848 ms、链 47.83%/13930 ms、混合（BT4 候选源 + 融合
-      单遍 DP）46.43%/5101 ms，均未达到约定门槛（`ntoskrnl` m3 ≤43.7% 且
-      ≤5030 ms），而旧内核是 46.29%/4679 ms。代码回到重写前，结论留在
+- [x] **匹配器/解析器整体重写——已尝试，**否决并回退**（2026-11-14，ADR
+      0010）**： 把 BT4 + `RowIndex` 换成哈希环 / 位置索引链 + 融合单遍
+      DP，三种形态全部 实测：环 48.18%/4848 ms、链 47.83%/13930 ms、混合（BT4
+      候选源 + 融合 单遍 DP）46.43%/5101 ms，均未达到约定门槛（`ntoskrnl` m3
+      ≤43.7% 且 ≤5030 ms），而旧内核是 46.29%/4679 ms。代码回到重写前，结论留在
       ADR 0010（Status: rejected）与 `PITFALLS.md`「压缩内核」两条。
       **别再走这条路**：哈希结构能给每位置便宜的候选，但给不了"每前缀长度的
       最近邻"，而后者正是树的价值；要提速只能降低树的每步单价。
@@ -161,11 +161,10 @@ UTF-16LE；未开开发者模式让 `cli_directory_symlinks_are_stored_as_redire
 - [x] **解析器单遍化 + 逐块缓冲区复用（2026-11-14）**：删掉 seq 的多遍重定价
       （m2/m3 各多跑一遍 DP、m4 两遍、m5 三遍），只付出 0.23–0.26pp 体积
       （`ntoskrnl` m3 41.64% → 41.90%），换来 m3 `-mt1` 6101 → 4711 ms
-      （−23%）、m5 8544 → 4769 ms（−44%）。同时把 `BlockMatches` 与 DP 的
-      五张 per-position 表（32 B/位置，64 KiB 块约 2 MB）搬进按 chunk 复用的
-      `ParseBuffers`/`DpArrays`，再省约 2%；字节结果与复用前完全一致。
-      `-m3` 现在 41.90% / 4711 ms，对官方 7.23（42.30% / 1466 ms）还差
-      3.2x 时间。
+      （−23%）、m5 8544 → 4769 ms（−44%）。同时把 `BlockMatches` 与 DP 的 五张
+      per-position 表（32 B/位置，64 KiB 块约 2 MB）搬进按 chunk 复用的
+      `ParseBuffers`/`DpArrays`，再省约 2%；字节结果与复用前完全一致。 `-m3`
+      现在 41.90% / 4711 ms，对官方 7.23（42.30% / 1466 ms）还差 3.2x 时间。
 
 - [ ] **issue 09 — DLL 单线程解析速度**：真实 DLL 上 m3 `-mt1` 落后 WinRAR 约
       5.9x，瓶颈是 BT4
@@ -247,17 +246,17 @@ packed 流 FNV 全等（`examples/ratiocheck.rs` 的 hash 列），`slot_pricer_
 −6.3%、x86syn −3.0%、 text −1.4%、mixed/random 持平。边界与「别改回去」见
 `docs/PITFALLS.md` 「槽步进定价的融合版」条）。
 
-24 **并行校验/解压**（`t` 走 `verify_indices_parallel`：RAR5 与 RAR4（RAR 1.3/1.4
-除外）的非固实成员、≥4 成员、≥8 MiB 解压量、无进度回调、packed+unpacked
+24 **并行校验/解压**（`t` 走 `verify_indices_parallel`：RAR5 与 RAR4（RAR
+1.3/1.4 除外）的非固实成员、≥4 成员、≥8 MiB 解压量、无进度回调、packed+unpacked
 ≤256 MiB 时，RAR5 先在串行 `Engine` 游标上读出并解密全部负载，再交给 Rayon
 并行解码+校验；RAR4 由工作线程各自打开卷句柄读取，因此分卷/跨卷成员同样并行。
 解码结果算完 CRC/Blake 立即丢弃，逐成员错误仍按目录顺序汇总。8 个 System32
-DLL、87 MB、`-m3`：RAR5 `t -idq` 327 ms → 205 ms（官方 317 ms）；RAR4 单卷
-~400 ms → 300 ms（官方 402 ms），RAR4 15 卷 332 ms（官方 406 ms）。整档 `x`
+DLL、87 MB、`-m3`：RAR5 `t -idq` 327 ms → 205 ms（官方 317 ms）；RAR4 单卷 ~400
+ms → 300 ms（官方 402 ms），RAR4 15 卷 332 ms（官方 406 ms）。整档 `x`
 是**解码与落盘流水线**：工作线程解码，主线程按目录顺序做 `-o-`/`-kb`/覆盖裁决
-并写盘（有界 sync_channel + 小重排窗，资格条件同上），RAR5 384 → 306 ms
-（官方 343 ms），RAR4 单卷 337–375 ms（官方 430 ms），RAR4 多卷 382 ms。
-`parallel` 特性下生效，`cargo test --features parallel` 覆盖（含 RAR4 分卷
+并写盘（有界 sync_channel + 小重排窗，资格条件同上），RAR5 384 → 306 ms （官方
+343 ms），RAR4 单卷 337–375 ms（官方 430 ms），RAR4 多卷 382 ms。 `parallel`
+特性下生效，`cargo test --features parallel` 覆盖（含 RAR4 分卷
 verify/extract）；门槛与顺序语义见 `docs/PITFALLS.md`「并行校验的资格门槛」条。
 内存门槛按"RAR5 预读 packed + 同时在解码的成员解压缓冲 ≤512 MiB"节流并发
 （`live_workers_for`），既不按 packed+unpacked 总量一刀切，也不整档回退串行：
@@ -283,7 +282,8 @@ MB/s， 总体约 81 MB/s。同一批归档交给官方 `UnRAR.exe` 并扣掉其
 150 / 340 / 165 MB/s——即**纯解码**我们落后 1.9–3.7×。端到端的 `x`/`t`
 对比没有意义 （官方那 0.10 s 常数比 8 MiB
 的解码时间还长），看进度只能看这个进程内基线。当前本机（第 1–24 项落地后）：
-text 315 / mixed 336 / code-ish 266 MB/s，总体约 300 MB/s（同上三语料、release）。
+text 315 / mixed 336 / code-ish 266 MB/s，总体约 300
+MB/s（同上三语料、release）。
 
 **当前基线**（创建侧为第 22 项落地后，`ntoskrnl.exe` 12.5 MiB、`-ma5`、本机 16
 核、 release，每档两次取最快；「MT」= 默认线程、「seq」=
@@ -369,8 +369,7 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
   RAR4 与 RAR5 的 `a` / `u` / `f` 都与分卷删除共用整集重打包（原卷大小、编号、
   固实、注释、逐卷 RR、`.rev` 比例全部保留，暂存整集后换卷），因此卷集可以增长
   而不变形；追加的成员另起一条非固实链。显式改卷大小（对已有档 `-v`）仍拒绝。
-  分卷的 `rn` / `ch`、`k`、归档注释
-  **不是**拒绝项：官方支持，我们也支持。
+  分卷的 `rn` / `ch`、`k`、归档注释 **不是**拒绝项：官方支持，我们也支持。
 - **分卷删除**：官方 `rar` 拒绝（`Cannot modify volume`），我们**故意不跟**——
   `d` 走整集重打包（原卷大小/编号/固实/注释/逐卷 RR 保留，暂存后整体换卷），
   因为卷不能缩而不移动后续成员与 parity；这是可验证的正确语义，测试

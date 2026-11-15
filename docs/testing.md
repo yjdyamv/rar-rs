@@ -312,9 +312,10 @@ arithmetic panics and `debug_assert!` fire exactly as before.
 
 ## Profiling an encode
 
-The encoder carries phase timers (`crates/rar/src/codec/modern/lzss_huff/encoder/profile.rs`),
-off unless `RAR_RS_PROFILE` is set. They cost one `OnceLock` load per block or
-position and are there because guessing which phase dominates was wrong twice:
+The encoder carries phase timers
+(`crates/rar/src/codec/modern/lzss_huff/encoder/profile.rs`), off unless
+`RAR_RS_PROFILE` is set. They cost one `OnceLock` load per block or position and
+are there because guessing which phase dominates was wrong twice:
 
 ```sh
 RAR_RS_PROFILE=1 rar a -m3 -md32m -mt1 -idq -y /tmp/p.rar big.exe
@@ -329,8 +330,8 @@ RAR_RS_PROFILE=1 rar a -m3 -md32m -mt1 -idq -y /tmp/p.rar big.exe
 
 On `ntoskrnl.exe` (13.9 MB, `-m3`) the block collector is two thirds of the
 parse and the priced DP one fifth — the DP was assumed to be the hot spot.
-Counters are cumulative across the run (the last `total` line is the whole
-run), phases are exclusive.
+Counters are cumulative across the run (the last `total` line is the whole run),
+phases are exclusive.
 
 Measurement seams next to it, all defaulting to the shipped behaviour:
 `RAR_RS_CAP` caps how far a tree report is measured out (`NICE_MATCH_LENGTH`),
