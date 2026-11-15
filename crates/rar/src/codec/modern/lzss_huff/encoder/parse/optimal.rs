@@ -1902,6 +1902,10 @@ fn interleaved_tokens(
     let use_rep = std::env::var_os("RAR_RS_NOREP").is_none();
     let use_tables = std::env::var_os("RAR_RS_NOTABLES").is_none();
     let use_tree = std::env::var_os("RAR_RS_NOTREE").is_none();
+    let fused_cut = std::env::var("RAR_RS_FUSED_CUT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(chain_len);
     // The official precomputes the short-match tables for the whole window
     // before searching; keeping the two `last` maps hot in L2 is the point of
     // doing the pass separately instead of on the way through the loop.
@@ -1960,9 +1964,9 @@ fn interleaved_tokens(
                 scratch.clear();
                 super::super::profile::count(super::super::profile::SEARCH, 1);
                 let cut = if len_limit >= NICE_MATCH_LENGTH {
-                    chain_len
+                    fused_cut
                 } else {
-                    chain_len.min(4)
+                    fused_cut.min(4)
                 };
                 finder.matches(match_finder::MatchQuery {
                     input: combined,
