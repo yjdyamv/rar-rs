@@ -63,6 +63,208 @@ fn hash4_taper() -> usize {
     })
 }
 
+/// Official-shaped hash chains (`RAR_RS_CHAIN=<depth>`; 0 or absent = off).
+///
+/// `Rar723.exe`'s matcher is not a tree: `FUN_1400413dc` walks the whole
+/// buffer once and links every position into a 3-, 4-byte and five-byte chain
+/// (the per-position predecessors live at `+0xb1f0`/`+0xb1f8`/`+0xb200`, the
+/// five-byte one as a circular array indexed by `pos % dict`), and the parse
+/// (`FUN_140044794`, level >= 2) probes one entry per short chain plus up to
+/// `depth` links of the five-byte chain (`FUN_1400468d4`). `depth` comes from
+/// `DAT_1400baf58` = {2, 18, 45, 100, 150} for m0-m4, floored at 4 and
+/// quartered while the miss counters run ahead. Nothing in there prices
+/// anything: the loop commits a match and steps the position over it.
+fn chain_depth() -> usize {
+    static DEPTH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *DEPTH.get_or_init(|| {
+        std::env::var("RAR_RS_CHAIN")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+/// The chain tables the official matcher keeps, in `u32` form.
+///
+/// The official packs the per-position predecessors at 8/16/32 bits and
+/// rebuilds the high bits from the position itself; packing only saves
+/// memory, so this port keeps a plain `u32` per position.
+#[derive(Debug)]
+struct Chains {
+    hash3: Vec<u32>,
+    prev3: Vec<u32>,
+    hash4: Vec<u32>,
+    prev4: Vec<u32>,
+    hash_lr: Vec<u32>,
+    prev_lr: Vec<u32>,
+    window: usize,
+    capacity: usize,
+    /// Highest position linked so far; match-covered positions are linked
+    /// lazily as the parse reaches past them.
+    inserted_through: usize,
+}
+
+impl Chains {
+    const NO_POS: u32 = u32::MAX;
+    const HASH: u32 = 0x9E37_79B1;
+    const BITS3: u32 = 17;
+    const BITS4: u32 = 18;
+    const BITS_LR: u32 = 21;
+
+    fn new() -> Self {
+        Self {
+            hash3: Vec::new(),
+            prev3: Vec::new(),
+            hash4: Vec::new(),
+            prev4: Vec::new(),
+            hash_lr: Vec::new(),
+            prev_lr: Vec::new(),
+            window: 0,
+            capacity: 0,
+            inserted_through: 0,
+        }
+    }
+
+    /// Grow (and clear) the tables for a buffer of `len` bytes and a window of
+    /// `window`. Cheap when the shape already matches: two comparisons.
+    fn prepare(&mut self, len: usize, window: usize) {
+        if self.capacity >= len && self.window == window.max(1) && !self.prev_lr.is_empty() {
+            return;
+        }
+        self.capacity = len;
+        self.window = window.max(1);
+        self.hash3 = vec![Self::NO_POS; 1 << Self::BITS3];
+        self.hash4 = vec![Self::NO_POS; 1 << Self::BITS4];
+        self.hash_lr = vec![Self::NO_POS; 1 << Self::BITS_LR];
+        self.prev3 = vec![Self::NO_POS; len];
+        self.prev4 = vec![Self::NO_POS; len];
+        self.prev_lr = vec![Self::NO_POS; len];
+    }
+
+    fn span() -> u32 {
+        static SPAN: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *SPAN.get_or_init(|| {
+            std::env::var("RAR_RS_CHAIN_SPAN")
+                .ok()
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(0)
+        })
+    }
+
+    #[inline]
+    fn key(word: u32, bits: u32) -> usize {
+        (word.wrapping_mul(Self::HASH) >> (32 - bits)) as usize
+    }
+
+    #[inline]
+    fn word3(data: &[u8], pos: usize) -> u32 {
+        u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], 0])
+    }
+
+    #[inline]
+    fn word4(data: &[u8], pos: usize) -> u32 {
+        u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+    }
+
+    #[inline]
+    fn word5(data: &[u8], pos: usize) -> u32 {
+        // The fifth byte is folded into the word so positions sharing a
+        // four-byte prefix still split by their next byte.
+        Self::word4(data, pos) ^ ((data[pos + 4] as u32) << 24).rotate_right(8)
+    }
+
+    #[inline]
+    fn insert(&mut self, data: &[u8], pos: usize) {
+        let k3 = Self::key(Self::word3(data, pos), Self::BITS3);
+        self.prev3[pos] = self.hash3[k3];
+        self.hash3[k3] = pos as u32;
+        let k4 = Self::key(Self::word4(data, pos), Self::BITS4);
+        self.prev4[pos] = self.hash4[k4];
+        self.hash4[k4] = pos as u32;
+        let kl = Self::key(Self::word5(data, pos), Self::BITS_LR);
+        let slot = pos % self.window;
+        self.prev_lr[slot] = self.hash_lr[kl];
+        self.hash_lr[kl] = pos as u32;
+    }
+
+    /// Candidates at `pos`, ascending in length: the two nearest short-chain
+    /// entries, then the five-byte chain walked at most `depth` links.
+    ///
+    /// The walk stops when the chain runs out, leaves the window, or reaches a
+    /// distance no farther than the best one already accepted (the chain is
+    /// ordered by distance, so every later link is worse).
+    fn probe(
+        &self,
+        data: &[u8],
+        pos: usize,
+        max_distance: usize,
+        max_length: usize,
+        depth: usize,
+        out: &mut Vec<(u32, u32)>,
+    ) {
+        out.clear();
+        for (cand, min_len) in [(self.prev3[pos], 3usize), (self.prev4[pos], 4)] {
+            if cand == Self::NO_POS {
+                continue;
+            }
+            let cand = cand as usize;
+            if cand >= pos {
+                continue;
+            }
+            let distance = pos - cand;
+            if distance > max_distance {
+                continue;
+            }
+            let length = match_length_at(data, pos, distance, max_length);
+            if length >= min_len {
+                out.push((length as u32, distance as u32));
+            }
+        }
+        let mut best_length = out.iter().map(|&(length, _)| length as usize).max().unwrap_or(0);
+        let mut best_distance = out
+            .iter()
+            .filter(|&&(length, _)| length as usize == best_length)
+            .map(|&(_, distance)| distance as usize)
+            .min()
+            .unwrap_or(usize::MAX);
+        let mut cand = self.prev_lr[pos % self.window];
+        let mut steps = depth;
+        let span = Self::span();
+        while steps > 0 {
+            if cand == Self::NO_POS {
+                break;
+            }
+            let c = cand as usize;
+            if c >= pos {
+                break;
+            }
+            let distance = pos - c;
+            // `RAR_RS_CHAIN_SPAN` (a shift) stops the walk once the candidate
+            // is farther than `2^span` times the best distance accepted so
+            // far; without it the walk only stops at the window edge.
+            if distance > max_distance {
+                break;
+            }
+            if span > 0 && best_distance != usize::MAX && distance >= best_distance << span {
+                break;
+            }
+            let length = match_length_at(data, pos, distance, max_length);
+            if length > best_length {
+                best_length = length;
+                best_distance = distance;
+                out.push((length as u32, distance as u32));
+                if length == max_length {
+                    break;
+                }
+            }
+            cand = self.prev_lr[c % self.window];
+            steps -= 1;
+        }
+        out.sort_by_key(|&(length, _)| length);
+        out.dedup_by_key(|entry| entry.0);
+    }
+}
+
 fn commit_threshold() -> usize {
     static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *THRESHOLD.get_or_init(|| {
@@ -223,6 +425,10 @@ pub(crate) struct ShortFinder {
     /// a single load, which is what lets the collector skip the descent where
     /// the table already found a long match.
     head4: Vec<u32>,
+    /// The official matcher's chains, alive for the whole member so history
+    /// spans blocks (`RAR_RS_CHAIN`). Boxed: an `Option<Chains>` alone would
+    /// make every `ShortFinder` carry six empty `Vec`s.
+    chains: Option<Box<Chains>>,
 }
 
 impl ShortFinder {
@@ -243,6 +449,7 @@ impl ShortFinder {
             // Allocated on first use: the mode is off by default and 16 MiB
             // of never-read slots would be most of the finder's footprint.
             head4: Vec::new(),
+            chains: None,
         }
     }
 
@@ -259,11 +466,19 @@ impl ShortFinder {
         self.head2.fill(Self::NO_POS);
         self.head3.fill(Self::NO_POS);
         self.head4.fill(Self::NO_POS);
+        // A new member starts a new frame: the chains hold offsets into the
+        // old one and would index the wrong bytes.
+        self.chains = None;
     }
 
     /// Move every stored position down by `delta` (the frame slide), dropping
     /// the entries the slide pushed out of the frame.
     pub(crate) fn shift(&mut self, delta: usize) {
+        // Chains are keyed by frame offset and their per-position links are
+        // arrays, so a slide would have to memmove all three; dropping them is
+        // the cheap correct option until a member outgrows the window (the
+        // official keeps its own chain arrays per window chunk).
+        self.chains = None;
         let delta = delta as u32;
         for table in [&mut self.head2, &mut self.head3, &mut self.head4] {
             for slot in table.iter_mut() {
@@ -422,8 +637,16 @@ pub(super) fn collect_block_matches(
     let tree_misses = &mut search.tree_misses;
     let stall = &mut search.stall;
     let stall_tier = stall_config();
-    let hash4 = hash4_mode();
+    let hash4 = hash4_mode() && chain_depth() == 0;
     let hash4_taper = hash4_taper();
+    let depth = chain_depth();
+    if depth > 0 && short.chains.is_none() {
+        short.chains = Some(Box::new(Chains::new()));
+    }
+    let chained = depth > 0;
+    if let Some(chains) = short.chains.as_mut() {
+        chains.prepare(combined.len(), window);
+    }
     if hash4 {
         short.enable_hash4();
     }
@@ -439,6 +662,28 @@ pub(super) fn collect_block_matches(
         let max_distance = pos.min(window);
         let max_length = (block.end - pos).min(max_match);
         let before = matches.runs.len();
+        // Chain mode: every position links into the chains in the same pass
+        // that probes them, and the probe is three table loads plus a bounded
+        // walk instead of a tree descent.
+        if let Some(chains) = short.chains.as_mut()
+            && pos + 5 <= combined.len()
+        {
+            // Match-covered positions are stepped over by the parse, so fill
+            // the chains up to here: the official links every position in a
+            // pass of its own, and a hole in the chains hides exactly the
+            // history that repeats.
+            let last = combined.len() - 4;
+            while chains.inserted_through <= pos && chains.inserted_through < last {
+                let at = chains.inserted_through;
+                chains.insert(combined, at);
+                chains.inserted_through = at + 1;
+            }
+            if searching && max_distance > 0 && max_length >= 3 {
+                super::super::profile::count(super::super::profile::SEARCH, 1);
+                chains.probe(combined, pos, max_distance, max_length, depth, &mut scratch);
+                matches.runs.extend(scratch.iter().copied());
+            }
+        }
         // Inserting into a tree is the same descent as searching it, so a
         // position the parse steps over is stepped over here too rather
         // than inserted for nothing (its bytes are a copy of what the
@@ -468,6 +713,7 @@ pub(super) fn collect_block_matches(
             short.insert4(combined, pos);
         }
         if searching
+            && !chained
             && max_distance > 0
             && max_length >= 4
             && pos + 3 < combined.len()
@@ -569,6 +815,7 @@ pub(super) fn collect_block_matches(
         // the parse prices lengths in ascending order, so a short candidate
         // can only ever be appended to an empty run list.
         if longest < 4
+            && !chained
             && searching
             && *tree_misses < 32
             && max_distance > 0
@@ -630,6 +877,7 @@ pub(super) fn collect_block_matches(
         // a spurious short tree match must not reset this, only an actual
         // long-range hit pays for the probe.
         if let Some((long_range, near_max, anchor)) = lr
+            && !chained
             && searching
             && longest < 64
             && pos + 4 <= combined.len()
@@ -689,7 +937,8 @@ pub(super) fn collect_block_matches(
         let npos = pos + 1;
         let n_max_distance = npos.min(window);
         let n_max_length = (block.end - npos).min(max_match);
-        if npos >= committed_through
+        if !chained
+            && npos >= committed_through
             && n_max_distance > 0
             && n_max_length >= 4
             && npos + 3 < combined.len()
