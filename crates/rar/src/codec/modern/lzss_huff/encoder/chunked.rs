@@ -448,7 +448,11 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let long_range = level >= 2;
     // The row index's candidate depth is the MT tier's level dial (see
     // [`MT_ROW_INDEX_DEPTH`]); the chain budget above is the fallback tier's.
-    let row_depth = MT_ROW_INDEX_DEPTH[level];
+    let row_depth = std::env::var("RAR_RS_MT_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(MT_ROW_INDEX_DEPTH[level]);
     // MT parse is the low-step tier by design: workers price a bounded
     // candidate set from the shared row index instead of descending the BT4
     // tree at every position, which cuts the per-position step count well
@@ -546,8 +550,12 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // two-array allocation per slice cost page faults and per-frame
     // memsets). Waves run sequentially so each state is used by exactly one
     // thread at a time.
+    let mt_states = std::time::Instant::now();
     let mut worker_states: Vec<EncoderState> =
         (0..n_workers).map(|_| EncoderState::default()).collect();
+    if mt_clock {
+        eprintln!("MTTIME states={}ms", mt_states.elapsed().as_millis());
+    }
     let mut output = Vec::new();
     let mut first = 0usize;
     while first < n {
