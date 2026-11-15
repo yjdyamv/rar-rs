@@ -90,7 +90,7 @@ fn chain_depth() -> usize {
 /// rebuilds the high bits from the position itself; packing only saves
 /// memory, so this port keeps a plain `u32` per position.
 #[derive(Debug)]
-struct Chains {
+pub(super) struct Chains {
     hash3: Vec<u32>,
     prev3: Vec<u32>,
     hash4: Vec<u32>,
@@ -101,7 +101,7 @@ struct Chains {
     capacity: usize,
     /// Highest position linked so far; match-covered positions are linked
     /// lazily as the parse reaches past them.
-    inserted_through: usize,
+    pub(super) inserted_through: usize,
 }
 
 impl Chains {
@@ -111,7 +111,7 @@ impl Chains {
     const BITS4: u32 = 18;
     const BITS_LR: u32 = 21;
 
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             hash3: Vec::new(),
             prev3: Vec::new(),
@@ -127,7 +127,7 @@ impl Chains {
 
     /// Grow (and clear) the tables for a buffer of `len` bytes and a window of
     /// `window`. Cheap when the shape already matches: two comparisons.
-    fn prepare(&mut self, len: usize, window: usize) {
+    pub(super) fn prepare(&mut self, len: usize, window: usize) {
         if self.capacity >= len && self.window == window.max(1) && !self.prev_lr.is_empty() {
             return;
         }
@@ -139,6 +139,15 @@ impl Chains {
         self.prev3 = vec![Self::NO_POS; len];
         self.prev4 = vec![Self::NO_POS; len];
         self.prev_lr = vec![Self::NO_POS; len];
+    }
+
+    /// `RAR_RS_CHAIN_FIRST=1` stops the walk at the first candidate that beats
+    /// the best length so far. The chain is ordered nearest-first, so that
+    /// candidate is the nearest one of its length -- exactly what the
+    /// original's `FUN_1400468d4` returns before the next position is priced.
+    fn first_improvement() -> bool {
+        static FIRST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FIRST.get_or_init(|| std::env::var_os("RAR_RS_CHAIN_FIRST").is_some_and(|v| v != "0"))
     }
 
     fn span() -> u32 {
@@ -174,7 +183,7 @@ impl Chains {
     }
 
     #[inline]
-    fn insert(&mut self, data: &[u8], pos: usize) {
+    pub(super) fn insert(&mut self, data: &[u8], pos: usize) {
         let k3 = Self::key(Self::word3(data, pos), Self::BITS3);
         self.prev3[pos] = self.hash3[k3];
         self.hash3[k3] = pos as u32;
@@ -187,13 +196,24 @@ impl Chains {
         self.hash_lr[kl] = pos as u32;
     }
 
+    /// Link every position up to and including `pos`, so a parse that steps
+    /// over match bytes still leaves an unbroken chain behind it.
+    pub(super) fn link_through(&mut self, data: &[u8], pos: usize) {
+        let last = data.len().saturating_sub(4);
+        while self.inserted_through <= pos && self.inserted_through < last {
+            let at = self.inserted_through;
+            self.insert(data, at);
+            self.inserted_through = at + 1;
+        }
+    }
+
     /// Candidates at `pos`, ascending in length: the two nearest short-chain
     /// entries, then the five-byte chain walked at most `depth` links.
     ///
     /// The walk stops when the chain runs out, leaves the window, or reaches a
     /// distance no farther than the best one already accepted (the chain is
     /// ordered by distance, so every later link is worse).
-    fn probe(
+    pub(super) fn probe(
         &self,
         data: &[u8],
         pos: usize,
@@ -250,10 +270,11 @@ impl Chains {
             }
             let length = match_length_at(data, pos, distance, max_length);
             if length > best_length {
+                let improved = Self::first_improvement();
                 best_length = length;
                 best_distance = distance;
                 out.push((length as u32, distance as u32));
-                if length == max_length {
+                if length == max_length || improved {
                     break;
                 }
             }

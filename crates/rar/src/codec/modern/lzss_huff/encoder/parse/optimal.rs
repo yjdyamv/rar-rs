@@ -1120,6 +1120,11 @@ pub(super) struct ParseBuffers {
     /// costs a 4.5 MB memset every 64 KiB of input, which is most of the
     /// time the fused path spent in the archive benchmark.
     tables: ShortTables,
+    /// The official's 3/4/5-byte chains, alive for the whole parse so history
+    /// survives the block boundaries (and the positions a match steps over).
+    /// `RAR_RS_FUSED_CHAIN=<depth>` runs the fused loop on these instead of
+    /// the tree.
+    chains: Option<Box<super::collect::Chains>>,
 }
 
 impl Default for ParseBuffers {
@@ -1131,6 +1136,7 @@ impl Default for ParseBuffers {
             },
             arrays: DpArrays::default(),
             tables: ShortTables::default(),
+            chains: None,
         }
     }
 }
@@ -1696,6 +1702,7 @@ fn parse_one_block(
         matches,
         arrays,
         tables,
+        chains,
     } = buffers;
     // The fused path never uses the block's candidate list: it searches one
     // position at a time and jumps over the bytes a match covers.
@@ -1704,6 +1711,7 @@ fn parse_one_block(
         let tokens = interleaved_tokens(
             finder,
             tables,
+            chains,
             combined,
             &block,
             state,
@@ -1891,6 +1899,7 @@ fn interleave_config() -> bool {
 fn interleaved_tokens(
     finder: &mut match_finder::TreeMatchFinder,
     tables: &mut ShortTables,
+    chains: &mut Option<Box<super::collect::Chains>>,
     combined: &[u8],
     block: &std::ops::Range<usize>,
     state: &EncoderMatchState,
@@ -1929,6 +1938,21 @@ fn interleaved_tokens(
     // the gates in `FUN_140044794`). Its 5-byte chain is what reaches the far
     // distances, so a match of five or more bytes needs no gate.
     let length_gate = std::env::var_os("RAR_RS_LENGATE").is_some();
+    // `RAR_RS_FUSED_CHAIN=<depth>`: take the long candidates from the
+    // official's 5-byte hash chains instead of the BT4 tree. The chain walk is
+    // bounded and exits as soon as the distance passes the best accepted one,
+    // which is the whole difference between the tree's per-position descent and
+    // the original's `FUN_1400468d4`.
+    let fused_chain = std::env::var("RAR_RS_FUSED_CHAIN")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if fused_chain > 0 && chains.is_none() {
+        *chains = Some(Box::new(super::collect::Chains::new()));
+    }
+    if let Some(chain) = chains.as_mut() {
+        chain.prepare(combined.len(), window);
+    }
     let fused_cut = std::env::var("RAR_RS_FUSED_CUT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -1978,7 +2002,24 @@ fn interleaved_tokens(
                     }
                 }
             }
-            if use_tree && len_limit >= 4 {
+            let mut chain_took = false;
+            if let Some(chain) = chains.as_mut()
+                && max_distance > 0
+                && len_limit >= 4
+            {
+                // Link the positions the loop stepped over (a match's span) so
+                // the history has no holes, then walk the 5-byte chain.
+                super::super::profile::count(super::super::profile::SEARCH, 1);
+                chain.link_through(combined, pos);
+                chain.probe(combined, pos, max_distance, len_limit, fused_chain, &mut scratch);
+                for &(length, distance) in scratch.iter() {
+                    if length >= 4 {
+                        cands.push((length, distance));
+                    }
+                }
+                chain_took = true;
+            }
+            if use_tree && !chain_took && len_limit >= 4 {
                 // Prefetch the bucket we will descend in sixteen positions, as the
                 // serial collector does: the fused loop keeps the short tables and
                 // the emitted tokens in flight, which evicts the head table.
