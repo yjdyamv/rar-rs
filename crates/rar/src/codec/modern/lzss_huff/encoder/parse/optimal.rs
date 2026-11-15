@@ -1898,13 +1898,20 @@ fn interleaved_tokens(
     let mut tokens: Vec<(u32, u32)> = Vec::with_capacity(block.end - block.start);
     let mut scratch: Vec<(u32, u32)> = Vec::with_capacity(16);
     let mut pos = block.start;
+    // Ablation switches, hoisted: reading the environment per position costs
+    // more than what it is supposed to measure.
+    let use_rep = std::env::var_os("RAR_RS_NOREP").is_none();
+    let use_tables = std::env::var_os("RAR_RS_NOTABLES").is_none();
     // The previous position's match, deferred one step: the official calls this
     // `+0x300dc` / `+0x300d0`.
     let mut pending: Option<(u32, u32)> = None;
     while pos < block.end {
+        super::super::profile::count(super::super::profile::POS, 1);
         // Fill the three tables for every position passed over, skipped ones
         // included: the official precomputes them for the whole window.
-        tables.fill_to(combined, pos);
+        if use_tables {
+            tables.fill_to(combined, pos);
+        }
         let max_distance = pos.min(window);
         let available = (block.end - pos).min(max_match);
         let mut best = (0u32, 0u32);
@@ -1916,7 +1923,8 @@ fn interleaved_tokens(
             // inside 0x40000, each demanding to be much closer than whatever is
             // already held (`dist < best_dist << 7` / `<< 6` in the original).
             let two = u16::from_le_bytes([combined[pos], combined[pos + 1]]) as usize;
-            if len_limit >= 2
+            if use_tables
+                && len_limit >= 2
                 && let slot = tables.prev2[two]
                 && slot != 0
                 && (slot as usize) < pos
@@ -1929,7 +1937,7 @@ fn interleaved_tokens(
                     }
                 }
             }
-            if len_limit >= 3 && pos + 4 <= combined.len() {
+            if use_tables && len_limit >= 3 && pos + 4 <= combined.len() {
                 let key = u32::from_le_bytes([
                     combined[pos],
                     combined[pos + 1],
@@ -1953,26 +1961,10 @@ fn interleaved_tokens(
                         }
                     }
                 }
-                let hash4 = (key.wrapping_mul(0x9E37_79B1) >> 12) as usize & 0xfffff;
-                if let slot = tables.prev4[hash4]
-                    && slot != 0
-                    && (slot as usize) < pos
-                {
-                    let distance = pos - slot as usize;
-                    if distance <= 0x40000
-                        && distance <= max_distance
-                        && (best.0 < 3 || (distance as u64) < (best.1 as u64) << 6)
-                    {
-                        let length =
-                            match_length_at(combined, pos, distance, len_limit.min(16)) as u32;
-                        if length >= 4 {
-                            cands.push((length, distance as u32));
-                        }
-                    }
-                }
             }
             if len_limit >= 4 {
                 scratch.clear();
+                super::super::profile::count(super::super::profile::SEARCH, 1);
                 let cut = if len_limit >= NICE_MATCH_LENGTH {
                     chain_len
                 } else {
@@ -2025,8 +2017,11 @@ fn interleaved_tokens(
         // longer (`len * 4 >= best_len * 3`). When it is one to three bytes
         // shorter, the byte it gives up is only worth it if the alternative's
         // distance is past the matching distance class (255/2047/32767).
-        if best.0 >= 2 && available >= 2 {
-            let len_limit = available.min(combined.len() - pos);
+        if best.0 >= 2 && available >= 2 && use_rep {
+            // Only the first `best + 4` bytes can change the verdict below, so
+            // the scan stops there: a rep match is often thousands of bytes long
+            // and comparing all of it costs more than the whole decision.
+            let len_limit = available.min(combined.len() - pos).min(best.0 as usize + 4);
             let mut rep_len = 0u32;
             let mut rep_dist = 0u32;
             for &distance in reps.iter().take(4) {
@@ -2445,7 +2440,6 @@ fn price_of(distance: u32) -> i64 {
 pub(super) struct ShortTables {
     prev2: Vec<u32>,
     prev3: Vec<u32>,
-    prev4: Vec<u32>,
     filled: usize,
 }
 
@@ -2454,7 +2448,6 @@ impl ShortTables {
         if self.prev2.is_empty() {
             self.prev2 = vec![0; 1 << 16];
             self.prev3 = vec![0; 1 << 16];
-            self.prev4 = vec![0; 1 << 20];
         }
         if self.filled > upto {
             self.filled = upto;
@@ -2471,7 +2464,7 @@ impl ShortTables {
             let hashed = key.wrapping_mul(0x9E37_79B1);
             self.prev2[two] = at as u32;
             self.prev3[(hashed >> 16) as usize & 0xffff] = at as u32;
-            self.prev4[(hashed >> 12) as usize & 0xfffff] = at as u32;
+
             self.filled += 1;
         }
     }
