@@ -240,7 +240,11 @@ impl Chains {
                 out.push((length as u32, distance as u32));
             }
         }
-        let mut best_length = out.iter().map(|&(length, _)| length as usize).max().unwrap_or(0);
+        let mut best_length = out
+            .iter()
+            .map(|&(length, _)| length as usize)
+            .max()
+            .unwrap_or(0);
         let mut best_distance = out
             .iter()
             .filter(|&&(length, _)| length as usize == best_length)

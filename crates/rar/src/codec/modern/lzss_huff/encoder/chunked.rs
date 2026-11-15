@@ -313,7 +313,8 @@ fn encode_chunked_raw_inner(
         let emit_started = std::time::Instant::now();
         let mut block_start = 0usize;
         while block_start < symbols.len() {
-            let (block_end, _) = find_block_end_adaptive(&symbols, block_start, emitted_block_cap());
+            let (block_end, _) =
+                find_block_end_adaptive(&symbols, block_start, emitted_block_cap());
             let is_last = is_final && chunk_end >= data.len() && block_end >= symbols.len();
             let block_data = encode_block(&symbols[block_start..block_end], is_last, variant);
             output.extend(block_data);

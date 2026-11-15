@@ -238,7 +238,8 @@ pub fn encode_with_filters_into(
         let emit_started = std::time::Instant::now();
         let mut block_start = 0usize;
         while block_start < symbols.len() {
-            let (block_end, _) = find_block_end_adaptive(&symbols, block_start, emitted_block_cap());
+            let (block_end, _) =
+                find_block_end_adaptive(&symbols, block_start, emitted_block_cap());
             let is_last = is_final && block_end >= symbols.len();
             let block_data = encode_block(&symbols[block_start..block_end], is_last, variant);
             output.extend(block_data);
@@ -907,8 +908,12 @@ fn block_stats(
             .filter(|(ch, _)| *ch == channels)
             .map(|(_, near_zero)| near_zero)
             .unwrap_or(0);
-        let delta_stream =
-            apply_filter_encode(FILTER_DELTA, &mut block.to_vec(), channels, u64::from(start));
+        let delta_stream = apply_filter_encode(
+            FILTER_DELTA,
+            &mut block.to_vec(),
+            channels,
+            u64::from(start),
+        );
         if want_h1 {
             stats.h1_raw = order1_entropy_bits(block);
             stats.h1_delta = order1_entropy_bits(&delta_stream);
@@ -938,12 +943,7 @@ fn block_stats(
         if opcode == 0xE8 || opcode == 0xE9 {
             // Same 16 MiB displacement window `e8_encode` uses.
             let offset = start.wrapping_add(i as u32 + 1) % 0x0100_0000;
-            let addr = u32::from_le_bytes([
-                block[i + 1],
-                block[i + 2],
-                block[i + 3],
-                block[i + 4],
-            ]);
+            let addr = u32::from_le_bytes([block[i + 1], block[i + 2], block[i + 3], block[i + 4]]);
             let plausible = addr.wrapping_add(offset) < 0x0100_0000;
             if opcode == 0xE8 {
                 stats.e8_total += 1;
@@ -1115,7 +1115,11 @@ pub fn best_combined_specs(
 ) -> Vec<FilterSpec> {
     let env_flag = |name: &str| std::env::var_os(name).is_some();
     // A zero trial method means "same as the real encode".
-    let trial_method = if trial_method == 0 { method } else { trial_method };
+    let trial_method = if trial_method == 0 {
+        method
+    } else {
+        trial_method
+    };
     // The trial window is one 64 KiB block, so a dictionary larger than that
     // cannot change its decision — but it does size the encoder's tables, and
     // allocating them per trial dominated the cost of the first version.
@@ -1188,7 +1192,15 @@ pub fn best_combined_specs(
         let stats = if let Some(all) = &all_stats {
             Some(all[index])
         } else {
-            csv.then(|| block_stats(chunk, start, true, &[block_x86.unwrap_or(FILTER_E8E9)], forced_delta))
+            csv.then(|| {
+                block_stats(
+                    chunk,
+                    start,
+                    true,
+                    &[block_x86.unwrap_or(FILTER_E8E9)],
+                    forced_delta,
+                )
+            })
         };
         if heur {
             let stats = stats.expect("heur implies stats");
@@ -1656,7 +1668,10 @@ mod tests {
             assert_eq!(spec.block_start, cursor, "records must tile the member");
             assert!(spec.block_length > 0);
             assert!(spec.block_length <= FORCED_FILTER_BLOCK as u32);
-            assert!(matches!(spec.filter_type, FILTER_DELTA | FILTER_E8 | FILTER_E8E9));
+            assert!(matches!(
+                spec.filter_type,
+                FILTER_DELTA | FILTER_E8 | FILTER_E8E9
+            ));
             cursor += spec.block_length;
         }
         assert_eq!(cursor as usize, data.len());
@@ -1686,8 +1701,8 @@ mod tests {
         assert_eq!((spec.filter_type, spec.channels), (FILTER_DELTA, 4));
         // x86 with the bigger cover wins over the delta candidate.
         stats.cover_x86[FILTER_E8E9 as usize] = raw * 160 / 100;
-        let spec = heuristic_spec(&stats, 65_536, 0, Some(FILTER_E8E9), None)
-            .expect("x86 beats plain");
+        let spec =
+            heuristic_spec(&stats, 65_536, 0, Some(FILTER_E8E9), None).expect("x86 beats plain");
         assert_eq!((spec.filter_type, spec.channels), (FILTER_E8E9, 0));
         // A forced channel override wins over the measured one.
         let mut forced = BlockStats {

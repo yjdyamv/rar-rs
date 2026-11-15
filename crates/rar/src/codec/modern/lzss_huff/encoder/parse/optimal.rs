@@ -5,8 +5,8 @@
 //! grouping lives in [`super::block`], the candidate collection in
 //! [`super::collect`].
 
-use super::super::*;
 use super::super::max_block_size;
+use super::super::*;
 
 #[cfg(feature = "parallel")]
 use std::sync::atomic::AtomicBool;
@@ -2011,7 +2011,14 @@ fn interleaved_tokens(
                 // the history has no holes, then walk the 5-byte chain.
                 super::super::profile::count(super::super::profile::SEARCH, 1);
                 chain.link_through(combined, pos);
-                chain.probe(combined, pos, max_distance, len_limit, fused_chain, &mut scratch);
+                chain.probe(
+                    combined,
+                    pos,
+                    max_distance,
+                    len_limit,
+                    fused_chain,
+                    &mut scratch,
+                );
                 for &(length, distance) in scratch.iter() {
                     if length >= 4 {
                         cands.push((length, distance));
