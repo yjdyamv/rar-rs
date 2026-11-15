@@ -828,6 +828,20 @@ fn order1_entropy_bits(bytes: &[u8]) -> f32 {
     (weighted / total) as f32
 }
 
+/// Number of leading block bytes the coverage measure looks at
+/// (`RAR_RS_HEUR_SAMPLE`, clamped to the block).
+fn heur_sample_len(len: usize) -> usize {
+    static SAMPLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let sample = *SAMPLE.get_or_init(|| {
+        std::env::var("RAR_RS_HEUR_SAMPLE")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 1024)
+            .unwrap_or(usize::MAX)
+    });
+    sample.min(len)
+}
+
 /// Per-block measurements for the trial-free picker.
 ///
 /// Every stream is measured in one pass over the block: the delta channel
@@ -884,11 +898,18 @@ fn block_stats(
             stats.h1_raw = order1_entropy_bits(block);
             stats.h1_delta = order1_entropy_bits(&delta_stream);
         }
-        stats.cover_raw = match_cover(block);
-        stats.cover_delta = match_cover(&delta_stream);
+        // Coverage is measured on a prefix of the block by default: the
+        // measure only ranks candidates, and the head of a 64 KiB block
+        // already carries its structure (the full-block sweep costs about
+        // four times the scan and moved no decision on the corpora
+        // measured). `RAR_RS_HEUR_SAMPLE` sets the prefix size.
+        let sample = heur_sample_len(block.len());
+        let head = &block[..sample];
+        stats.cover_raw = match_cover(head);
+        stats.cover_delta = match_cover(&delta_stream[..sample.min(delta_stream.len())]);
         for &ty in x86_types {
             let stream = apply_filter_encode(ty, &mut block.to_vec(), 0, u64::from(start));
-            stats.cover_x86[ty as usize] = match_cover(&stream);
+            stats.cover_x86[ty as usize] = match_cover(&stream[..sample.min(stream.len())]);
             if want_h1 {
                 stats.h1_x86 = order1_entropy_bits(&stream);
             }
