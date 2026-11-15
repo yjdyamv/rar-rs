@@ -96,6 +96,17 @@ pub(crate) fn count(slot: usize, n: u64) {
     }
 }
 
+/// Event counts so far, for tests that attribute time to work rather
+/// than guessing.
+#[cfg(test)]
+pub(crate) fn snapshot() -> [u64; 6] {
+    let mut out = [0u64; 6];
+    for (index, slot) in COUNTS.iter().enumerate() {
+        out[index] = slot.load(Ordering::Relaxed);
+    }
+    out
+}
+
 /// Add one phase measurement. Cheap enough to call per block.
 #[inline]
 pub(super) fn add(phase: usize, since: Instant) {

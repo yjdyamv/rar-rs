@@ -829,6 +829,20 @@ pub(crate) struct MatchQuery<'a> {
 /// optimal parse, which searches at every position anyway. The price is
 /// that inserting *is* a descent, so history cannot be seeded cheaply, and
 /// the tree costs eight bytes per byte of window against the chain's four.
+/// How long a candidate may be before the descent stops looking, from
+/// `RAR_RS_STOP` (WinRAR's rule is "longer than eleven bytes"; `0` or absent
+/// disables it). Cached on first use, like the other knobs.
+fn stop_from_env() -> usize {
+    static STOP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *STOP.get_or_init(|| {
+        std::env::var("RAR_RS_STOP")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .filter(|stop: &usize| *stop >= 4)
+            .unwrap_or(usize::MAX)
+    })
+}
+
 pub struct TreeMatchFinder {
     head: Vec<u32>,
     /// Two links per window slot: the child whose bytes compare lesser
@@ -841,6 +855,11 @@ pub struct TreeMatchFinder {
     /// each, while a table larger than the window working set costs a cache
     /// miss on the same load.
     head_shift: u32,
+    /// Stop the descent once a candidate is at least this long, sealing
+    /// the attachment points exactly as a spent budget does. WinRAR ends its
+    /// walk on a match longer than eleven bytes; this knob tests what that
+    /// rule buys and costs here.
+    stop: usize,
 }
 
 impl TreeMatchFinder {
@@ -870,6 +889,7 @@ impl TreeMatchFinder {
             son: vec![0; window * 2],
             mask: window - 1,
             head_shift: 32 - bits,
+            stop: stop_from_env(),
         }
     }
 
@@ -1289,6 +1309,15 @@ impl TreeMatchFinder {
                     self.son[ptr1] = NO_LINK;
                     return;
                 }
+                if longest >= self.stop {
+                    // A candidate this long is good enough: whatever the rest
+                    // of the walk would find is at most a few bytes longer,
+                    // and the parse has cheaper ways to spend a byte. Seal the
+                    // attachment points so the tree stays ordered.
+                    self.son[ptr0] = NO_LINK;
+                    self.son[ptr1] = NO_LINK;
+                    return;
+                }
             }
             if input[current + len] < input[pos + len] {
                 self.son[ptr1] = current as u32;
@@ -1308,6 +1337,59 @@ impl TreeMatchFinder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Micro-benchmark: walks every position of a real file with a few step
+    /// budgets, so the cost of a step (the slope) separates from the cost of
+    /// a position (the intercept). The collector's time is the sum of those
+    /// two, and which one dominates decides what to optimise.
+    ///
+    /// ```text
+    /// WALKBENCH_FILE=/path/to/file RAR_RS_PROFILE=1 \
+    ///   cargo test --release -p rar-rs --features parallel --lib walk_cost \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "micro-benchmark: needs WALKBENCH_FILE and a release build"]
+    fn walk_cost_breakdown() {
+        let Ok(path) = std::env::var("WALKBENCH_FILE") else {
+            return;
+        };
+        let data = std::fs::read(&path).expect("read WALKBENCH_FILE");
+        let window = 32 * 1024 * 1024usize;
+        let limit = 64usize;
+        let positions = data.len().saturating_sub(limit + 1);
+        println!("walkbench {path} {} B, {positions} positions", data.len());
+        for cut in [4usize, 16, 48, 96, 192] {
+            let mut finder = TreeMatchFinder::new(window);
+            let mut out: Vec<(u32, u32)> = Vec::new();
+            let before = crate::codec::lzss_huff::profile::snapshot();
+            let started = std::time::Instant::now();
+            let mut pos = 0usize;
+            while pos + limit < data.len() {
+                finder.matches(MatchQuery {
+                    input: &data,
+                    pos,
+                    len_limit: limit,
+                    max_distance: pos.min(window),
+                    cut,
+                    out: &mut out,
+                });
+                out.clear();
+                pos += 1;
+            }
+            let elapsed = started.elapsed().as_secs_f64();
+            let after = crate::codec::lzss_huff::profile::snapshot();
+            let steps = (after[crate::codec::lzss_huff::profile::STEPS]
+                - before[crate::codec::lzss_huff::profile::STEPS]) as f64;
+            println!(
+                "cut {cut:4}: {:8.1} ms  {:6.1} ns/pos  steps/pos {:5.2}  {:5.1} ns/step",
+                elapsed * 1e3,
+                elapsed * 1e9 / positions as f64,
+                steps / positions as f64,
+                elapsed * 1e9 / steps.max(1.0),
+            );
+        }
+    }
 
     fn random_bytes(seed: u64, n: usize) -> Vec<u8> {
         let mut state = seed

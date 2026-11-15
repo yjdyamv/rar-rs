@@ -1777,6 +1777,22 @@ fn parse_one_block(
         }
     }
 
+    if lazy_config() {
+        let parse_started = Instant::now();
+        let tokens = lazy_tokens(combined, &block, matches, state, limits);
+        crate::codec::modern::lzss_huff::encoder::profile::add(
+            crate::codec::modern::lzss_huff::encoder::profile::PARSE_DP,
+            parse_started,
+        );
+        let convert_started = Instant::now();
+        let (symbols, _) = convert_tokens(&tokens, combined, block, state, variant);
+        crate::codec::modern::lzss_huff::encoder::profile::add(
+            crate::codec::modern::lzss_huff::encoder::profile::PARSE_CONVERT,
+            convert_started,
+        );
+        return symbols;
+    }
+
     let initial = *state;
     let parse_started = Instant::now();
     let tokens = optimal_parse_tokens(
@@ -1799,6 +1815,170 @@ fn parse_one_block(
         convert_started,
     );
     symbols
+}
+/// Whether the block parser runs the official's one-step lazy walk instead of
+/// the price-driven DP (`RAR_RS_LAZY`).
+fn lazy_config() -> bool {
+    static LAZY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LAZY.get_or_init(|| {
+        std::env::var("RAR_RS_LAZY")
+            .map(|value| {
+                let value = value.trim();
+                !(value.is_empty() || value == "0")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// One-step lazy walk over the block's candidates, shaped after WinRAR's
+/// `FUN_1400478e0` + `FUN_140047698`: the longest candidate wins, a cached
+/// distance only takes over when it is nearly as long, and the tolerances sit
+/// on the distance-code boundaries (255, 2047, 32767) so a one/two/three-byte
+/// shorter match is rejected only when the current best is far enough to cost
+/// more than it saves.
+///
+/// This exists as a measurement of the official's parse, not as a candidate
+/// default: the DP buys 3.5 pp of ratio for ~0.8 s, and the lazy walk needs a
+/// candidate set ordered by distance class to be worth revisiting (ADR 0011).
+fn lazy_tokens(
+    combined: &[u8],
+    block: &std::ops::Range<usize>,
+    matches: &BlockMatches,
+    state: &EncoderMatchState,
+    limits: super::MatchLimits,
+) -> Vec<(u32, u32)> {
+    let window = limits.window;
+    let max_match = limits.max_match;
+    let mut reps = state.reps;
+    let mut last_length = state.last_length;
+    let mut tokens: Vec<(u32, u32)> = Vec::with_capacity(block.end - block.start);
+    let mut pos = block.start;
+    while pos < block.end {
+        let max_distance = pos.min(window);
+        let max_length = (block.end - pos).min(max_match);
+        let mut best = (0u32, 0u32);
+        if max_distance > 0 && max_length >= 4 {
+            for &(length, distance) in matches.at(pos - block.start) {
+                // A fresh distance must still be long enough to pay for its
+                // distance code, which is what `convert_tokens` demands.
+                let encodable =
+                    reps.contains(&distance) || length >= length_bonus(distance).saturating_add(2);
+                if encodable && length > best.0 {
+                    best = (length, distance);
+                }
+            }
+            let mut pick = (1u32, 0u32);
+            for &repeat in reps.iter() {
+                let repeat_len = repeat as usize;
+                if repeat_len == 0 || repeat_len > max_distance || repeat == best.1 {
+                    continue;
+                }
+                let length = match_length_at(combined, pos, repeat_len, max_length) as u32;
+                let near_enough = best.0.saturating_sub(3) <= length || best.0 * 3 <= length * 4;
+                let cheaper = (length + 1 != best.0 || best.1 > 0xff)
+                    && (length + 2 != best.0 || best.1 > 0x7ff)
+                    && (length + 3 != best.0 || best.1 > 0x7fff);
+                if near_enough && cheaper && length > pick.0 {
+                    pick = (length, repeat);
+                }
+            }
+            if pick.0 > 1 {
+                best = pick;
+            }
+        }
+        if best.0 >= 2 {
+            tokens.push(best);
+            // Mirror the cache update `convert_tokens` applies, so the rule
+            // above sees the cache the emission will.
+            if !(best.1 == reps[0] && best.0 == last_length) {
+                if let Some(index) = reps.iter().position(|&d| d == best.1) {
+                    reps[..=index].rotate_right(1);
+                } else {
+                    reps.rotate_right(1);
+                }
+                reps[0] = best.1;
+                last_length = best.0;
+            }
+            pos += best.0 as usize;
+        } else {
+            tokens.push((0, combined[pos] as u32));
+            pos += 1;
+        }
+    }
+    tokens
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod lazy_tests {
+    use super::*;
+
+    fn limits(window: usize) -> super::super::MatchLimits {
+        super::super::MatchLimits {
+            max_match: 0x1001,
+            window,
+            variant: ArchiveVersion::V50,
+        }
+    }
+
+    /// A block with no candidates is all literals, one per position.
+    #[test]
+    fn without_candidates_every_position_is_a_literal() {
+        let data = b"abcdefghij";
+        let matches = BlockMatches {
+            runs: Vec::new(),
+            starts: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let state = EncoderMatchState::new([0; DIST_CACHE_SIZE], 0);
+        let tokens = lazy_tokens(data, &(0..10), &matches, &state, limits(1 << 16));
+        assert_eq!(tokens.len(), 10);
+        assert!(tokens.iter().all(|&(length, _)| length == 0));
+    }
+
+    /// A candidate is emitted whole and the walk skips the bytes it covers —
+    /// which is where the official encoder's per-position cost goes.
+    #[test]
+    fn a_candidate_is_emitted_and_its_bytes_are_skipped() {
+        // `abcabcabc` at 0 triggers nothing; position 6 matches distance 3.
+        let data = b"abcabcabcXYZ";
+        let matches = BlockMatches {
+            runs: vec![(3, 3)],
+            starts: vec![0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+        };
+        let state = EncoderMatchState::new([0; DIST_CACHE_SIZE], 0);
+        let tokens = lazy_tokens(data, &(0..12), &matches, &state, limits(1 << 16));
+        assert_eq!(tokens[6], (3, 3), "the candidate at 6 owns the match");
+        assert_eq!(tokens.len(), 6 + 1 + 3, "three match bytes, three literals");
+        assert!(tokens[..6].iter().all(|&(length, _)| length == 0));
+        assert!(tokens[7..].iter().all(|&(length, _)| length == 0));
+    }
+
+    /// `FUN_140047698`'s core rule: a cached distance that is nearly as long
+    /// wins, and the tolerance is the distance-code boundary, not length.
+    #[test]
+    fn a_cached_nearer_distance_beats_a_slightly_longer_one() {
+        // A run of 8 bytes at distance 40 and one of 9 at distance 400: the
+        // near one is not cheaper (40 and 400 share a slot), so the longer
+        // match must stay. With a distance past 0x7ff the near one wins.
+        let data = vec![b'q'; 1024];
+        let data = {
+            let mut data = data;
+            for (index, byte) in data.iter_mut().enumerate() {
+                *byte = b"abcdefgh"[index % 8];
+            }
+            data
+        };
+        let block = 1000..1008;
+        let mut matches = BlockMatches {
+            runs: Vec::new(),
+            starts: vec![0; 9],
+        };
+        matches.runs.push((8, 8));
+        let mut state = EncoderMatchState::new([8; DIST_CACHE_SIZE], 0);
+        state.reps[0] = 8;
+        let tokens = lazy_tokens(&data, &block, &matches, &state, limits(1 << 16));
+        assert_eq!(tokens[0], (8, 8), "the cached distance ties and wins");
+    }
 }
 
 #[cfg(test)]
