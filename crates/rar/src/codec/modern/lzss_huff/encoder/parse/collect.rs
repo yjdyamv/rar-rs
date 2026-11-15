@@ -275,6 +275,20 @@ fn commit_threshold() -> usize {
     })
 }
 
+/// Length at which the DP stops pricing positions inside a match it has
+/// already accepted and jumps to the match's end. `NICE_MATCH_LENGTH` by
+/// default; `RAR_RS_DP_SKIP` moves it (the sequential collector has its own
+/// `RAR_RS_COMMIT` gate for the search side).
+pub(crate) fn dp_skip_threshold() -> usize {
+    static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("RAR_RS_DP_SKIP")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(NICE_MATCH_LENGTH)
+    })
+}
+
 /// Step cap for one descent under the stall tier.
 ///
 /// Splitting the decision out keeps the environment plumbing away from the

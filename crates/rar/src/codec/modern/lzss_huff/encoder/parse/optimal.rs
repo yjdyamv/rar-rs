@@ -148,7 +148,18 @@ where
     let mut symbols = Vec::with_capacity(end - start);
     let mut state = EncoderMatchState::new(*dist_cache, *last_length);
     let probe_cache = *dist_cache;
-    let block_size = super::super::chunked::MT_ROW_INDEX_DP_BLOCK;
+    // The DP tables cost ~32 bytes per block byte per worker, so the block
+    // size is a cache decision as much as a lookahead one: 256 KiB keeps
+    // 8 MiB of tables hot per worker. `RAR_RS_MT_DP_BLOCK` moves it, and the
+    // trade is workload-dependent: on ntoskrnl 96 KiB emits 4.8 KiB less
+    // (5,879,871 vs 5,884,680, same speed, the price carry refreshes more
+    // often), on a 5.7 MiB markdown corpus it emits 196 bytes more, so the
+    // default stays at the larger block.
+    let block_size = std::env::var("RAR_RS_MT_DP_BLOCK")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| (16 * 1024..=4 * 1024 * 1024).contains(&value))
+        .unwrap_or(super::super::chunked::MT_ROW_INDEX_DP_BLOCK);
     // The previous block's code-length table, carried into this block's first
     // pass. A worker's blocks run in order inside one slice, so the table it
     // hands forward is the one the parse would have rebuilt itself: pricing
@@ -1297,7 +1308,7 @@ fn optimal_parse_tokens(
         // unreachable and emitted as literals.
         let longest_reach = reaches.iter().map(|&(_, length, _)| length).max();
         if let Some(reach) = longest_reach
-            && reach >= NICE_MATCH_LENGTH as u32
+            && reach >= super::collect::dp_skip_threshold() as u32
             && price[index + reach as usize] != u32::MAX
         {
             committed_through = index + reach as usize;
