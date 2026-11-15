@@ -32,7 +32,8 @@ pub(crate) fn update_volume_set_transactionally_with<T>(
     archive: &Path,
     operation: impl FnOnce(&Path) -> CliResult<T>,
 ) -> CliResult<T> {
-    let mut staged = rar_rs::StagedVolumeSet::create(archive).map_err(CliError::from)?;
+    let mut staged = rar_rs::StagedVolumeSet::create(archive, rar_rs::rev_name_belongs_to_set)
+        .map_err(CliError::from)?;
     let value = operation(staged.path())?;
     staged.commit().map_err(CliError::from)?;
     Ok(value)

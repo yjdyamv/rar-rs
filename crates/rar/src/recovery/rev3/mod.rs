@@ -37,7 +37,10 @@ mod repair;
 mod trailer;
 
 pub(crate) use build::build_recovery_volumes_for_set;
-pub(crate) use name::{canonical_recovery_names, is_legacy_rev_set, rev_name_belongs_to_set};
+pub(crate) use name::{canonical_recovery_names, is_legacy_rev_set};
+// Public (re-exported at the crate root) because the staging seam takes the
+// verdict as an injected predicate; see the function's own docs.
+pub use name::rev_name_belongs_to_set;
 pub(crate) use repair::rebuild_missing_volumes;
 
 use crate::error::RarError;

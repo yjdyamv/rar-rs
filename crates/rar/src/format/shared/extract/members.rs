@@ -61,7 +61,7 @@ fn live_workers_for(packed_total: u64, sizes: &[u64], workers: usize, budget: u6
 }
 /// Per-member verify outcome keyed by catalog index.
 #[cfg(feature = "parallel")]
-type VerifyBatch = Vec<(usize, RarResult<()>)>;
+pub(crate) type VerifyBatch = Vec<(usize, RarResult<()>)>;
 
 /// Where a parallel worker gets a member's payload from.
 #[cfg(feature = "parallel")]

@@ -75,7 +75,7 @@ impl Drop for StagedFile {
 /// (and its `.rev` parity volumes) is copied into a hidden directory next to
 /// the originals, operations run against [`Self::path`] (the staged first
 /// volume), and [`Self::commit`] installs the resulting volumes as one
-/// journaled [`commit_files`] transaction, retiring the old volumes and any
+/// journaled `commit_files` transaction, retiring the old volumes and any
 /// stale parity files. A whole-set rewrite (RAR4 append/delete) is therefore
 /// all-or-nothing even though it touches several files.
 pub struct StagedVolumeSet {
@@ -83,12 +83,24 @@ pub struct StagedVolumeSet {
     first: PathBuf,
     parent: PathBuf,
     base: String,
+    /// The injected legacy `.rev` verdict; see [`Self::create`].
+    legacy_rev_owned: fn(&Path, &str, &str) -> bool,
 }
 
 impl StagedVolumeSet {
     /// Copy the volume set containing `dest` into a hidden staging directory
     /// next to it and return the staged first volume from [`Self::path`].
-    pub fn create(dest: &Path) -> RarResult<Self> {
+    ///
+    /// `legacy_rev_owned` answers "does this `.rev` name belong to the set
+    /// based at `base`?" for the RAR 1.5–4.x naming family. It is injected
+    /// for the same reason
+    /// `crate::fs::volume::stale_volume_paths` takes one: the answer needs that family's `.rev` name grammar *and* the
+    /// data-volume existence scoring that resolves ambiguous names
+    /// (`set44_2_1.rev` reads as `set` + data 44 or `set4` + data 4) —
+    /// knowledge owned by `recovery::rev3`, which this leaf module must not
+    /// reach into. Callers pass
+    /// [`rev_name_belongs_to_set`](crate::rev_name_belongs_to_set).
+    pub fn create(dest: &Path, legacy_rev_owned: fn(&Path, &str, &str) -> bool) -> RarResult<Self> {
         let volumes = crate::discover_volumes(dest);
         if volumes.is_empty() {
             return Err(RarError::format(format!(
@@ -122,7 +134,7 @@ impl StagedVolumeSet {
                 &base,
                 true,
                 &volumes,
-                &crate::recovery::rev3::rev_name_belongs_to_set,
+                &legacy_rev_owned,
             ) {
                 let is_rev = rev
                     .extension()
@@ -141,6 +153,7 @@ impl StagedVolumeSet {
             dir,
             parent,
             base,
+            legacy_rev_owned,
         })
     }
 
@@ -181,13 +194,7 @@ impl StagedVolumeSet {
                 let is_rev = path
                     .extension()
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("rev"));
-                if is_rev
-                    && crate::recovery::rev3::rev_name_belongs_to_set(
-                        &self.parent,
-                        &self.base,
-                        name,
-                    )
-                {
+                if is_rev && (self.legacy_rev_owned)(&self.parent, &self.base, name) {
                     let dest = self.parent.join(name);
                     keep.push(dest.clone());
                     install.push((path, dest));
@@ -199,7 +206,7 @@ impl StagedVolumeSet {
             &self.base,
             true,
             &keep,
-            &crate::recovery::rev3::rev_name_belongs_to_set,
+            &self.legacy_rev_owned,
         );
         crate::fs::atomic::commit_files(&self.parent, &self.base, &install, &retire)?;
         Ok(())

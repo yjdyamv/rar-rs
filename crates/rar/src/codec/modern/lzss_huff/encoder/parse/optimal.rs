@@ -12,19 +12,23 @@ use super::super::*;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+#[cfg(any(feature = "parallel", test))]
+use super::super::super::MAX_CODE_LENGTH;
 use super::super::super::{
-    HUFF_DC, HUFF_DCX, HUFF_LDC, HUFF_NC, HUFF_RC, MAX_CODE_LENGTH, SYM_CACHE_BASE, SYM_MATCH_BASE,
-    SYM_REPEAT,
+    HUFF_DC, HUFF_DCX, HUFF_LDC, HUFF_NC, HUFF_RC, SYM_CACHE_BASE, SYM_MATCH_BASE, SYM_REPEAT,
 };
+#[cfg(feature = "parallel")]
+use super::super::emit::ensure_nonzero;
 use super::super::emit::{
     apply_length_bonus, cache_find, cache_push, cache_touch, encode_distance_slot,
-    encode_length_slot, ensure_nonzero, remove_length_bonus,
+    encode_length_slot, remove_length_bonus,
 };
 use super::super::profile;
 use super::collect::{
     BlockMatches, DISABLE_MATCHLESS_FAST_PATH, FAST_RECOVER_INTERVAL, NICE_MATCH_LENGTH,
     RELAXED_MATCHLESS_MAX_LEN, SearchState, ShortFinder, collect_block_matches, match_length_at,
 };
+#[cfg(feature = "parallel")]
 use crate::codec::common::huffman::build_code_lengths_from_freqs;
 use crate::codec::common::match_finder::MatchFinder;
 use crate::version::ArchiveVersion;
@@ -807,6 +811,10 @@ struct TokenPrices {
 
 impl TokenPrices {
     /// Derive the cost tables from one pass's code lengths.
+    ///
+    /// The parallel priced parse builds them per pass; the serial passes use
+    /// frequencies instead ([`prices_from_frequencies`]).
+    #[cfg(any(feature = "parallel", test))]
     fn new(nc: &[u8], dc: &[u8], ldc: &[u8], rc: &[u8]) -> Self {
         let mut nc_cost = [0u32; HUFF_NC];
         for (cost, &bits) in nc_cost.iter_mut().zip(nc) {
@@ -842,6 +850,7 @@ impl TokenPrices {
         }
     }
 
+    #[cfg(any(feature = "parallel", test))]
     fn code(bits: u8) -> u32 {
         if bits == 0 {
             UNUSED_SYMBOL_COST as u32
@@ -1421,6 +1430,10 @@ fn convert_tokens(
 
 /// Build code lengths for the four tables from frequency vectors, matching
 /// the block writer exactly.
+///
+/// Only the parallel parse prices from frequencies; the serial passes use it
+/// indirectly, so keep it to that build to avoid dead code.
+#[cfg(feature = "parallel")]
 fn prices_from_frequencies(
     nc_freq: &[u32],
     dc_freq: &[u32],
@@ -1684,6 +1697,7 @@ pub(crate) fn find_matches_optimal(
 /// tables across blocks: both are sized by the block span, so re-using them
 /// is what keeps a 13 MiB member from re-allocating and re-zeroing 2 MB per
 /// 64 KiB block.
+#[allow(clippy::too_many_arguments)] // the block's inputs, its buffer set and the shared parse state
 fn parse_one_block(
     combined: &[u8],
     block: std::ops::Range<usize>,
@@ -1856,7 +1870,7 @@ fn parse_one_block(
         block.clone(),
         limits,
         None,
-        &matches,
+        matches,
         initial,
         arrays,
     );
@@ -1896,6 +1910,7 @@ fn interleave_config() -> bool {
 /// half the positions. The cost is that skipped positions are never inserted
 /// into the tree, so later matches lose those candidates — the ratio price this
 /// knob measures.
+#[allow(clippy::too_many_arguments)] // the finder, its tables and the block's limits
 fn interleaved_tokens(
     finder: &mut match_finder::TreeMatchFinder,
     tables: &mut ShortTables,

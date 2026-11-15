@@ -1396,9 +1396,21 @@ fn cli_log_is_rejected_by_unrar_and_reports_unwritable_paths() {
 #[test]
 fn cli_mc_filter_policy_controls_filters() {
     let dir = make_temp_dir();
+    // A slow random walk (each byte moves by at most 2), which is delta's ideal
+    // case: the difference stream is a five-symbol alphabet. LZSS alone gets
+    // nothing out of it, because every position differs from the previous one.
+    // A plain ramp cannot show the win: it compresses to a few hundred bytes
+    // whether or not the filter runs (`match`es at the ramp's period), so
+    // `-mc-` and auto tie and the assertion proves nothing.
     let mut ramp = vec![0u8; 64 * 1024];
-    for (i, byte) in ramp.iter_mut().enumerate() {
-        *byte = ((i / 64) % 256) as u8;
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut value = 0u8;
+    for byte in ramp.iter_mut() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        value = value.wrapping_add((state % 5) as u8).wrapping_sub(2);
+        *byte = value;
     }
     std::fs::write(dir.path().join("ramp.bin"), &ramp).unwrap();
 

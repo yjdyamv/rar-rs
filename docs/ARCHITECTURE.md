@@ -209,6 +209,10 @@ match（`extract/mod.rs`、`write_ops.rs`）集中在这里，RAR5-only
   `format`/`codec`/`crypto`/`recovery`，需要时经 `archive/ops.rs`
   的方法接缝转发；
 - `recovery` 在 `format` **之上**（复用 RAR4 信封 + `REPAIR` 策略），反向禁止。
+- 同一层内允许同级边：`codec` 只向 `options` 取过滤器策略，即
+  `FilterOptions`/`FilterMode` 这对 `-mcd`/`-mce` 的 auto/disabled/forced 三态与
+  delta 声道。这三态是 CLI 语义的一部分，在 `codec` 里再抄一份枚举就会漂移，
+  故宁可保留这条同级边（见 `docs/dependency-matrix.txt`）。
 
 以上每条都由 `tests/architecture_boundaries.rs` 在源码行级别钉住。
 

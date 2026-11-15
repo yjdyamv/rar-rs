@@ -12,7 +12,7 @@
 #
 # layer              -> depends on
 archive            -> codec, crypto, detect, engine, error, format, fs, model, options, parallel, recovery, version, vint, write_progress
-codec              -> crc32, error, io_util, parallel, version
+codec              -> crc32, error, io_util, options, parallel, version
 crc32              -> (none)
 crypto             -> crc32, error, vint
 detect             -> (none)

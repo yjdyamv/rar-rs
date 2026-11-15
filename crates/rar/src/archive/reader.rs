@@ -647,12 +647,7 @@ impl ArchiveReader {
                 ids.iter().map(|id| self.resolve_id(*id).ok()).collect();
             if let Some(indices) = resolved
                 && indices.len() == ids.len()
-                && let Some(results) =
-                    crate::format::shared::extract::members::verify_indices_parallel(
-                        &mut self.archive,
-                        &indices,
-                        &options,
-                    )?
+                && let Some(results) = self.archive.verify_indices_parallel(&indices, &options)?
             {
                 for (idx, result) in results {
                     if let Err(error) = result {
@@ -712,27 +707,11 @@ impl ArchiveReader {
     /// Whether the archive's headers are encrypted (`-hp`).
     ///
     /// The catalog scan clears the cached encryption state after reading, so
-    /// fall back to probing the container start: an `-hp` RAR5 archive always
-    /// begins with a plaintext `ENCR` block. Legacy archives report `false`.
+    /// the engine falls back to probing the container start: an `-hp` RAR5
+    /// archive always begins with a plaintext `ENCR` block. Legacy archives
+    /// report `false`.
     pub fn headers_encrypted(&self) -> bool {
-        if self.archive.header_encryption {
-            return true;
-        }
-        if self.archive.is_legacy() || self.archive.is_rar13() {
-            return false;
-        }
-        use std::io::{Seek, SeekFrom};
-        let Ok(mut file) = std::fs::File::open(&self.archive.path) else {
-            return false;
-        };
-        let start = self.archive.sfx_offset + crate::format::rar5::RAR5_SIGNATURE.len() as u64;
-        if file.seek(SeekFrom::Start(start)).is_err() {
-            return false;
-        }
-        matches!(
-            crate::format::rar5::headers::read_block(&mut file, None),
-            Ok(Some(meta)) if meta.block_type == crate::format::rar5::BLOCK_TYPE_ENCRYPT_HEADER
-        )
+        self.archive.headers_encrypted()
     }
 
     /// Strength of the archive's inline recovery record, if it carries one.

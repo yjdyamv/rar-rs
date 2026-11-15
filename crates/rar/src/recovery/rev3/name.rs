@@ -204,10 +204,16 @@ pub(super) fn part_width_candidates(width: usize) -> Vec<usize> {
 /// Whether `name` parses as a RAR 1.5–4.x `.rev` file belonging to the
 /// volume set based at `base`. Ambiguous legacy names (`set44_2_1.rev` can
 /// read as `set` + data 44 or `set4` + data 4) are resolved with the same
-/// data-volume scoring as [`collect_recovery_volumes`], so a stale scan
+/// data-volume scoring as the recovery-volume scan in `layout`, so a stale scan
 /// never claims another set's parity files. Matching is ASCII
 /// case-insensitive, like the official tools on Windows.
-pub(crate) fn rev_name_belongs_to_set(parent: &Path, base: &str, name: &str) -> bool {
+///
+/// Public because the staging seam takes the verdict as an injected
+/// predicate: `fs` is a leaf layer and must not name `recovery` (see
+/// `tests/architecture_boundaries.rs`), so callers above both — the `rar`
+/// CLI's staging wrapper, and `archive`'s volume commits — pass this
+/// function in.
+pub fn rev_name_belongs_to_set(parent: &Path, base: &str, name: &str) -> bool {
     let mut trailer_owned = false;
     let mut best: Option<(usize, String)> = None;
     for candidate in rev_name_candidates(name) {

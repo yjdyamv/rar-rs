@@ -79,6 +79,47 @@ impl RarArchive {
         )
     }
 
+    /// Verify the listed archive-order member indices on the Rayon pool.
+    ///
+    /// `None` means the archive is ineligible (solid chain, progress
+    /// callbacks, a set below the parallel threshold), so the caller runs its
+    /// serial loop unchanged. Each entry is `(crc index, the crc's verdict)`,
+    /// already reported (progress, cancel) by the worker that produced it.
+    #[cfg(feature = "parallel")]
+    pub(crate) fn verify_indices_parallel(
+        &mut self,
+        indices: &[usize],
+        opts: &crate::options::ExtractOptions,
+    ) -> RarResult<Option<crate::format::shared::extract::members::VerifyBatch>> {
+        crate::format::shared::extract::members::verify_indices_parallel(self, indices, opts)
+    }
+
+    /// Whether the archive's headers are encrypted (`-hp`).
+    ///
+    /// The catalog scan clears the cached flag after reading, so this falls
+    /// back to probing the container start: an `-hp` RAR5 archive always
+    /// begins with a plaintext `ENCR` block. Legacy archives report `false`.
+    pub(crate) fn headers_encrypted(&self) -> bool {
+        use std::io::{Seek, SeekFrom};
+        if self.header_encryption {
+            return true;
+        }
+        if self.is_legacy() || self.is_rar13() {
+            return false;
+        }
+        let Ok(mut file) = std::fs::File::open(&self.path) else {
+            return false;
+        };
+        let start = self.sfx_offset + crate::format::rar5::RAR5_SIGNATURE.len() as u64;
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return false;
+        }
+        matches!(
+            crate::format::rar5::headers::read_block(&mut file, None),
+            Ok(Some(meta)) if meta.block_type == crate::format::rar5::BLOCK_TYPE_ENCRYPT_HEADER
+        )
+    }
+
     /// Start the progress tracker for a run that writes `total` uncompressed
     /// bytes. The sink is borrowed, not consumed, so a reused `ExtractOptions`
     /// keeps reporting (see

@@ -260,7 +260,7 @@ pub fn encode_with_filters_into(
     Ok(output)
 }
 
-/// Multi-threaded [`encode_with_filters_into`]: the transform runs first,
+/// Multi-threaded `encode_with_filters_into`: the transform runs first,
 /// then the transformed member is encoded across the pool while `state`
 /// carries the solid chain.
 #[cfg(not(feature = "parallel"))]
@@ -278,7 +278,7 @@ pub fn encode_with_filters_continue(
     encode_with_filters_into(data, method, dict_size_log, filters, variant, state)
 }
 
-/// Multi-threaded [`encode_with_filters_into`]: the transform runs first,
+/// Multi-threaded `encode_with_filters_into`: the transform runs first,
 /// then the transformed member is encoded across the pool while `state`
 /// carries the solid chain.
 #[cfg(feature = "parallel")]
