@@ -988,6 +988,51 @@ impl TreeMatchFinder {
         self.son = remapped;
     }
 
+    /// Warm both children of the node a walk just loaded: their pair slots
+    /// (the next step's first load) and their input byte at the proven
+    /// prefix (the next step's second load). Absolute hops that do not point
+    /// inside the window are skipped — they are either the sentinel or a
+    /// stale link the descent's own guard consumes without reading.
+    #[inline]
+    fn prefetch_children(&self, input: &[u8], pos: usize, len: usize, less: u32, greater: u32) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let son = self.son.as_ptr();
+            let bytes = input.as_ptr();
+            for child in [less, greater] {
+                if child == NO_LINK {
+                    continue;
+                }
+                let current = resolve(pos, child);
+                if current >= pos || pos - current > self.mask {
+                    continue;
+                }
+                let pair = (current & self.mask) << 1;
+                // SAFETY: `pair + 1 < son.len()` because `pair` masks the
+                // index into the ring and the array holds two slots per
+                // ring position. `current + len < input.len()` because
+                // `current < pos` and the descent's own `bound` keeps
+                // `pos + len` inside the slice. `_mm_prefetch` never faults
+                // and never dereferences, so the only requirement is a
+                // computable address inside one allocation.
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch(
+                        son.add(pair).cast::<std::os::raw::c_char>(),
+                        std::arch::x86_64::_MM_HINT_T0,
+                    );
+                    std::arch::x86_64::_mm_prefetch(
+                        bytes.add(current + len).cast::<std::os::raw::c_char>(),
+                        std::arch::x86_64::_MM_HINT_T0,
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (input, pos, len, less, greater);
+        }
+    }
+
     #[inline]
     fn hash4(&self, input: &[u8], pos: usize) -> usize {
         let value =
@@ -1192,6 +1237,13 @@ impl TreeMatchFinder {
                 Some((less, greater)) => (less, greater),
                 None => (self.son[pair], self.son[pair + 1]),
             };
+            // Both child links were just read, so the next node's address is
+            // known *before* the compare that picks which child the walk
+            // takes. Warming both sides turns the step's two serial misses
+            // (pair load, then the input byte of the node it points at) into
+            // one: whichever child the compare chooses, its pair and its
+            // input byte are already in flight.
+            self.prefetch_children(input, pos, len0.min(len1), child_less, child_greater);
             let mut len = len0.min(len1);
             if input[current + len] == input[pos + len] {
                 len += 1;
