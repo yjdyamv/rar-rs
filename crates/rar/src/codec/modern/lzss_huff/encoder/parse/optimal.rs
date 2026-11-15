@@ -1102,6 +1102,12 @@ impl DpArrays {
 pub(super) struct ParseBuffers {
     matches: BlockMatches,
     arrays: DpArrays,
+    /// The official's three recent-occurrence tables (`+0xb1e8` byte,
+    /// `+0xb1f0` ushort, `+0xb1f8` u32), filled for every position and
+    /// shared by all the blocks of one parse. Allocating them per block
+    /// costs a 4.5 MB memset every 64 KiB of input, which is most of the
+    /// time the fused path spent in the archive benchmark.
+    tables: ShortTables,
 }
 
 impl Default for ParseBuffers {
@@ -1112,6 +1118,7 @@ impl Default for ParseBuffers {
                 starts: Vec::new(),
             },
             arrays: DpArrays::default(),
+            tables: ShortTables::default(),
         }
     }
 }
@@ -1673,7 +1680,36 @@ fn parse_one_block(
     let max_match = limits.max_match;
     let window = limits.window;
     let variant = limits.variant;
-    let ParseBuffers { matches, arrays } = buffers;
+    let ParseBuffers {
+        matches,
+        arrays,
+        tables,
+    } = buffers;
+    // The fused path never uses the block's candidate list: it searches one
+    // position at a time and jumps over the bytes a match covers.
+    if interleave_config() {
+        let parse_started = Instant::now();
+        let tokens = interleaved_tokens(
+            finder,
+            tables,
+            combined,
+            &block,
+            state,
+            limits,
+            spec.chain_len,
+        );
+        crate::codec::modern::lzss_huff::encoder::profile::add(
+            crate::codec::modern::lzss_huff::encoder::profile::PARSE_DP,
+            parse_started,
+        );
+        let convert_started = Instant::now();
+        let (symbols, _) = convert_tokens(&tokens, combined, block, state, variant);
+        crate::codec::modern::lzss_huff::encoder::profile::add(
+            crate::codec::modern::lzss_huff::encoder::profile::PARSE_CONVERT,
+            convert_started,
+        );
+        return symbols;
+    }
     let collect_started = Instant::now();
     collect_block_matches(
         finder,
@@ -1816,12 +1852,285 @@ fn parse_one_block(
     );
     symbols
 }
+/// Whether the block parser interleaves search and parse, skipping the bytes
+/// a match covers (`RAR_RS_INTERLEAVE`).
+fn interleave_config() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RAR_RS_INTERLEAVE")
+            .map(|value| {
+                let value = value.trim();
+                !(value.is_empty() || value == "0")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// The official's main loop, fused: search one position, decide with the
+/// previous position's pending match, emit, and **advance by the token length**
+/// so the bytes a match covers are never searched.
+///
+/// WinRAR does exactly this (`FUN_140044794`: `pos += best_length` after
+/// `FUN_1400478e0` parks the match), which is where its per-file advantage comes
+/// from: its per-position work is no cheaper than ours, it just visits about
+/// half the positions. The cost is that skipped positions are never inserted
+/// into the tree, so later matches lose those candidates — the ratio price this
+/// knob measures.
+fn interleaved_tokens(
+    finder: &mut match_finder::TreeMatchFinder,
+    tables: &mut ShortTables,
+    combined: &[u8],
+    block: &std::ops::Range<usize>,
+    state: &EncoderMatchState,
+    limits: super::MatchLimits,
+    chain_len: usize,
+) -> Vec<(u32, u32)> {
+    let window = limits.window;
+    let max_match = limits.max_match;
+    let min_match = min_match_config();
+    let mut reps = state.reps;
+    let mut last_length = state.last_length;
+    // The official's three recent-occurrence tables (`+0xb1e8` byte,
+    // `+0xb1f0` ushort, `+0xb1f8` u32 in `FUN_14004115c`). Its precompute pass
+    // fills them for *every* position, including the ones the main loop skips,
+    // which is how it keeps short-match coverage while emitting long matches
+    // greedily. Insertion is one store per table, so we can afford the same.
+    let mut tokens: Vec<(u32, u32)> = Vec::with_capacity(block.end - block.start);
+    let mut scratch: Vec<(u32, u32)> = Vec::with_capacity(16);
+    let mut pos = block.start;
+    // The previous position's match, deferred one step: the official calls this
+    // `+0x300dc` / `+0x300d0`.
+    let mut pending: Option<(u32, u32)> = None;
+    while pos < block.end {
+        // Fill the three tables for every position passed over, skipped ones
+        // included: the official precomputes them for the whole window.
+        tables.fill_to(combined, pos);
+        let max_distance = pos.min(window);
+        let available = (block.end - pos).min(max_match);
+        let mut best = (0u32, 0u32);
+        let mut cands: Vec<(u32, u32)> = Vec::with_capacity(8);
+        if max_distance > 0 && available >= 2 && pos + 2 <= combined.len() {
+            let len_limit = available.min(combined.len() - pos);
+            // Short candidates first, with the official's distance bounds: a
+            // 2-byte match only inside 0x100, 3 bytes inside 0x2000, 4 bytes
+            // inside 0x40000, each demanding to be much closer than whatever is
+            // already held (`dist < best_dist << 7` / `<< 6` in the original).
+            let two = u16::from_le_bytes([combined[pos], combined[pos + 1]]) as usize;
+            if len_limit >= 2
+                && let slot = tables.prev2[two]
+                && slot != 0
+                && (slot as usize) < pos
+            {
+                let distance = pos - slot as usize;
+                if distance <= 0x100 && distance <= max_distance {
+                    let length = match_length_at(combined, pos, distance, len_limit.min(4)) as u32;
+                    if length >= 2 {
+                        cands.push((length, distance as u32));
+                    }
+                }
+            }
+            if len_limit >= 3 && pos + 4 <= combined.len() {
+                let key = u32::from_le_bytes([
+                    combined[pos],
+                    combined[pos + 1],
+                    combined[pos + 2],
+                    combined[pos + 3],
+                ]);
+                let hash = (key.wrapping_mul(0x9E37_79B1) >> 16) as usize & 0xffff;
+                if let slot = tables.prev3[hash]
+                    && slot != 0
+                    && (slot as usize) < pos
+                {
+                    let distance = pos - slot as usize;
+                    if distance <= 0x2000
+                        && distance <= max_distance
+                        && (best.0 < 2 || (distance as u64) < (best.1 as u64) << 7)
+                    {
+                        let length =
+                            match_length_at(combined, pos, distance, len_limit.min(8)) as u32;
+                        if length >= 3 {
+                            cands.push((length, distance as u32));
+                        }
+                    }
+                }
+                let hash4 = (key.wrapping_mul(0x9E37_79B1) >> 12) as usize & 0xfffff;
+                if let slot = tables.prev4[hash4]
+                    && slot != 0
+                    && (slot as usize) < pos
+                {
+                    let distance = pos - slot as usize;
+                    if distance <= 0x40000
+                        && distance <= max_distance
+                        && (best.0 < 3 || (distance as u64) < (best.1 as u64) << 6)
+                    {
+                        let length =
+                            match_length_at(combined, pos, distance, len_limit.min(16)) as u32;
+                        if length >= 4 {
+                            cands.push((length, distance as u32));
+                        }
+                    }
+                }
+            }
+            if len_limit >= 4 {
+                scratch.clear();
+                let cut = if len_limit >= NICE_MATCH_LENGTH {
+                    chain_len
+                } else {
+                    chain_len.min(4)
+                };
+                finder.matches(match_finder::MatchQuery {
+                    input: combined,
+                    pos,
+                    len_limit,
+                    max_distance,
+                    cut,
+                    out: &mut scratch,
+                });
+                for &(length, distance) in scratch.iter() {
+                    let encodable = reps.contains(&distance)
+                        || length >= length_bonus(distance).saturating_add(2);
+                    if encodable {
+                        cands.push((length, distance));
+                    }
+                }
+            }
+            let mut pick = (1u32, 0u32);
+            for &repeat in reps.iter() {
+                let repeat_len = repeat as usize;
+                if repeat_len == 0 || repeat_len > max_distance || repeat == best.1 {
+                    continue;
+                }
+                let length = match_length_at(combined, pos, repeat_len, available) as u32;
+                if length > pick.0 && length >= 2 {
+                    pick = (length, repeat);
+                }
+            }
+            if pick.0 > 1 {
+                cands.push(pick);
+            }
+            // Pick by *price*, not by length: the official never takes the
+            // longest candidate (`FUN_140047698`), it takes the one whose saved
+            // bits beat the distance it costs.
+            for &(length, distance) in cands.iter() {
+                let score = (length as i64) * 8 - price_of(distance);
+                let held = (best.0 as i64) * 8 - if best.0 == 0 { 0 } else { price_of(best.1) };
+                if best.0 == 0 || score > held {
+                    best = (length, distance);
+                }
+            }
+        }
+        // The official's rep rule (`FUN_140047698`): a distance from the cache
+        // costs no distance slot, so it is taken whenever it is nearly as long
+        // as the best match found (`len + 3 >= best_len`) or proportionally
+        // longer (`len * 4 >= best_len * 3`). When it is one to three bytes
+        // shorter, the byte it gives up is only worth it if the alternative's
+        // distance is past the matching distance class (255/2047/32767).
+        if best.0 >= 2 && available >= 2 {
+            let len_limit = available.min(combined.len() - pos);
+            let mut rep_len = 0u32;
+            let mut rep_dist = 0u32;
+            for &distance in reps.iter().take(4) {
+                let distance = distance as usize;
+                if distance == 0 || distance > max_distance || distance > pos {
+                    continue;
+                }
+                let length = match_length_at(combined, pos, distance, len_limit) as u32;
+                if length <= 1 || !(length + 3 >= best.0 || best.0 * 3 <= length * 4) {
+                    continue;
+                }
+                if (length + 1 == best.0 && best.1 <= 0xff)
+                    || (length + 2 == best.0 && best.1 <= 0x7ff)
+                    || (length + 3 == best.0 && best.1 <= 0x7fff)
+                {
+                    continue;
+                }
+                if length > rep_len {
+                    rep_len = length;
+                    rep_dist = distance as u32;
+                }
+            }
+            if rep_len > 0 {
+                best = (rep_len, rep_dist);
+            }
+        }
+        // Undo the match the previous position was holding, if this one beats
+        // it: emit that byte as a literal and keep this match pending. That is
+        // the whole of the official's laziness.
+        if let Some((pending_len, pending_dist)) = pending
+            && best.0 >= 2
+            && best.0 > pending_len
+            && !extends_at(combined, pos, pending_len, pending_dist)
+        {
+            tokens.push((0, u32::from(combined[pos - 1])));
+            pending = Some(best);
+            pos += 1;
+            continue;
+        }
+        let best = if best.0 >= min_match { best } else { (0, 0) };
+        match pending.take() {
+            Some((length, distance)) => {
+                tokens.push((length, distance));
+                if !(distance == reps[0] && length == last_length) {
+                    if let Some(index) = reps.iter().position(|&d| d == distance) {
+                        reps[..=index].rotate_right(1);
+                    } else {
+                        reps.rotate_right(1);
+                    }
+                    reps[0] = distance;
+                    last_length = length;
+                }
+                // Skip the bytes the match covers (the official's `pos += len`);
+                // the match started at `pos - 1`, where it was parked.
+                pos = pos - 1 + length as usize;
+                debug_assert!(pos <= block.end, "parked match overran its block");
+            }
+            None => {
+                if best.0 >= 2 {
+                    pending = Some(best);
+                    pos += 1;
+                } else {
+                    tokens.push((0, u32::from(combined[pos])));
+                    pos += 1;
+                }
+            }
+        }
+    }
+    if let Some((length, distance)) = pending {
+        tokens.push((length, distance));
+    }
+    tokens
+}
+
 /// Whether the block parser runs the official's one-step lazy walk instead of
 /// the price-driven DP (`RAR_RS_LAZY`).
 fn lazy_config() -> bool {
     static LAZY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *LAZY.get_or_init(|| {
         std::env::var("RAR_RS_LAZY")
+            .map(|value| {
+                let value = value.trim();
+                !(value.is_empty() || value == "0")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// One-step lazy walk over the block's candidates, shaped after WinRAR's
+/// `FUN_1400478e0` + `FUN_140047698`: the longest candidate wins, a cached
+/// distance only takes over when it is nearly as long, and the tolerances sit
+/// on the distance-code boundaries (255, 2047, 32767) so a one/two/three-byte
+/// shorter match is rejected only when the current best is far enough to cost
+/// more than it saves.
+///
+/// Whether the lazy walk prefers the nearest nearly-as-long candidate
+/// (`RAR_RS_LAZY_NEAR`), which is what WinRAR's distance rules encode. Off
+/// by default: over a candidate list ordered by length it costs ratio (measured
+/// 49.27 % -> 50.18 % on ntoskrnl m3), because the nearest report is usually a
+/// four-byte one.
+fn near_first() -> bool {
+    static NEAR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NEAR.get_or_init(|| {
+        std::env::var("RAR_RS_LAZY_NEAR")
             .map(|value| {
                 let value = value.trim();
                 !(value.is_empty() || value == "0")
@@ -1865,6 +2174,28 @@ fn lazy_tokens(
                     reps.contains(&distance) || length >= length_bonus(distance).saturating_add(2);
                 if encodable && length > best.0 {
                     best = (length, distance);
+                }
+            }
+            if near_first() {
+                // WinRAR's parse prefers the nearest candidate that is
+                // nearly as long, but only when one qualifies: falling back
+                // to the longest is what keeps a strict tolerance from
+                // turning a real match into a literal.
+                let longest = best;
+                best = (0, 0);
+                for &(length, distance) in matches.at(pos - block.start) {
+                    let encodable = reps.contains(&distance)
+                        || length >= length_bonus(distance).saturating_add(2);
+                    if !encodable {
+                        continue;
+                    }
+                    if length * 4 >= longest.0 * 3 || length.saturating_add(3) >= longest.0 {
+                        best = (length, distance);
+                        break;
+                    }
+                }
+                if best.0 == 0 {
+                    best = longest;
                 }
             }
             let mut pick = (1u32, 0u32);
@@ -2083,4 +2414,81 @@ mod slot_pricer_tests {
         }
         assert!(steps > 8_000, "only {steps} steps priced");
     }
+}
+
+/// Shortest match the fused path will emit (`RAR_RS_MINMATCH`, default 4).
+fn min_match_config() -> u32 {
+    static MIN: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("RAR_RS_MINMATCH")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .map(|value| value.clamp(2, 32))
+            .unwrap_or(4)
+    })
+}
+
+/// Rough bit price of a match at `distance`: the distance slot plus overhead.
+fn price_of(distance: u32) -> i64 {
+    let bits = 32 - (distance | 1).leading_zeros() as i64;
+    8 + bits * 2
+}
+
+/// The official's three recent-occurrence tables (`+0xb1e8` byte, `+0xb1f0`
+/// ushort, `+0xb1f8` u32 in `FUN_14004115c`), filled for every position and
+/// shared across the blocks of one parse.
+///
+/// 0 means "no entry": position 0 can never be a match source for a position
+/// that matters, so giving up its slot costs nothing and keeps the tables
+/// calloc'd (`vec![0; n]`), which matters — they are 4.5 MB total.
+#[derive(Default)]
+pub(super) struct ShortTables {
+    prev2: Vec<u32>,
+    prev3: Vec<u32>,
+    prev4: Vec<u32>,
+    filled: usize,
+}
+
+impl ShortTables {
+    fn fill_to(&mut self, combined: &[u8], upto: usize) {
+        if self.prev2.is_empty() {
+            self.prev2 = vec![0; 1 << 16];
+            self.prev3 = vec![0; 1 << 16];
+            self.prev4 = vec![0; 1 << 20];
+        }
+        if self.filled > upto {
+            self.filled = upto;
+        }
+        while self.filled < upto && self.filled + 4 <= combined.len() {
+            let at = self.filled;
+            let two = u16::from_le_bytes([combined[at], combined[at + 1]]) as usize;
+            let key = u32::from_le_bytes([
+                combined[at],
+                combined[at + 1],
+                combined[at + 2],
+                combined[at + 3],
+            ]);
+            let hashed = key.wrapping_mul(0x9E37_79B1);
+            self.prev2[two] = at as u32;
+            self.prev3[(hashed >> 16) as usize & 0xffff] = at as u32;
+            self.prev4[(hashed >> 12) as usize & 0xfffff] = at as u32;
+            self.filled += 1;
+        }
+    }
+}
+
+/// Whether the match parked at `pos - 1` keeps growing at `pos`, in which case
+/// the official keeps it instead of switching to the new position's match
+/// (`FUN_1400478e0` compares `input[pos - 1 + len]` with `input[pos + len]`
+/// before it defers).
+fn extends_at(combined: &[u8], pos: usize, length: u32, distance: u32) -> bool {
+    let length = length as usize;
+    let distance = distance as usize;
+    if distance == 0 || distance > pos - 1 {
+        return false;
+    }
+    let copy = (pos - 1 - distance) + length;
+    pos + length < combined.len()
+        && copy < combined.len()
+        && combined[copy] == combined[pos + length]
 }
