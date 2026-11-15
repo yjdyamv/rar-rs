@@ -504,6 +504,12 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   却让 m3 多跑一遍 DP（+20~37% 时间）。seq 已改为单遍（`parse_one_block`
   不再有 `passes`）；MT 的“块间顺延价格表”（`windowed_priced_parse` 的
   `carried`）是零额外 DP 的版本，保留。
+- **每候选单价已到地板**：BT4 的代价是「每位置 5.6 次依赖的随机访存」，ns/步 随工作集
+  上升（1 MiB 21.8 → 4 MiB 28.9 → 13.3 MiB 34.4），而缩小树只换来比例损失（NEAR 8192→512 KiB：
+  41.8→31.5 ns/步，比例 44.61→45.29%）。DP 那边同样没有余量：13.9 M 位置 917 ms = 66 ns/位置，
+  字面量 7.5 + rep 探针 20 + 多步定价 12 + reaches/plan/写回 25；探针全关省 284 ms 却要 +0.71pp，
+  `RAR_RS_COMMIT=32` 省 218 ms 要 +0.09pp，`NICE_MATCH_LENGTH` 64→32 则三项全无影响。
+  剩下的路只有换候选生成形态（ADR 0009 的多槽链，体积换速度）。见 [ADR 0011](adr/0011-official-shaped-matcher.md)。
 - **逐块分配是可见成本**：DP 的 per-position 状态 32 B（price/长度/距离/
   四个 rep/上次长度），64 KiB 块约 2 MB，13 MiB 成员有 200 多个块；改成按
   chunk 复用的 `DpArrays` 后，只保留同量的 memset，不再每次都新映射页面。
