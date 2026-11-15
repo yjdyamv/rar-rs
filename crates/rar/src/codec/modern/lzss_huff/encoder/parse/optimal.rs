@@ -1901,6 +1901,7 @@ fn interleaved_tokens(
     // more than what it is supposed to measure.
     let use_rep = std::env::var_os("RAR_RS_NOREP").is_none();
     let use_tables = std::env::var_os("RAR_RS_NOTABLES").is_none();
+    let use_tree = std::env::var_os("RAR_RS_NOTREE").is_none();
     // The official precomputes the short-match tables for the whole window
     // before searching; keeping the two `last` maps hot in L2 is the point of
     // doing the pass separately instead of on the way through the loop.
@@ -1946,7 +1947,13 @@ fn interleaved_tokens(
                     }
                 }
             }
-            if len_limit >= 4 {
+            if use_tree && len_limit >= 4 {
+                // Prefetch the bucket we will descend in sixteen positions, as the
+                // serial collector does: the fused loop keeps the short tables and
+                // the emitted tokens in flight, which evicts the head table.
+                if pos + 16 + 4 < combined.len() {
+                    finder.prefetch_head_for(combined, pos + 16);
+                }
                 scratch.clear();
                 super::super::profile::count(super::super::profile::SEARCH, 1);
                 let cut = if len_limit >= NICE_MATCH_LENGTH {
@@ -2001,7 +2008,7 @@ fn interleaved_tokens(
         // longer (`len * 4 >= best_len * 3`). When it is one to three bytes
         // shorter, the byte it gives up is only worth it if the alternative's
         // distance is past the matching distance class (255/2047/32767).
-        if best.0 >= 2 && best.0 < 12 && available >= 2 && use_rep {
+        if best.0 >= 2 && best.0 < 12 && available >= 2 && use_rep && use_tree {
             // Only the first `best + 4` bytes can change the verdict below, so
             // the scan stops there: a rep match is often thousands of bytes long
             // and comparing all of it costs more than the whole decision.

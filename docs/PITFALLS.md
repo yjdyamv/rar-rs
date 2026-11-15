@@ -782,3 +782,7 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   2164 ms、比例不变。真正贵的是 4 字节表（4 MB 随机写；删掉换 4 % 时间）。融合路径每搜索
   位置仍 ~350 ns（官方 ~200 ns），差距在每位置的其余簿记与 `finder.matches` 调用开销，不在下降
   （2.9 步/次）也不在这两张表。
+- **跳着搜就必须自己预取桶头**：融合路径（`RAR_RS_INTERLEAVE`）同时压着两张短表、候选与
+  token，树的两级访存全掉到 DRAM，每次搜索 243 ns 而 `walkbench` 里只有 15.8 ns/步；在
+  `pos + 16` 处 `prefetch_head_for` 后 seq 2192 → 1847 ms、比例一位不变。串行 collector 早就在
+  做同一件事（`PREFETCH_AHEAD`），只是当时没有「跳读」把它逼出来。
