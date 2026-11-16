@@ -279,6 +279,55 @@ const ROW_INDEX_HASH_BITS: u32 = 20;
 #[cfg(feature = "parallel")]
 const ROW_INDEX_BUCKETS: usize = 1 << ROW_INDEX_HASH_BITS;
 
+/// Most workers the split build will use. Past a handful the merge traffic and
+/// the per-worker cursor tables eat the gain (the build is bandwidth-bound).
+#[cfg(feature = "parallel")]
+const BUILD_MAX_PARTS: usize = 8;
+/// Smallest position range worth handing to its own worker.
+#[cfg(feature = "parallel")]
+const BUILD_MIN_PART: usize = 1 << 20;
+
+/// Placement targets of [`RowIndex::build_split`], shared by the workers.
+///
+/// Every worker writes only its own position range (`slot`, `rel`) and only the
+/// bucket sub-ranges it owns (`positions`), so no two workers ever touch the
+/// same cell — but that is not expressible with one `&mut [u32]` per array, so
+/// the base pointers travel in a `Send` wrapper and each worker reconstitutes
+/// the whole slice.
+#[cfg(feature = "parallel")]
+#[derive(Clone, Copy)]
+struct PlaceTargets {
+    positions: *mut u32,
+    slot: *mut u32,
+    len: usize,
+}
+
+#[cfg(feature = "parallel")]
+impl PlaceTargets {
+    /// Rebuild the two output slices from the shared base pointers and hand
+    /// them to `f`.
+    ///
+    /// # Safety
+    ///
+    /// The caller (and only the caller) is responsible for keeping the writes
+    /// of concurrent users disjoint, as documented on [`PlaceTargets`].
+    unsafe fn with_slices<R>(&self, f: impl FnOnce(&mut [u32], &mut [u32]) -> R) -> R {
+        let (positions, slot) = unsafe {
+            (
+                std::slice::from_raw_parts_mut(self.positions, self.len),
+                std::slice::from_raw_parts_mut(self.slot, self.len),
+            )
+        };
+        f(positions, slot)
+    }
+}
+
+// SAFETY: the pointers are only dereferenced inside `with_slices`, and the
+// split build keeps every concurrent write disjoint (see the type's docs).
+#[cfg(feature = "parallel")]
+unsafe impl Send for PlaceTargets {}
+#[cfg(feature = "parallel")]
+unsafe impl Sync for PlaceTargets {}
 /// A shared, read-only row index over one member buffer: every position grouped
 /// by the hash of its first three bytes, as a counting-sorted CSR.
 ///
@@ -293,15 +342,46 @@ const ROW_INDEX_BUCKETS: usize = 1 << ROW_INDEX_HASH_BITS;
 /// [`windowed_priced_parse`], both `parallel`-gated.
 #[cfg(feature = "parallel")]
 pub(crate) struct RowIndex {
-    starts: Vec<u32>,
     positions: Vec<u32>,
+    /// Index of every position inside `positions`, i.e. its own slot in the
+    /// bucket. Lets `collect` find the newest candidate in one sequential load
+    /// instead of hashing plus a binary search inside the bucket.
+    slot: Vec<u32>,
+    /// `starts[h]` is where bucket `h` begins in `positions`; `collect` needs it
+    /// to turn a slot back into "how many same-hash predecessors do I have".
+    starts: Vec<u32>,
 }
 
 #[cfg(feature = "parallel")]
 impl RowIndex {
     /// Build the index in two passes (count, then place). O(n) at memory
     /// bandwidth, paid once per member instead of per slice.
+    #[cfg(test)]
     pub(crate) fn build(data: &[u8]) -> Self {
+        Self::build_with_threads(data, 1)
+    }
+
+    /// Like [`Self::build`], but spreads the two passes over up to
+    /// [`BUILD_MAX_PARTS`] workers.
+    ///
+    /// Bucket order still has to be ascending in position, so each worker
+    /// takes a *contiguous* position range and seeds its cursor with whatever
+    /// earlier workers already placed in that bucket. The result is
+    /// bit-identical to the serial build; only the wall time changes.
+    pub(crate) fn build_with_threads(data: &[u8], threads: usize) -> Self {
+        #[cfg(feature = "parallel")]
+        {
+            let count = data.len().saturating_sub(3);
+            let parts = threads.min(BUILD_MAX_PARTS).min(count / BUILD_MIN_PART);
+            if parts >= 2 {
+                return Self::build_split(data, count, parts);
+            }
+        }
+        let _ = threads;
+        Self::build_serial(data)
+    }
+
+    fn build_serial(data: &[u8]) -> Self {
         let count = data.len().saturating_sub(3);
         let mut starts = vec![0u32; ROW_INDEX_BUCKETS + 1];
         for pos in 0..count {
@@ -312,14 +392,105 @@ impl RowIndex {
         }
         // Place through a private cursor: `starts` must keep the bucket ends,
         // so writing back into it would collapse every range to empty.
-        let mut cursor = starts.clone();
+        let mut cursor: Vec<u32> = starts[..ROW_INDEX_BUCKETS].to_vec();
         let mut positions = vec![0u32; count];
-        for pos in 0..count {
+        let mut slot = vec![0u32; count];
+        for (pos, slot) in slot.iter_mut().enumerate() {
             let hash = Self::hash(data, pos);
-            positions[cursor[hash] as usize] = pos as u32;
-            cursor[hash] += 1;
+            let index = cursor[hash];
+            positions[index as usize] = pos as u32;
+            *slot = index;
+            cursor[hash] = index + 1;
         }
-        Self { starts, positions }
+        drop(cursor);
+        Self {
+            positions,
+            slot,
+            starts,
+        }
+    }
+
+    /// Split build: per-worker count tables, one serial merge of the bucket
+    /// starts, then parallel placement.
+    #[cfg(feature = "parallel")]
+    fn build_split(data: &[u8], count: usize, parts: usize) -> Self {
+        let chunk = count.div_ceil(parts);
+        let range = |part: usize| (part * chunk).min(count)..(((part + 1) * chunk).min(count));
+        let pool = crate::parallel::compression_pool();
+        let mut tables: Vec<Vec<u32>> = (0..parts)
+            .map(|_| vec![0u32; ROW_INDEX_BUCKETS + 1])
+            .collect();
+        pool.scope(|scope| {
+            for (part, table) in tables.iter_mut().enumerate() {
+                let range = range(part);
+                scope.spawn(move |_| {
+                    for pos in range {
+                        table[Self::hash(data, pos) + 1] += 1;
+                    }
+                });
+            }
+        });
+        // Bucket starts, then a write cursor per worker into `positions`: the
+        // serial prefix sums are shared, but each worker starts where the
+        // workers before it left that bucket, which keeps the buckets ordered
+        // by position.
+        let mut starts = vec![0u32; ROW_INDEX_BUCKETS + 1];
+        for hash in 1..=ROW_INDEX_BUCKETS {
+            let mut total = 0u32;
+            for table in &tables {
+                total += table[hash];
+            }
+            starts[hash] = total;
+        }
+        for hash in 0..ROW_INDEX_BUCKETS {
+            starts[hash + 1] += starts[hash];
+        }
+        let mut cursors: Vec<Vec<u32>> =
+            (0..parts).map(|_| vec![0u32; ROW_INDEX_BUCKETS]).collect();
+        for hash in 0..ROW_INDEX_BUCKETS {
+            let mut taken = 0u32;
+            let base = starts[hash];
+            for (part, table) in tables.iter().enumerate() {
+                cursors[part][hash] = base + taken;
+                taken += table[hash + 1];
+            }
+        }
+        drop(tables);
+        let mut positions = vec![0u32; count];
+        let mut slot = vec![0u32; count];
+        let targets = PlaceTargets {
+            positions: positions.as_mut_ptr(),
+            slot: slot.as_mut_ptr(),
+            len: count,
+        };
+        pool.scope(|scope| {
+            for (part, cursor) in cursors.iter_mut().enumerate() {
+                let range = range(part);
+                scope.spawn(move |_| {
+                    // SAFETY: `PlaceTargets` hands every worker the same base
+                    // pointers, and each worker touches disjoint cells —
+                    // `slot` only at its own position range, `positions` only
+                    // the sub-ranges of the buckets it owns (the cursors above
+                    // partition every bucket across the workers).
+                    unsafe {
+                        targets.with_slices(|positions, slot| {
+                            for pos in range {
+                                let hash = Self::hash(data, pos);
+                                let index = cursor[hash];
+                                positions[index as usize] = pos as u32;
+                                slot[pos] = index;
+                                cursor[hash] = index + 1;
+                            }
+                        });
+                    }
+                });
+            }
+        });
+        Self {
+            positions,
+            slot,
+            starts,
+        }
     }
 
     fn hash(data: &[u8], pos: usize) -> usize {
@@ -360,21 +531,24 @@ impl RowIndex {
         if pos + 3 >= data.len() {
             return;
         }
-        let hash = Self::hash(data, pos);
-        let bucket = &self.positions[self.starts[hash] as usize..self.starts[hash + 1] as usize];
-        let end = bucket.partition_point(|&candidate| (candidate as usize) < pos);
         let max_length = max_match.min(data.len() - pos);
         let mut best_length = 0usize;
-        let mut checked = 0usize;
-        for &candidate in bucket[..end].iter().rev() {
-            let distance = pos - candidate as usize;
+        // Newest-first walk over the same bucket the hash would select, but
+        // entered through `slot` so the query costs one stream (plus one load
+        // from the small `starts` table) instead of a hash plus a binary search
+        // per position.
+        let index = self.slot[pos] as usize;
+        let available = (index - self.starts[Self::hash(data, pos)] as usize).min(depth);
+        for step in 0..available {
+            let at = index - 1 - step;
+            let candidate = self.positions[at] as usize;
+            let distance = pos - candidate;
             if distance > max_distance {
                 break;
             }
             // A candidate only improves the best when its byte at the current
             // best length matches, so probe that byte before the full compare.
-            if best_length == 0 || data[candidate as usize + best_length] == data[pos + best_length]
-            {
+            if best_length == 0 || data[candidate + best_length] == data[pos + best_length] {
                 let length = match_length_at(data, pos, distance, max_length);
                 if length >= 4 && length > best_length {
                     out.push((length as u32, distance as u32));
@@ -383,10 +557,6 @@ impl RowIndex {
                         break;
                     }
                 }
-            }
-            checked += 1;
-            if checked >= depth {
-                break;
             }
         }
     }

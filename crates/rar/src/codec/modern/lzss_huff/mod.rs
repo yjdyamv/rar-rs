@@ -848,7 +848,11 @@ mod mt_tests {
         }
         let _g = Guard;
 
-        let data = text_data(1_500_000);
+        // Big enough that a slice spans several DP blocks: the carry only
+        // crosses blocks, and the slice scheduler cuts a 1.5 MB member into
+        // 187 KiB slices at 4 threads, i.e. one block each, where the two arms
+        // are identical by construction.
+        let data = text_data(4_000_000);
         let encode = || {
             encode_chunked_mt(
                 &data,

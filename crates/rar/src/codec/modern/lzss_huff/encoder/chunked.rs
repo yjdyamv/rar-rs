@@ -471,15 +471,24 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let cs = {
         let caller = chunk_size.max(1);
         let by_count = data.len() / (threads.max(1) * 2);
-        // `RAR_RS_MT_MIN_SLICE` lowers the 2 MiB floor so the thread count can
-        // actually buy slices: with the floor a 13.9 MB member is always 7
-        // slices, and mt8/mt16/mt24 all run at the same speed.
+        // Smallest slice the scheduler will cut: slices below this lose more to
+        // the per-slice rep/price reset than the extra workers return. 128 KiB
+        // is also the official's wave granularity (`threads x 128 KiB`).
         let floor = std::env::var("RAR_RS_MT_MIN_SLICE")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(2 * 1024 * 1024);
+            .unwrap_or(128 * 1024);
         let floored = by_count.max(caller.min(floor));
-        caller.min(floored).max(1)
+        let cs = caller.min(floored).max(1);
+        // Snap the slice count to a whole number of waves. `len / cs` usually
+        // lands one past a multiple (13,917,568 / 289,949 = 48.0006 -> 49), and
+        // that lone last slice costs a whole wave of wall time for 16 bytes of
+        // work: 48 slices is 2 waves on 24 workers, 49 is 3. Redividing the
+        // member by the snapped count keeps the slices near-equal.
+        let wanted = data.len().div_ceil(cs);
+        let workers = threads.max(1);
+        let waves = ((wanted + workers / 2) / workers).max(1);
+        data.len().div_ceil(waves * workers)
     };
 
     // Shared long-range table over entry history plus this window; built
@@ -535,7 +544,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // priced DP becomes affordable at MT speed.
     let mt_clock = std::env::var_os("RAR_RS_MTTIME").is_some();
     let mt_start = std::time::Instant::now();
-    let row_index = super::parse::RowIndex::build(data);
+    let row_index = super::parse::RowIndex::build_with_threads(data, n_workers);
     let row_index_ref = &row_index;
     if mt_clock {
         eprintln!("MTTIME row_index={}ms", mt_start.elapsed().as_millis());
@@ -697,6 +706,22 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 #[cfg(feature = "parallel")]
 const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 256];
 
+/// Whether row-index slices also consult the shared sampled long-range table.
+///
+/// They do not *within one member*: `collect` limits its walk by
+/// `dict_size.min(pos)`, so the row index already reaches every byte of the
+/// dictionary window, and the sampled table only re-enumerates the same
+/// candidates more expensively. Measured on ntoskrnl (13.9 MB, -m3 -md32m) the
+/// table bought exactly zero bytes at both -mt1 and -mt24 while costing 0.7 s of
+/// the single-thread parse and 12% of the wall time.
+///
+/// It is still required in a solid chain, where the reach has to cross into the
+/// *previous members*: those bytes are not in `data` at all, so the row index
+/// cannot see them. `chunked::mt_slice_symbols_row_index` therefore keeps the
+/// table whenever the member continues a chain (`entry_len > 0`) and drops it
+/// for a standalone member, where it provably adds nothing.
+const LONG_RANGE_INSIDE_MEMBER: bool = false;
+
 /// How far one DP block spans in the MT row-index parse. The driver in
 /// `parse.rs` owns the number; this is the value it uses.
 ///
@@ -743,10 +768,13 @@ fn mt_slice_symbols_row_index(
         long_range,
         variant,
     } = slice;
-    let lr_q = if long_range {
-        // The row index reaches every byte of this buffer, so matches older than
-        // the slice start are the sampled table's job: at `s0` it owns `s0` bytes
-        // of history and one more per position after that.
+    // A solid chain reaches back into earlier members, and those bytes are not
+    // in `data`: only the sampled table can see them. A standalone member needs
+    // no table (the row index covers its whole window), which is worth ~12% of
+    // the wall time on a 13.9 MB member.
+    let lr_q = if long_range && (entry_len > 0 || LONG_RANGE_INSIDE_MEMBER) {
+        // At `s0` the table owns `s0` bytes of history and one more per position
+        // after that.
         Some((lr_shared, s0, entry_len + s0))
     } else {
         None
