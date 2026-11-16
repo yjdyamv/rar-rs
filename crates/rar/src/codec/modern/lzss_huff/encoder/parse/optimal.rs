@@ -587,13 +587,21 @@ impl RowIndex {
     }
 }
 
-/// How far one DP block spans in [`windowed_priced_parse`]. Bigger blocks buy
-/// lookahead and fewer block restarts at the cost of the DP's per-position
-/// arrays (about 16 bytes per block byte, per worker).
+/// How far one DP block spans in [`windowed_priced_parse`]. Smaller blocks buy
+/// a fresher price carry (the code-length table handed block to block) and a
+/// smaller working set, at the cost of more block restarts.
+///
+/// 48 KiB measured better than the old 256 KiB on every corpus and level
+/// tried (`-m1`..`-m5`, ntoskrnl 13.9 MB, ntdll, 5.9 MB of Rust sources,
+/// 7.7 MB of markdown, a solid archive of all three): 0.2–0.8% smaller and
+/// never slower (ntoskrnl `-m3` 5,898,075 → 5,883,538 at the same waves,
+/// `-m4` 5,869,710 → 5,855,069 with waves 382 → 350 ms). The DP tables are
+/// about 32 bytes per block byte per worker, so this also drops each worker's
+/// hot set from 8 MiB to 1.5 MiB.
 ///
 /// MT-only, like its only reader [`windowed_priced_parse`].
 #[cfg(feature = "parallel")]
-pub(crate) const MT_DP_BLOCK_SIZE: usize = 256 * 1024;
+pub(crate) const MT_DP_BLOCK_SIZE: usize = 48 * 1024;
 
 /// Match-finding loop over `data[start..end]` with a distance cache.
 /// `lr` (when present) adds long-range candidates from the sampled
