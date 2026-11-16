@@ -562,7 +562,6 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // other. Serial they cost 28 ms + 100 ms of the member's wall time; the
     // pair takes the longer of the two.
     let mt_clock = std::env::var_os("RAR_RS_MTTIME").is_some();
-    let mt_start = std::time::Instant::now();
     let pool = crate::parallel::compression_pool();
     let lr_stage = std::time::Instant::now();
     let ((), row_index) = pool.join(
