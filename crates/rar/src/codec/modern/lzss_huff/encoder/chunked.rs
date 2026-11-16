@@ -528,8 +528,13 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // starts at `hist_base() > 0` and the two differ by exactly that much —
     // using `hist_len()` here anchors every worker query short and silently
     // drops long-range matches later in a chain.
+    let lr_clock = std::env::var_os("RAR_RS_MTTIME").is_some();
+    let lr_started = std::time::Instant::now();
     let entry_len = lr_shared.total_pushed();
     lr_shared.push(data);
+    if lr_clock {
+        eprintln!("MTTIME long_range={}ms", lr_started.elapsed().as_millis());
+    }
     let seed_tail = std::mem::take(&mut seed.tail);
 
     // Slice boundaries: one fixed chunk per slice keeps the near-window

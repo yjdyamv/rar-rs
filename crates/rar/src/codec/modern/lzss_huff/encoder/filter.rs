@@ -984,6 +984,8 @@ fn block_stats_all(
     // run (measured as mt8 with filters minus mt8 `-mc-`). Hand the blocks to
     // the pool; the measurement per block is unchanged, so the decision is
     // byte-identical.
+    let clock = std::env::var_os("RAR_RS_MTTIME").is_some();
+    let started = std::time::Instant::now();
     let measure = |index: usize, chunk: &[u8]| {
         let start = (index * FORCED_FILTER_BLOCK) as u32;
         block_stats(chunk, start, want_h1, x86_types, delta_override)
@@ -994,19 +996,36 @@ fn block_stats_all(
         let pool = crate::parallel::compression_pool();
         if pool.current_num_threads() > 1 {
             let blocks: Vec<&[u8]> = data.chunks(FORCED_FILTER_BLOCK).collect();
-            return pool.install(|| {
+            let threads = pool.current_num_threads();
+            let stats: Vec<BlockStats> = pool.install(|| {
                 blocks
                     .par_iter()
                     .enumerate()
                     .map(|(index, chunk)| measure(index, chunk))
                     .collect()
             });
+            if clock {
+                eprintln!(
+                    "MTTIME block_stats_all={}ms blocks={} threads={threads}",
+                    started.elapsed().as_millis(),
+                    blocks.len()
+                );
+            }
+            return stats;
         }
     }
-    data.chunks(FORCED_FILTER_BLOCK)
+    let stats = data
+        .chunks(FORCED_FILTER_BLOCK)
         .enumerate()
         .map(|(index, chunk)| measure(index, chunk))
-        .collect()
+        .collect();
+    if clock {
+        eprintln!(
+            "MTTIME block_stats_all={}ms serial_path",
+            started.elapsed().as_millis()
+        );
+    }
+    stats
 }
 
 /// Member-level x86 choice for the trial-free path: whether to transform at

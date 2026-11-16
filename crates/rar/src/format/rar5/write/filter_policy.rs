@@ -149,6 +149,8 @@ pub(super) fn encode_with_filter_policy(
                 .and_then(|v| v.parse::<u8>().ok())
                 .filter(|&m| (1..=5).contains(&m))
                 .unwrap_or(1);
+            let clock = std::env::var_os("RAR_RS_MTTIME").is_some();
+            let pick_started = std::time::Instant::now();
             let specs = lzss_huff::best_combined_specs(
                 data,
                 method,
@@ -158,12 +160,27 @@ pub(super) fn encode_with_filter_policy(
                 lzss_huff::FILTER_E8E9,
                 trial_method,
             );
+            if clock {
+                eprintln!(
+                    "MTTIME filter_pick={}ms specs={}",
+                    pick_started.elapsed().as_millis(),
+                    specs.len()
+                );
+            }
             if specs.is_empty() {
                 return Ok(None);
             }
-            return Ok(Some(lzss_huff::encode_with_filters_mt(
+            let encode_started = std::time::Instant::now();
+            let packed = lzss_huff::encode_with_filters_mt(
                 data, method, dsl, &specs, variant, threads, cancel,
-            )?));
+            )?;
+            if clock {
+                eprintln!(
+                    "MTTIME member_encode={}ms",
+                    encode_started.elapsed().as_millis()
+                );
+            }
+            return Ok(Some(packed));
         }
     }
     if policy.delta != FilterMode::Disabled
