@@ -528,13 +528,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // starts at `hist_base() > 0` and the two differ by exactly that much —
     // using `hist_len()` here anchors every worker query short and silently
     // drops long-range matches later in a chain.
-    let lr_clock = std::env::var_os("RAR_RS_MTTIME").is_some();
-    let lr_started = std::time::Instant::now();
     let entry_len = lr_shared.total_pushed();
-    lr_shared.push(data);
-    if lr_clock {
-        eprintln!("MTTIME long_range={}ms", lr_started.elapsed().as_millis());
-    }
     let seed_tail = std::mem::take(&mut seed.tail);
 
     // Slice boundaries: one fixed chunk per slice keeps the near-window
@@ -563,16 +557,26 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // built once per call. With it the workers never build a lookbehind frame,
     // so the per-slice insert of up to 8 MiB per 2 MiB slice disappears and the
     // priced DP becomes affordable at MT speed.
+    // The long-range table and the row index both only need `data`, and
+    // neither reads the other: run them at once instead of one after the
+    // other. Serial they cost 28 ms + 100 ms of the member's wall time; the
+    // pair takes the longer of the two.
     let mt_clock = std::env::var_os("RAR_RS_MTTIME").is_some();
     let mt_start = std::time::Instant::now();
-    let row_index = super::parse::RowIndex::build_with_threads(data, n_workers);
-    let row_index_ref = &row_index;
-    if mt_clock {
-        eprintln!("MTTIME row_index={}ms", mt_start.elapsed().as_millis());
-    }
-    let mt_waves = std::time::Instant::now();
-
     let pool = crate::parallel::compression_pool();
+    let lr_stage = std::time::Instant::now();
+    let ((), row_index) = pool.join(
+        || lr_shared.push(data),
+        || super::parse::RowIndex::build_with_threads(data, n_workers),
+    );
+    if mt_clock {
+        eprintln!(
+            "MTTIME prelude={}ms (long_range + row_index together)",
+            lr_stage.elapsed().as_millis()
+        );
+    }
+    let row_index_ref = &row_index;
+    let mt_waves = std::time::Instant::now();
     // Rayon's Scope::spawn returns nothing; each worker deposits its
     // packed bytes into its own slot and we collect them wave-by-wave in
     // order after the scope joins everything.
