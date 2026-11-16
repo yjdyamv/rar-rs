@@ -1432,12 +1432,14 @@ fn optimal_parse_tokens(
         // alone, so it earns its place even when shorter than anything the
         // collector found. The collector only reports a candidate that
         // beats the longest found so far, so these have to be asked for
-        // separately. Only the first two cached distances are probed: a
-        // repeat of the most recent distance (or the one before it) is
-        // where the cheap symbols live, and probing all four roughly
-        // doubled the per-position pricing cost for a fraction of a
-        // percent of ratio.
-        for &repeat in state.reps.iter().take(2) {
+        // separately. All four cached distances are probed: the extra two
+        // cost one `match_length_at` each at a position the parse visits
+        // anyway, and measured free in wall time (waves 284-309 ms both
+        // ways) while buying 5,019 bytes on ntoskrnl `-m3` (5,883,538 ->
+        // 5,878,519). The earlier two-slot cap was a guess, not a
+        // measurement. Official RAR probes all four as well (its
+        // `FUN_140047698` loops over the four cache slots).
+        for &repeat in state.reps.iter() {
             if repeat == 0 || repeat > max_distance as u32 {
                 continue;
             }
@@ -2000,7 +2002,7 @@ fn parse_one_block(
         let relaxed = !strict
             && !has_short
             && longest <= RELAXED_MATCHLESS_MAX_LEN
-            && state.reps.iter().take(2).all(|&r| r == 0);
+            && state.reps.iter().all(|&r| r == 0);
         if strict || relaxed {
             let span = block.end - block.start;
             let mut all_literal = true;
@@ -2011,7 +2013,7 @@ fn parse_one_block(
                 // data (no match has ever been emitted, so the entry reps stay
                 // zero from the member head). A live rep re-arms the
                 // per-position probe loop, which the pricing pass would also run.
-                let reps_live = state.reps.iter().take(2).any(|&r| r != 0);
+                let reps_live = state.reps.iter().any(|&r| r != 0);
                 all_literal = !reps_live;
                 if reps_live {
                     'probe: for index in 0..span {
@@ -2024,7 +2026,7 @@ fn parse_one_block(
                         // Literals leave the distance memory untouched, so the reps
                         // here are the block-entry reps at every position, exactly
                         // what the pricing pass would probe with.
-                        for &repeat in state.reps.iter().take(2) {
+                        for &repeat in state.reps.iter() {
                             if repeat == 0 || repeat > max_distance as u32 {
                                 continue;
                             }
