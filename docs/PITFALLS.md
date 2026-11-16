@@ -924,3 +924,38 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   块）、滤镜 220 条 （类型 0 带通道 / 1 / 2 混用）；我们 55.0 KB（106 块）、52
   条类型 1。判价函数 （`FUN_14004600c`）逆完只值 0.16 pp，所以剩下的 2.9 pp
   更可能在块大小与滤镜上。
+
+## MT 行索引与 solid 成员（2026-11-16）
+
+- **solid 成员必须走逐块滤镜选择器**：`try_solid_filters` 原来调的是整成员探针
+  `lzss_huff::solid_filter_specs`（`filter_transform_wins` + 3 % 余量），它在
+  ntoskrnl 上**不选 x86 滤镜**，于是 solid 比自己的非 solid 还大 487 KB
+  （7,257,425 vs 6,770,399，官方 6,712,267）。改成先调
+  `filter_policy::combined_filter_specs`（与非 solid 同一个逐 64 KiB
+  `block_stats` 判据）、失败才回退探针后：6,839,224。**新增 solid 路径时，滤镜
+  决策要和非 solid 共用同一个选择器**，否则整条链白丢 6 %。
+- **行索引的桶定位要 O(1)**：`collect` 原来每次位置都 `hash → starts[hash]`（4 MB
+  随机）再 `partition_point` 二分找桶尾，19 B/位置里有一半是这次定位。
+  现在 build 时顺手写 `slot[pos]`（该位置在自己桶里的下标），查询只需
+  `index - starts[hash]` 得到可用候选数。collect 2.75 s → 1.55 s（整文件
+  depth 64），输出逐字节不变。**多写 6 B/位置的构建成本是赚的**。
+- **行索引 build 可以按连续位置区间并行**：分块统计桶计数 → 串行合并前缀和 →
+  给每块一个写游标 → 并行填 `positions`/`slot`（块内位置递增保证桶内顺序不变）。
+  155 → 82–90 ms。块数上限 8（16 块 123 ms，合并流量压过收益），每块最小
+  1 MiB。这是本模块唯一需要 `unsafe impl Sync` 的地方（写区间互不相交），
+  改结构体字段时要重新检查这个不变量。
+- **MT 切片下限对齐官方的 128 KiB**：官方 wave 粒度是 `threads × 128 KiB`
+  （`FUN_14004264c`），我们原来是 2 MiB 地板，13.9 MB 的成员永远只有 7 片，
+  `-mt8`/`-mt16`/`-mt24` 同速（waves 600–620 ms）。降到 128 KiB 后 48 片，
+  mt24 1065 → 620 ms。**还要按整 wave 取整**：`div_ceil(waves * workers)`，
+  否则 48 片后面挂一个 16 字节的尾片独占一整波。
+- **单成员 MT 不值得喂长表，solid 链必须喂**：`LONG_RANGE_INSIDE_MEMBER =
+  false` 让 `entry_len == 0` 的成员跳过采样长表——比例一个字节不变（行索引本身
+  就能覆盖整个窗口），wall 省 10–12 %。但**上一个成员的字节不在 `data` 里**，
+  行索引看不到，solid 链只能靠长表；早期"直接关掉"的写法会把
+  `solid_members_share_the_window_through_mt` 弄挂。
+- **第 5 字节过滤必须进 hash，别做候选循环里的过滤**：给 `RowIndex` 加一条与
+  `positions` 对齐的 `key` 流（5 字节 hash 的高 8 位），在候选循环里 `continue`
+  是安全的（前缀不同 ⇒ 长度 ≤ 4 ⇒ 不可能超过 `best_length`），但在 ntoskrnl 上
+  几乎从不命中，多一条 14 MB 流反而 1.56 s → 1.96 s。要省得让 hash 本身吃掉第
+  5 字节。

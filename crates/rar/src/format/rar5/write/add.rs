@@ -248,7 +248,17 @@ fn try_solid_filters(
 ) -> RarResult<Option<Vec<u8>>> {
     let variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
     let filters = cx.write_ctx().compression.filters;
-    let Some(specs) = lzss_huff::solid_filter_specs(data, method, dsl, variant, &filters)? else {
+    // Same per-block records the non-solid member path emits: the solid chain
+    // only changes where the transformed bytes go (into the shared window,
+    // through `encode_with_filters_continue`), not which filter wins. The
+    // older whole-member probe picker below stays as the fallback for the
+    // single-transform policies it was written for; on ntoskrnl it declines
+    // the x86 filter outright and that cost 600 KiB per solid member.
+    let Some(specs) =
+        super::filter_policy::combined_filter_specs(data, method, dsl, variant, filters).or(
+            lzss_huff::solid_filter_specs(data, method, dsl, variant, &filters)?,
+        )
+    else {
         return Ok(None);
     };
     let cancel = cx.cancel_token();
