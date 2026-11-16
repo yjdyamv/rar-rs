@@ -15,6 +15,8 @@ use std::sync::atomic::Ordering;
 use super::emit::{encode_block, encode_empty_block};
 #[cfg(feature = "parallel")]
 use super::parse::find_matches_in_range;
+#[cfg(feature = "parallel")]
+use super::parse::{EncoderMatchState, convert_tokens};
 use super::parse::{
     emitted_block_cap, find_block_end_adaptive, find_matches_optimal, find_matches_with_tail,
 };
@@ -427,6 +429,7 @@ pub fn encode_chunked_mt(
 /// filter records of a filtered member, which must be read before any
 /// output (their positions are member-relative).
 #[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)] // data, spec, seed, threads, progress, cancel
 pub(crate) fn encode_chunked_mt_with_progress(
     data: &[u8],
     spec: EncodeSpec<'_>,
@@ -470,7 +473,20 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // members, repetitive text) keep the caller's size unchanged.
     let cs = {
         let caller = chunk_size.max(1);
-        let by_count = data.len() / (threads.max(1) * 2);
+        // Slices per worker: every extra slice pays one price-table restart
+        // (the slice's first DP block is priced from scratch) — ~1.9% at
+        // 290 KiB against ~0.2% at 580 KiB on ntoskrnl. One slice per worker
+        // measured equal in wall time to two and 0.22 pp smaller (13 KB) at 24
+        // workers, so it is the default; workers are balanced by the rule that
+        // re-splits the member into a whole number of waves, and
+        // `RAR_RS_MT_SPW` raises the slice count when a machine wants slack
+        // for stragglers.
+        let spw = std::env::var("RAR_RS_MT_SPW")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(1);
+        let by_count = data.len() / (threads.max(1) * spw);
         // Smallest slice the scheduler will cut: slices below this lose more to
         // the per-slice rep/price reset than the extra workers return. 128 KiB
         // is also the official's wave granularity (`threads x 128 KiB`).
@@ -567,6 +583,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
         eprintln!("MTTIME states={}ms", mt_states.elapsed().as_millis());
     }
     let mut output = Vec::new();
+    // Two-phase mode collects each slice's parsed runs instead of its blocks;
+    // the serial pass below turns them into symbols and blocks.
+    let two_phase = slice_two_phase();
+    let mut collected: Vec<Vec<(u32, u32)>> = Vec::new();
     let mut first = 0usize;
     while first < n {
         if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
@@ -574,7 +594,11 @@ pub(crate) fn encode_chunked_mt_with_progress(
         }
         let last = (first + n_workers).min(n);
         let wave = &mut worker_states[..last - first];
-        let results = std::sync::Mutex::new(vec![None::<Vec<u8>>; last - first]);
+        let results = std::sync::Mutex::new(
+            (0..last - first)
+                .map(|_| None::<SliceOut>)
+                .collect::<Vec<_>>(),
+        );
         {
             // Shared read-only handles for the worker closures.
             let tail_ref = &seed_tail;
@@ -617,7 +641,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
             });
         }
         for r in results.into_inner().unwrap() {
-            output.extend(r.expect("worker slot filled"));
+            match r.expect("worker slot filled") {
+                SliceOut::Bytes(bytes) => output.extend(bytes),
+                SliceOut::Tokens(tokens) => collected.push(tokens),
+            }
         }
         if let Some(cb) = progress.as_deref_mut()
             && bounds[last] > bounds[first]
@@ -625,6 +652,34 @@ pub(crate) fn encode_chunked_mt_with_progress(
             cb(bounds[last] as u64, data.len() as u64);
         }
         first = last;
+    }
+
+    if two_phase {
+        // ADR 0012 phase 2: walk the slices in order with ONE repeat cache, so
+        // a distance that repeats what the previous slice emitted stays a
+        // `CacheRef`/`Repeat` instead of being re-priced as a fresh match. This
+        // is the pass the official decoder's serial adjudicator performs
+        // (`FUN_140044600`); it costs one `convert_tokens` sweep per slice and
+        // is why mt1..mt24 differ by ~125 B there.
+        let mut shared = EncoderMatchState::new([0u32; DIST_CACHE_SIZE], 0);
+        for (k, tokens) in collected.iter().enumerate() {
+            let (mut symbols, _freqs) =
+                convert_tokens(tokens, data, bounds[k]..bounds[k + 1], &mut shared, variant);
+            if k == 0
+                && let Some(lead) = lead_symbols
+            {
+                let mut joined = lead.to_vec();
+                joined.append(&mut symbols);
+                symbols = joined;
+            }
+            let mut bs = 0usize;
+            while bs < symbols.len() {
+                let (be, _) = find_block_end_adaptive(&symbols, bs, emitted_block_cap());
+                let is_last = is_final && k + 1 == n && be >= symbols.len();
+                output.extend(encode_block(&symbols[bs..be], is_last, variant));
+                bs = be;
+            }
+        }
     }
 
     if mt_clock {
@@ -749,6 +804,21 @@ pub(super) const MT_ROW_INDEX_DP_BLOCK: usize = super::parse::MT_DP_BLOCK_SIZE;
 /// budget on candidates while the sequential path spends it on 2-4 pricing
 /// passes; deeper levels beat sequential there instead (m5: 914,457 B against
 /// 921,710 B). The level's candidate depth is [`MT_ROW_INDEX_DEPTH`].
+/// What one worker slice hands back: finished blocks, or (two-phase mode,
+/// ADR 0012) the parsed runs for the serial adjudication pass.
+#[cfg(feature = "parallel")]
+enum SliceOut {
+    Bytes(Vec<u8>),
+    Tokens(Vec<(u32, u32)>),
+}
+
+/// Two-phase MT (ADR 0012): parse slices in parallel, adjudicate distances
+/// and emit serially. Off unless `RAR_RS_MT_TWO_PHASE` is set.
+#[cfg(feature = "parallel")]
+fn slice_two_phase() -> bool {
+    std::env::var("RAR_RS_MT_TWO_PHASE").is_ok_and(|value| value != "0")
+}
+
 #[cfg(feature = "parallel")]
 fn mt_slice_symbols_row_index(
     state: &mut EncoderState,
@@ -756,6 +826,7 @@ fn mt_slice_symbols_row_index(
     index: &super::parse::RowIndex,
     // Candidates compared per position; the MT tier's level dial.
     depth: usize,
+    defer: Option<&mut Vec<(u32, u32)>>,
 ) -> Vec<Symbol> {
     let MtSlice {
         data,
@@ -792,6 +863,7 @@ fn mt_slice_symbols_row_index(
             variant,
         },
         lr_q,
+        defer,
         |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
     );
     state.dist_cache = dist_cache;
@@ -812,7 +884,7 @@ fn encode_mt_slice(
     job: &MtJob<'_>,
     seed_tail: &[u8],
     state: &mut EncoderState,
-) -> Vec<u8> {
+) -> SliceOut {
     let MtSlice {
         data,
         s0,
@@ -887,11 +959,28 @@ fn encode_mt_slice(
     // Issue 15 step ③: the shared row index, not the greedy chain. Every MT
     // caller passes one; the chain tier below is the fallback for callers that
     // do not (the sequential-quality probe and tests).
-    let mut symbols = if let Some(index) = index {
-        mt_slice_symbols_row_index(state, slice, index, depth)
-    } else {
-        mt_slice_symbols_low_step(state, slice, chain_len, lazy_thresh, seed_tail)
+    // ADR 0012 phase 1: parse only. The repeat-cache adjudication that turns
+    // these tokens into `Symbol::CacheRef`/`Match` runs later, serially, over
+    // every slice in order, so a slice's distances may refer to repeats the
+    // previous slice established. Measured, that adjudication is worth ~nothing
+    // here (5 B on ntoskrnl) because our tokens carry absolute distances and
+    // the cache is derived from them, not the reverse; the mode stays because
+    // it is the shape the official encoder uses and the hook a future
+    // distance-choosing pass needs.
+    let two_phase = slice_two_phase();
+    let mut tokens: Vec<(u32, u32)> = Vec::new();
+    let mut symbols = match (index, two_phase) {
+        (Some(index), true) => {
+            mt_slice_symbols_row_index(state, slice, index, depth, Some(&mut tokens))
+        }
+        (Some(index), false) => mt_slice_symbols_row_index(state, slice, index, depth, None),
+        (None, _) => mt_slice_symbols_low_step(state, slice, chain_len, lazy_thresh, seed_tail),
     };
+    if two_phase {
+        // The lead symbols belong to the member, not the slice: phase 2 emits
+        // them ahead of slice 0's stream (where they were prepended before).
+        return SliceOut::Tokens(tokens);
+    }
     if let Some(lead) = lead_symbols {
         let mut joined = lead.to_vec();
         joined.append(&mut symbols);
@@ -906,7 +995,7 @@ fn encode_mt_slice(
         out.extend(encode_block(&symbols[bs..be], is_last, variant));
         bs = be;
     }
-    out
+    SliceOut::Bytes(out)
 }
 
 /// MT-only low-step parse for one worker slice (see [`encode_chunked_mt`]):

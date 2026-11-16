@@ -133,6 +133,7 @@ pub(crate) fn find_matches_with_tail(
 /// MT-only: the driver is `chunked::mt_slice_symbols_row_index`, which is
 /// compiled only with the `parallel` feature.
 #[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)] // the parse's inputs plus the two out-params
 pub(crate) fn windowed_priced_parse<F>(
     combined: &[u8],
     span: std::ops::Range<usize>,
@@ -140,6 +141,10 @@ pub(crate) fn windowed_priced_parse<F>(
     last_length: &mut u32,
     limits: super::MatchLimits,
     lr: Option<(&match_finder::LongRange, usize, usize)>,
+    // Two-phase mode: collect the parsed `(length, distance)` runs here and
+    // return no symbols, so the caller can re-adjudicate distances against a
+    // continuous repeat cache after every slice has been parsed (ADR 0012).
+    mut defer: Option<&mut Vec<(u32, u32)>>,
     mut emit: F,
 ) -> Vec<Symbol>
 where
@@ -222,11 +227,13 @@ where
 
         let live_repeat = state.reps.iter().any(|&distance| distance != 0);
         if longest <= RELAXED_MATCHLESS_MAX_LEN && !live_repeat {
-            symbols.extend(
-                combined[block_start..block_end]
-                    .iter()
-                    .map(|&byte| Symbol::Literal(byte)),
-            );
+            if defer.is_none() {
+                symbols.extend(
+                    combined[block_start..block_end]
+                        .iter()
+                        .map(|&byte| Symbol::Literal(byte)),
+                );
+            }
             state.last_length = 0;
         } else {
             let tokens = optimal_parse_tokens(
@@ -238,6 +245,9 @@ where
                 state,
                 &mut arrays,
             );
+            if let Some(out) = defer.as_deref_mut() {
+                out.extend_from_slice(&tokens);
+            }
             let (block_symbols, (nc, dc, ldc, rc)) = convert_tokens(
                 &tokens,
                 combined,
@@ -249,7 +259,9 @@ where
                 let (nc_l, dc_l, ldc_l, rc_l) = prices_from_frequencies(&nc, &dc, &ldc, &rc);
                 carried = Some(TokenPrices::new(&nc_l, &dc_l, &ldc_l, &rc_l));
             }
-            symbols.extend(block_symbols);
+            if defer.is_none() {
+                symbols.extend(block_symbols);
+            }
         }
         block_start = block_end;
     }
@@ -794,13 +806,13 @@ const OPT_BLOCK_SIZE: usize = 64 * 1024;
 /// transitions so a token's cost and its validity are priced against the
 /// same state the decoder will hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EncoderMatchState {
+pub(crate) struct EncoderMatchState {
     reps: [u32; DIST_CACHE_SIZE],
     last_length: u32,
 }
 
 impl EncoderMatchState {
-    fn new(reps: [u32; DIST_CACHE_SIZE], last_length: u32) -> Self {
+    pub(crate) fn new(reps: [u32; DIST_CACHE_SIZE], last_length: u32) -> Self {
         Self { reps, last_length }
     }
 
@@ -1541,7 +1553,7 @@ type ConvertedTokens = (Vec<Symbol>, TokenFrequencies);
 /// same way, so prices from these frequencies are exact). Returns the
 /// symbols and the four frequency vectors. `state` is advanced, mirroring
 /// the decoder's cache transitions.
-fn convert_tokens(
+pub(crate) fn convert_tokens(
     tokens: &[(u32, u32)],
     combined: &[u8],
     block: std::ops::Range<usize>,
