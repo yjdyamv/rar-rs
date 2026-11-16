@@ -299,6 +299,7 @@ const BUILD_MIN_PART: usize = 1 << 20;
 struct PlaceTargets {
     positions: *mut u32,
     slot: *mut u32,
+    avail: *mut u16,
     len: usize,
 }
 
@@ -311,14 +312,15 @@ impl PlaceTargets {
     ///
     /// The caller (and only the caller) is responsible for keeping the writes
     /// of concurrent users disjoint, as documented on [`PlaceTargets`].
-    unsafe fn with_slices<R>(&self, f: impl FnOnce(&mut [u32], &mut [u32]) -> R) -> R {
-        let (positions, slot) = unsafe {
+    unsafe fn with_slices<R>(&self, f: impl FnOnce(&mut [u32], &mut [u32], &mut [u16]) -> R) -> R {
+        let (positions, slot, avail) = unsafe {
             (
                 std::slice::from_raw_parts_mut(self.positions, self.len),
                 std::slice::from_raw_parts_mut(self.slot, self.len),
+                std::slice::from_raw_parts_mut(self.avail, self.len),
             )
         };
-        f(positions, slot)
+        f(positions, slot, avail)
     }
 }
 
@@ -347,9 +349,14 @@ pub(crate) struct RowIndex {
     /// bucket. Lets `collect` find the newest candidate in one sequential load
     /// instead of hashing plus a binary search inside the bucket.
     slot: Vec<u32>,
-    /// `starts[h]` is where bucket `h` begins in `positions`; `collect` needs it
-    /// to turn a slot back into "how many same-hash predecessors do I have".
-    starts: Vec<u32>,
+    /// How many same-hash predecessors (within `positions`) each position has,
+    /// saturated at `u16::MAX`. `collect` used to derive this as
+    /// `slot[pos] - starts[hash(pos)]`, which cost a random read of the 4 MB
+    /// `starts` table per position; a sequential 1.4 B/position stream is
+    /// cheaper than one random miss, and the walk below already touches
+    /// `slot[pos]` next to it. Saturating is exact for every `depth` this
+    /// module uses (at most 256).
+    avail: Vec<u16>,
 }
 
 #[cfg(feature = "parallel")]
@@ -395,18 +402,20 @@ impl RowIndex {
         let mut cursor: Vec<u32> = starts[..ROW_INDEX_BUCKETS].to_vec();
         let mut positions = vec![0u32; count];
         let mut slot = vec![0u32; count];
-        for (pos, slot) in slot.iter_mut().enumerate() {
+        let mut avail = vec![0u16; count];
+        for (pos, (slot, avail)) in slot.iter_mut().zip(avail.iter_mut()).enumerate() {
             let hash = Self::hash(data, pos);
             let index = cursor[hash];
             positions[index as usize] = pos as u32;
             *slot = index;
+            *avail = (index - starts[hash]).min(u16::MAX as u32) as u16;
             cursor[hash] = index + 1;
         }
         drop(cursor);
         Self {
             positions,
             slot,
-            starts,
+            avail,
         }
     }
 
@@ -458,11 +467,14 @@ impl RowIndex {
         drop(tables);
         let mut positions = vec![0u32; count];
         let mut slot = vec![0u32; count];
+        let mut avail = vec![0u16; count];
         let targets = PlaceTargets {
             positions: positions.as_mut_ptr(),
             slot: slot.as_mut_ptr(),
+            avail: avail.as_mut_ptr(),
             len: count,
         };
+        let starts_ref: &[u32] = &starts;
         pool.scope(|scope| {
             for (part, cursor) in cursors.iter_mut().enumerate() {
                 let range = range(part);
@@ -473,12 +485,13 @@ impl RowIndex {
                     // the sub-ranges of the buckets it owns (the cursors above
                     // partition every bucket across the workers).
                     unsafe {
-                        targets.with_slices(|positions, slot| {
+                        targets.with_slices(|positions, slot, avail| {
                             for pos in range {
                                 let hash = Self::hash(data, pos);
                                 let index = cursor[hash];
                                 positions[index as usize] = pos as u32;
                                 slot[pos] = index;
+                                avail[pos] = (index - starts_ref[hash]).min(u16::MAX as u32) as u16;
                                 cursor[hash] = index + 1;
                             }
                         });
@@ -489,7 +502,7 @@ impl RowIndex {
         Self {
             positions,
             slot,
-            starts,
+            avail,
         }
     }
 
@@ -538,7 +551,7 @@ impl RowIndex {
         // from the small `starts` table) instead of a hash plus a binary search
         // per position.
         let index = self.slot[pos] as usize;
-        let available = (index - self.starts[Self::hash(data, pos)] as usize).min(depth);
+        let available = (self.avail[pos] as usize).min(depth);
         for step in 0..available {
             let at = index - 1 - step;
             let candidate = self.positions[at] as usize;
