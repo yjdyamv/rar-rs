@@ -878,25 +878,30 @@ fn block_stats(
         return stats;
     }
     // Pick the channel whose delta stream is most skewed. The sweep is per
-    // channel (eleven passes over the block) rather than per byte (one pass,
-    // eleven comparisons per byte): the block is 64 KiB and already in L2, so
-    // the repeated passes are free, while the arithmetic is the same and this
-    // version keeps the picks the corpus numbers were measured with.
+    // channel rather than per byte (eleven comparisons per byte): the block is
+    // 64 KiB and already in L2, so the repeated passes are free. Lanes are
+    // walked with a stride instead of `i % channels` so the loop carries no
+    // integer division — the modulo cost 153 M divisions on a 13.9 MB member
+    // and made this the largest serial block in front of the encoder.
     let mut best: Option<(u8, u64)> = None;
     for &ch in BLOCK_DELTA_CHANNELS {
         let ch_usize = ch as usize;
         if block.len() < ch_usize * 4 {
             continue;
         }
-        let mut prev = [0u8; 32];
         let mut near_zero = 0u64;
-        for (i, &byte) in block.iter().enumerate() {
-            let lane = i % ch_usize;
-            let delta = prev[lane].wrapping_sub(byte) as i32;
-            if delta.unsigned_abs() <= 8 {
-                near_zero += 1;
+        for lane in 0..ch_usize {
+            let mut prev = 0u8;
+            let mut i = lane;
+            while i < block.len() {
+                let byte = block[i];
+                let delta = prev.wrapping_sub(byte) as i32;
+                if delta.unsigned_abs() <= 8 {
+                    near_zero += 1;
+                }
+                prev = byte;
+                i += ch_usize;
             }
-            prev[lane] = byte;
         }
         if best.is_none_or(|(_, b)| near_zero > b) {
             best = Some((ch, near_zero));
