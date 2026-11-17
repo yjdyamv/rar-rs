@@ -17,10 +17,10 @@ RAR/UNRAR binary is required at runtime.
   controls, delta/x86 filters, solid archives, parallel compression,
   verification and extraction. The multi-threaded ladder runs the same walk
   parser at every level, differentiated by how many candidates it compares per
-  position and, from `-m4` up, by the per-block filter decision. `-m3`..`-m5`
-  run within 0.86–1.13x of WinRAR 7.23's time for the same level on a 13.9 MB
-  binary and on 9.2 MB of markdown, with the ratio within 0.7 pp; `-m1`/`-m2`
-  are slower but pack smaller (see `PLAN.md`).
+  position and, from `-m4` up, by the per-block filter decision. `-m4`/`-m5`
+  run at parity with WinRAR 7.23 and `-m3` within 1.3x on a 13.9 MB binary and
+  on 9.2 MB of markdown, with the packed size within 2.4 pp and 0.7 pp
+  respectively; `-m1`/`-m2` are slower but pack smaller (see `PLAN.md`).
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
   comments, SFX handling, string search, symlinks and hardlinks.
 - **Encryption** — file-level AES-256 with a chained HMAC-SHA256 KDF, plus

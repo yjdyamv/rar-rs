@@ -111,10 +111,7 @@ struct MtJob<'a> {
     depth: usize,
     /// How far back the walk's candidates may reach (see [`WALK_REACH`]).
     reach: usize,
-    /// Cap on the per-slice lookbehind this slice seeds (see [`PREVIEW_TAIL`]).
-    near_cap: usize,
-    /// Lazy lookahead for the walk's chain tier: `0` disables the second probe
-    /// (see [`PREVIEW_LAZY`]).
+    /// Lazy lookahead for the walk (see [`walk_lazy_max`]).
     walk_lazy: u32,
     /// Shared read-only row index over the whole member (issue 15 step ③):
     /// every MT slice parses against it, which is what makes a slice
@@ -528,17 +525,6 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let force_walk = std::env::var("RAR_RS_MT_WALK").is_ok_and(|value| value != "0");
     let dp_rung = priced_dp_requested() && level >= 4;
     let walk_tier = force_walk || (level <= WALK_MAX_LEVEL && !dp_rung);
-    // `-m1` is the preview rung only when asked for (`RAR_RS_PREVIEW=1`): no
-    // member-wide index at all, the walk over a per-slice chain with a short
-    // tail. It is off by default because a short tail cannot see long-range
-    // redundancy — on 9.2 MB of markdown a 32 KiB tail packs 3,246,179 B where
-    // a full window packs 244,295 — so it is a gamble, not a rung.
-    let preview = level == 1 && !force_walk && preview_enabled();
-    let near_cap = if preview {
-        PREVIEW_TAIL
-    } else {
-        near_window_max()
-    };
     // How far back the walk's candidates may reach. **Full window by default**:
     // capping it below `-md` silently drops matches the dictionary promises, and
     // that is catastrophic rather than merely lossy on long-range redundancy
@@ -706,9 +692,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value >= 1)
         .unwrap_or(8);
-    // The preview rung builds no member-wide index: its prelude is the whole
-    // cost it is trying to avoid.
-    let need_index = !no_index_enabled() && !use_prev4 && !preview;
+    let need_index = !no_index_enabled() && !use_prev4;
     let lr_stage = std::time::Instant::now();
     let ((), (row_index, prev4_index)) = pool.join(
         || lr_shared.push(data),
@@ -784,10 +768,9 @@ pub(crate) fn encode_chunked_mt_with_progress(
                             &MtJob {
                                 chain_len,
                                 lazy_thresh,
-                                depth: if preview { PREVIEW_DEPTH } else { row_depth },
+                                depth: row_depth,
                                 reach: walk_reach,
-                                near_cap,
-                                walk_lazy: if preview { PREVIEW_LAZY } else { walk_lazy_max() },
+                                walk_lazy: walk_lazy_max(),
                                 index: row_index_ref,
                                 prev4: prev4_ref,
                                 is_last_block_of_member: is_final && k + 1 == n,
@@ -943,27 +926,8 @@ const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 384];
 #[cfg(feature = "parallel")]
 const WALK_MAX_LEVEL: usize = 5;
 
-/// `-m1`'s per-slice lookbehind cap. The preview rung gives up cross-slice reach
-/// on purpose: seeding a wide tail is most of what a chain tier costs, and the
-/// official's `-m1` is a preview too (54.34% on the kernel image).
-#[cfg(feature = "parallel")]
-const PREVIEW_TAIL: usize = 32 * 1024;
-
-/// `-m1`'s candidate walk length. Depth 4 measured 208 ms / 51.22% against
-/// depth 64's 245 ms / 51.04%: past a handful of links a short tail has nothing
-/// more to offer.
-#[cfg(feature = "parallel")]
-const PREVIEW_DEPTH: usize = 4;
-
-/// `-m1`'s lazy lookahead: off. The one-step probe doubles the candidate work
-/// for every match shorter than the threshold, which a preview rung cannot
-/// afford; measured 90 -> 72 ms of waves for 0.3 pp.
-#[cfg(feature = "parallel")]
-const PREVIEW_LAZY: u32 = 0;
-
-/// The walk's lazy lookahead for the indexed rungs. `RAR_RS_WALK_LAZY` overrides
-/// it for measurement: on the preview rung disabling it made the archive both
-/// smaller and faster, so it is worth checking the wider rungs.
+/// The walk's lazy lookahead for the indexed rungs. `RAR_RS_WALK_LAZY`
+/// overrides it for measurement: `0` costs ~40 ms less and ~0.8 pp more.
 #[cfg(feature = "parallel")]
 fn walk_lazy_max() -> u32 {
     static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -997,15 +961,6 @@ pub(crate) static DP_TIER_FORCED: std::sync::atomic::AtomicBool =
 #[cfg(all(test, feature = "parallel"))]
 pub(crate) fn set_dp_tier(enabled: bool) {
     DP_TIER_FORCED.store(enabled, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Whether `-m1` takes the preview shape (`RAR_RS_PREVIEW=1`, off by default).
-/// It is a measurement knob: the short tail it needs is unsafe on data whose
-/// redundancy is long-range.
-#[cfg(feature = "parallel")]
-fn preview_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RAR_RS_PREVIEW").is_ok_and(|value| value != "0"))
 }
 
 /// Lazy lookahead cap for the `-m1` walk. Matches shorter than this are worth
@@ -1276,7 +1231,6 @@ fn encode_mt_slice(
         lazy_thresh,
         depth,
         reach,
-        near_cap,
         walk_lazy,
         index,
         prev4,
@@ -1298,7 +1252,7 @@ fn encode_mt_slice(
     // Issue 15 step ③: with the shared row index there is no lookbehind frame
     // to build at all — the index already holds every position of the member,
     // so the slice copy, the tail seeding and the per-slice finder disappear.
-    let want = near_cap.min(dict_size);
+    let want = near_window_max().min(dict_size);
     let tail_ctx: Vec<u8> = if index.is_some() {
         Vec::new()
     } else if s0 >= want {
