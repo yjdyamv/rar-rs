@@ -261,28 +261,36 @@ fn build_legacy_solid_encoder(
     }
 }
 
-/// Pick the best of the detector's filter candidates with a cheap probe.
+/// Pick the best of the detector's filter candidates with a cheap probe, or
+/// none at all when plain already wins.
 ///
 /// The trial used to encode the whole member once per candidate — four full
 /// passes over a 13.9 MB member — where WinRAR codes it once. Encoding one
-/// 256 KiB slice from the middle of the member at the cheapest level ranks the
-/// candidates for a fraction of that, and the member is then coded exactly once
-/// with the winner. The slice is large enough to show a filter's effect (a
-/// delta channel is local, x86 clusters are dense) and small enough to cost
-/// about 1% of a full pass.
+/// 256 KiB slice from the middle of the member at the cheapest level ranks
+/// "no filter" and every candidate for about 1% of a full pass each, and the
+/// member is then coded exactly once with the winner. Plain keeps ties, the
+/// same rule the full-member comparison used.
+///
+/// Returning `None` is what stops `-m5` paying for a filter pass that PPMd
+/// always beats: 10.7 s of its 28.9 s on the kernel image went to an encode
+/// whose result was never emitted.
 fn best_filter_candidate(
     data: &[u8],
     candidates: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)>,
 ) -> Option<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> {
     use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
-    if candidates.len() <= 1 {
-        return candidates.into_iter().next();
+    if candidates.is_empty() {
+        return None;
     }
     const PROBE: usize = 256 * 1024;
     let probe_start = data.len().saturating_sub(PROBE) / 2;
     let probe = &data[probe_start..(probe_start + PROBE).min(data.len())];
     let probe_ranges = [0..probe.len()];
     let probe_options = options_for_level(1);
+    let plain = Unpack29Encoder::with_options(probe_options)
+        .encode_member(probe)
+        .ok()?
+        .len();
     let mut best: Option<(usize, (Rar29FilterKind, Vec<std::ops::Range<usize>>))> = None;
     for candidate in candidates {
         let Ok(packed) = Unpack29Encoder::with_options(probe_options)
@@ -295,7 +303,10 @@ fn best_filter_candidate(
             best = Some((size, candidate));
         }
     }
-    best.map(|(_, candidate)| candidate)
+    // Strictly better than plain, or the filter does not earn its pass. A tie
+    // keeps plain, matching the full-member comparison the trial used.
+    best.filter(|(size, _)| *size < plain)
+        .map(|(_, candidate)| candidate)
 }
 
 /// The standard-filter candidates the `-mc` policy allows for one member.
