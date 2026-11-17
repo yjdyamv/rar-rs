@@ -119,10 +119,12 @@ struct MtJob<'a> {
     /// for callers that do not have one — the sequential-quality probe and
     /// tests).
     index: Option<&'a super::parse::RowIndex>,
-    /// Position-indexed four-byte chain, the `RAR_RS_PREV4` alternative to
-    /// `index` for the walk: same candidates, but its build is a linear pass
-    /// with sequential writes instead of the row index's counting sort.
-    prev4: Option<&'a super::parse::Prev4Index>,
+    /// Position-indexed chain, the `RAR_RS_PREV4` alternative to `index` for
+    /// the walk: same candidates, but a linear pass with sequential writes
+    /// instead of the row index's counting sort. A plain slice, not the owning
+    /// type, because the driver builds it wave by wave: wave `w` may read
+    /// exactly what is built when it starts.
+    prev4: Option<&'a [u32]>,
     /// This slice carries the member's last block.
     is_last_block_of_member: bool,
     /// Filter records of this member, as absolute offsets: every slice emits
@@ -697,37 +699,38 @@ pub(crate) fn encode_chunked_mt_with_progress(
         } else {
             MT_ROW_INDEX_DEPTH[level]
         });
-    // Parts of the prev4 build. It has to be one: a chain cannot be built in
-    // independent ranges, because each part's head tables start empty and a walk
-    // stops at the part's first occurrence of a prefix. Measured on 9,251,209 B of
-    // markdown the exact build packs 244,419 B; 2 parts 393,459; 8 parts
-    // 1,231,478. The serial pass is the cheap one anyway — 49 ms of prelude
-    // against the counting sort's 120 — so `RAR_RS_PREV4_PARTS` only measures the
-    // trade.
-    let prev4_parts = std::env::var("RAR_RS_PREV4_PARTS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value >= 1)
-        .unwrap_or(1);
     let need_index = !no_index_enabled() && !use_prev4;
+    // The chain's first wave is built here; the rest is built one wave ahead in
+    // the loop below. A chain cannot be built in independent ranges — each
+    // range's head tables would start empty and a walk stops at that range's
+    // first occurrence of a prefix (measured on 9,251,209 B of markdown: exact
+    // 244,419 B, 2 ranges 393,459, 8 ranges 1,231,478) — so building all of it up
+    // front costs 48 ms of serial prelude on a 13.9 MB member. Extending it is
+    // one sequential pass over the new range, and wave `w` only ever reads
+    // `prev[..bounds[last]]`, so the ranges stay disjoint and that pass runs
+    // while the wave it feeds parses.
+    let first_wave_end = bounds[n_workers.min(n)];
     let lr_stage = std::time::Instant::now();
-    let ((), (row_index, prev4_index)) = pool.join(
+    let ((), (row_index, mut chain_builder)) = pool.join(
         || lr_shared.push(data),
         || {
             (
                 need_index.then(|| super::parse::RowIndex::build_with_threads(data, n_workers)),
-                use_prev4.then(|| super::parse::Prev4Index::build(data, prev4_parts)),
+                use_prev4.then(|| {
+                    let mut builder = super::parse::Prev4Builder::new(data.len());
+                    builder.extend(data, first_wave_end);
+                    builder
+                }),
             )
         },
     );
     if mt_clock {
         eprintln!(
-            "MTTIME prelude={}ms (long_range + row_index together)",
+            "MTTIME prelude={}ms (long_range + chain prefix + row_index together)",
             lr_stage.elapsed().as_millis()
         );
     }
     let row_index_ref = row_index.as_ref();
-    let prev4_ref = prev4_index.as_ref();
     let mt_waves = std::time::Instant::now();
     // Rayon's Scope::spawn returns nothing; each worker deposits its
     // packed bytes into its own slot and we collect them wave-by-wave in
@@ -754,6 +757,27 @@ pub(crate) fn encode_chunked_mt_with_progress(
             return Err(RarError::Cancelled);
         }
         let last = (first + n_workers).min(n);
+        let next_last = (last + n_workers).min(n);
+        // Split the chain: this wave reads `prev[..built]`, and one more task in
+        // the same scope fills `prev[built..next_end]`. The ranges are disjoint
+        // (the workers never look past their own position, which is below
+        // `built`), so the extension costs no wall time.
+        let mut extend_task: Option<(&mut [u32], &mut [u32], usize)> = None;
+        let chain_ref: Option<&[u32]> = match chain_builder.as_mut() {
+            Some(builder) => {
+                let built = builder.built;
+                if next_last > last {
+                    let to = bounds[next_last].min(data.len().saturating_sub(3));
+                    let (read_part, rest) = builder.prev.split_at_mut(built);
+                    let (write_part, _) = rest.split_at_mut(to - built);
+                    extend_task = Some((&mut builder.heads, write_part, built));
+                    Some(&*read_part)
+                } else {
+                    Some(&builder.prev[..built])
+                }
+            }
+            None => None,
+        };
         let wave = &mut worker_states[..last - first];
         let results = std::sync::Mutex::new(
             (0..last - first)
@@ -766,6 +790,9 @@ pub(crate) fn encode_chunked_mt_with_progress(
             let lr_ref = &lr_shared;
             let results_ref = &results;
             pool.scope(|scope| {
+                if let Some((heads, out, from)) = extend_task {
+                    scope.spawn(move |_| super::parse::prev4_extend(heads, data, out, from));
+                }
                 for (i, state) in wave.iter_mut().enumerate() {
                     let k = first + i;
                     let (s0, e0) = (bounds[k], bounds[k + 1]);
@@ -789,7 +816,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
                                 reach: walk_reach,
                                 walk_lazy: walk_lazy(),
                                 index: row_index_ref,
-                                prev4: prev4_ref,
+                                prev4: chain_ref,
                                 is_last_block_of_member: is_final && k + 1 == n,
                                 records,
                                 // Only the first slice sees chain history as its
@@ -815,6 +842,12 @@ pub(crate) fn encode_chunked_mt_with_progress(
             && bounds[last] > bounds[first]
         {
             cb(bounds[last] as u64, data.len() as u64);
+        }
+        if let Some(builder) = chain_builder.as_mut()
+            && next_last > last
+        {
+            // The extension task above has finished with the scope.
+            builder.built = bounds[next_last].min(data.len().saturating_sub(3));
         }
         first = last;
     }
@@ -1176,13 +1209,13 @@ fn mt_slice_symbols_row_index(
 ///
 /// Same parser and same candidate contract as
 /// [`mt_slice_symbols_row_index`], but the candidates come from
-/// [`super::parse::Prev4Index`] instead of the counting-sorted row index, so
+/// [`super::parse::prev4_collect`] instead of the counting-sorted row index, so
 /// the member-wide prelude is a linear pass instead of a bucket sort.
 #[cfg(feature = "parallel")]
 fn mt_slice_symbols_prev4(
     state: &mut EncoderState,
     slice: MtSlice<'_>,
-    prev4: &super::parse::Prev4Index,
+    chain: &[u32],
     depth: usize,
     reach: usize,
     lazy: u32,
@@ -1220,7 +1253,7 @@ fn mt_slice_symbols_prev4(
         },
         lazy,
         |pos, _cache, runs| {
-            prev4.collect(data, pos, reach.min(pos), max_match, depth, runs);
+            super::parse::prev4_collect(chain, data, pos, reach.min(pos), max_match, depth, runs);
             if let Some((long_range, near_reach, anchor)) = lr_q
                 && pos + 4 <= e0
             {

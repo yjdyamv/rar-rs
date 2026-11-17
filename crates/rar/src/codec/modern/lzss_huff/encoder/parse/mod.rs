@@ -95,7 +95,8 @@ pub(crate) use optimal::set_price_carry_enabled;
 pub(crate) use optimal::{EncoderMatchState, convert_tokens};
 #[cfg(feature = "parallel")]
 pub(super) use optimal::{
-    MT_DP_BLOCK_SIZE, Prev4Index, RowIndex, find_matches_in_range, prev4_enabled,
+    MT_DP_BLOCK_SIZE, Prev4Builder, RowIndex, find_matches_in_range, prev4_collect,
+    prev4_enabled, prev4_extend,
     windowed_priced_parse, windowed_walk_parse,
 };
 pub(super) use optimal::{find_matches_optimal, find_matches_with_tail};

@@ -339,142 +339,157 @@ fn row_index_hash_bits() -> u32 {
 #[cfg(feature = "parallel")]
 const DEFAULT_ROW_INDEX_HASH_BITS: u32 = 20;
 
-/// Position-indexed four-byte predecessor chain: for every position, the
-/// distance back to the previous position with the same four-byte hash
-/// (`0` = none).
-///
-/// This is the official's `prev4` shape, and the reason it matters is *where
-/// it writes*: `prev[pos]` is the position's own index, so the build is one
-/// linear pass with sequential writes. `RowIndex` instead counting-sorts into
-/// bucket order, and that scatter (plus its count and merge passes) is the
-/// prelude's whole cost. Candidate *order* is the same (newest first), and a
-/// candidate is still verified by its bytes, so a hash collision only ends a
-/// walk early.
-///
-/// The parts are independent and each writes only its own range, so the build
-/// parallelises without any order constraint. Each part starts with empty head
-/// tables, so the first occurrence of a prefix inside a part has no
-/// predecessor: with 8 parts that loses one candidate per (part, prefix),
-/// which a byte-verified walk cannot even observe.
+/// The hash the chain and its head table share. It is deliberately the same one
+/// [`RowIndex`] uses, which is what makes the two report identical candidates at
+/// the same depth (`prev4_candidates_match_the_row_index` checks exactly that).
 #[cfg(feature = "parallel")]
-pub(crate) struct Prev4Index {
-    /// Distance back to the previous same-hash position, 0 for none.
-    prev: Vec<u32>,
+fn prev4_hash(data: &[u8], pos: usize) -> usize {
+    let value = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+    (value.wrapping_mul(0x9E37_79B1) >> (32 - row_index_hash_bits())) as usize
+}
+
+/// Fill one link per position over `[from, from + out.len())`.
+///
+/// `heads[hash]` holds `position + 1` of the last position with that hash, so a
+/// range builds correctly as long as `heads` already covers everything before
+/// `from`. That is what lets the MT driver build wave by wave instead of paying
+/// the whole pass before the parse starts.
+#[cfg(feature = "parallel")]
+pub(crate) fn prev4_extend(heads: &mut [u32], data: &[u8], out: &mut [u32], from: usize) {
+    for (offset, slot) in out.iter_mut().enumerate() {
+        let pos = from + offset;
+        let hash = prev4_hash(data, pos);
+        let last = heads[hash];
+        *slot = if last == 0 {
+            0
+        } else {
+            (pos + 1 - last as usize) as u32
+        };
+        heads[hash] = (pos + 1) as u32;
+    }
+}
+
+/// Position-indexed predecessor chain: for every position, the distance back to
+/// the previous position with the same hash (`0` = none).
+///
+/// This is the official's shape: `FUN_140043670` allocates the chain at
+/// `ctx+0x120` as `window * 4` bytes and `FUN_1400468d4` walks it as
+/// `ring[cand % ctx[0x10]]`, one link per position. What matters is *where it
+/// writes*: `prev[pos]` is the position's own index, so the build is one linear
+/// pass with sequential writes. `RowIndex` instead counting-sorts into bucket
+/// order, and that scatter (plus its count and merge passes) is the prelude's
+/// whole cost. Candidate *order* is the same (newest first), and a candidate is
+/// still verified by its bytes, so a hash collision only ends a walk early.
+///
+/// It also *extends*: the head table is the entire state, so a later range can be
+/// appended without touching the earlier one. The MT driver uses that to take the
+/// prelude off the critical path — wave `w` reads `prev[..end_w]` while the
+/// extension fills `prev[end_w..end_{w+1}]`, and those ranges are disjoint, so
+/// one task builds the next wave's range while the others parse. That is why the
+/// fields are readable rather than private.
+///
+/// A whole-member build therefore has to go through here range by range; it
+/// cannot be split into parallel ranges, because each range's head tables would
+/// start empty and a walk stops at that range's first occurrence of a prefix
+/// (measured on 9,251,209 B of markdown: exact 244,419 B, 2 ranges 393,459,
+/// 8 ranges 1,231,478).
+#[cfg(feature = "parallel")]
+pub(crate) struct Prev4Builder {
+    pub(crate) heads: Vec<u32>,
+    pub(crate) prev: Vec<u32>,
+    /// Positions `[..built]` have their link filled.
+    pub(crate) built: usize,
 }
 
 #[cfg(feature = "parallel")]
-impl Prev4Index {
-    pub(crate) fn build(data: &[u8], parts: usize) -> Self {
-        use rayon::prelude::*;
-        let count = data.len().saturating_sub(3);
-        let mut prev = vec![0u32; data.len()];
-        let parts = parts.max(1);
-        let chunk = count.div_ceil(parts).max(1);
-
-        // Disjoint output ranges, one per part (see `RowIndex::build_split`
-        // for the same shape).
-        let mut ranges: Vec<(&mut [u32], usize)> = Vec::new();
-        let mut rest: Option<&mut [u32]> = Some(&mut prev[..]);
-        let mut base = 0usize;
-        while base < count {
-            let take = chunk.min(count - base);
-            let remaining = rest.take().expect("ranges cover the buffer once");
-            let (head, tail) = remaining.split_at_mut(take);
-            ranges.push((head, base));
-            rest = Some(tail);
-            base += take;
+impl Prev4Builder {
+    pub(crate) fn new(len: usize) -> Self {
+        Self {
+            heads: vec![0u32; 1usize << row_index_hash_bits()],
+            prev: vec![0u32; len],
+            built: 0,
         }
-
-        ranges.into_par_iter().for_each(|(out, base)| {
-            let mut heads = vec![0u32; 1usize << row_index_hash_bits()];
-            for (offset, slot) in out.iter_mut().enumerate() {
-                let pos = base + offset;
-                let hash = Self::hash(data, pos);
-                let last = heads[hash];
-                *slot = if last == 0 {
-                    0
-                } else {
-                    (pos + 1 - last as usize) as u32
-                };
-                heads[hash] = (pos + 1) as u32;
-            }
-        });
-        Self { prev }
     }
 
-    fn hash(data: &[u8], pos: usize) -> usize {
-        let value = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-        (value.wrapping_mul(0x9E37_79B1) >> (32 - row_index_hash_bits())) as usize
+    /// Advance the chain to `to`; `[..built]` is already filled.
+    pub(crate) fn extend(&mut self, data: &[u8], to: usize) {
+        let to = to.clamp(self.built, data.len().saturating_sub(3));
+        if to > self.built {
+            let from = self.built;
+            prev4_extend(&mut self.heads, data, &mut self.prev[from..to], from);
+            self.built = to;
+        }
     }
+}
 
-    /// Same contract as [`RowIndex::collect`]: ascending-length runs, newest
-    /// candidate first, at most `depth` links compared.
-    ///
-    /// The walk stops early on the official's rule — a candidate much farther
-    /// than the best so far is not worth extending unless it is also much
-    /// longer — which is what keeps a chain walk at 2-3 links on average
-    /// instead of the full budget.
-    pub(crate) fn collect(
-        &self,
-        data: &[u8],
-        pos: usize,
-        max_distance: usize,
-        max_match: usize,
-        depth: usize,
-        out: &mut Vec<(u32, u32)>,
-    ) {
-        out.clear();
-        if pos + 3 >= data.len() {
-            return;
+/// Same contract as [`RowIndex::collect`]: ascending-length runs, newest
+/// candidate first, at most `depth` links compared.
+///
+/// The walk stops early on the official's rule (`FUN_1400468d4`) — a candidate
+/// much farther than the best so far is not worth extending unless it is also
+/// much longer — which is what keeps a chain walk at 2-3 links on average
+/// instead of the full budget.
+#[cfg(feature = "parallel")]
+pub(crate) fn prev4_collect(
+    prev: &[u32],
+    data: &[u8],
+    pos: usize,
+    max_distance: usize,
+    max_match: usize,
+    depth: usize,
+    out: &mut Vec<(u32, u32)>,
+) {
+    out.clear();
+    if pos + 3 >= data.len() {
+        return;
+    }
+    let max_length = max_match.min(data.len() - pos);
+    let first = prev[pos] as usize;
+    if first == 0 {
+        return;
+    }
+    // `prev` holds *relative* steps, so the walk advances the candidate by
+    // each link; stepping from `pos` instead would land on `pos - step` and
+    // silently lose every match more than one link away.
+    let mut candidate = pos - first;
+    let mut best_length = 0usize;
+    let mut best_distance = 0usize;
+    let mut steps = depth;
+    while steps > 0 {
+        let distance = pos - candidate;
+        if distance > max_distance {
+            break;
         }
-        let max_length = max_match.min(data.len() - pos);
-        let first = self.prev[pos] as usize;
-        if first == 0 {
-            return;
+        steps -= 1;
+        let length = if best_length == 0 || data[candidate + best_length] == data[pos + best_length]
+        {
+            match_length_at(data, pos, distance, max_length)
+        } else {
+            0
+        };
+        // The official's early stop (`FUN_1400468d4`): once a short match is
+        // established, a candidate far beyond it is only worth extending if
+        // it is also much longer. This is what keeps the average walk at a
+        // couple of links instead of the full budget.
+        if best_length >= 3
+            && distance > best_distance.saturating_mul(0x4000)
+            && length < best_length + 5
+        {
+            break;
         }
-        // `prev` holds *relative* steps, so the walk advances the candidate by
-        // each link; stepping from `pos` instead would land on `pos - step` and
-        // silently lose every match more than one link away.
-        let mut candidate = pos - first;
-        let mut best_length = 0usize;
-        let mut best_distance = 0usize;
-        let mut steps = depth;
-        while steps > 0 {
-            let distance = pos - candidate;
-            if distance > max_distance {
+        if length >= 4 && length > best_length {
+            out.push((length as u32, distance as u32));
+            best_length = length;
+            best_distance = distance;
+            if length == max_length {
                 break;
             }
-            steps -= 1;
-            let length =
-                if best_length == 0 || data[candidate + best_length] == data[pos + best_length] {
-                    match_length_at(data, pos, distance, max_length)
-                } else {
-                    0
-                };
-            // The official's early stop (`FUN_1400468d4`): once a short match is
-            // established, a candidate far beyond it is only worth extending if
-            // it is also much longer. This is what keeps the average walk at a
-            // couple of links instead of the full budget.
-            if best_length >= 3
-                && distance > best_distance.saturating_mul(0x4000)
-                && length < best_length + 5
-            {
-                break;
-            }
-            if length >= 4 && length > best_length {
-                out.push((length as u32, distance as u32));
-                best_length = length;
-                best_distance = distance;
-                if length == max_length {
-                    break;
-                }
-            }
-            let step = self.prev[candidate] as usize;
-            if step == 0 || step > candidate {
-                break;
-            }
-            candidate -= step;
         }
+        let step = prev[candidate] as usize;
+        if step == 0 || step > candidate {
+            break;
+        }
+        candidate -= step;
     }
 }
 
@@ -3480,7 +3495,7 @@ fn extends_at(combined: &[u8], pos: usize, length: u32, distance: u32) -> bool {
         && combined[copy] == combined[pos + length]
 }
 
-/// Diagnostic: do [`Prev4Index`] and [`RowIndex`] report the same candidates?
+/// Diagnostic: do [`Prev4Builder`] and [`RowIndex`] report the same candidates?
 ///
 /// Both walk the same-hash predecessors newest-first under the same depth and
 /// the same four-byte hash, so their runs must agree item for item. A mismatch
@@ -3501,7 +3516,9 @@ fn prev4_candidates_match_the_row_index() {
     let data = std::fs::read(&path).expect("read corpus");
     let count = data.len().saturating_sub(4);
     let index = RowIndex::build(&data);
-    let prev4 = Prev4Index::build(&data, 1);
+    let mut builder = Prev4Builder::new(data.len());
+    builder.extend(&data, data.len());
+    let chain = &builder.prev[..];
     let mut from_index = Vec::new();
     let mut from_prev4 = Vec::new();
     let mut mismatched = 0usize;
@@ -3512,7 +3529,7 @@ fn prev4_candidates_match_the_row_index() {
         // `RowIndex::collect` appends: its callers clear, so do the same here.
         from_index.clear();
         index.collect(&data, pos, unbounded, 0x1001, 64, &mut from_index);
-        prev4.collect(&data, pos, unbounded, 0x1001, 64, &mut from_prev4);
+        prev4_collect(chain, &data, pos, unbounded, 0x1001, 64, &mut from_prev4);
         if from_index != from_prev4 {
             mismatched += 1;
             if mismatched <= 8 {
