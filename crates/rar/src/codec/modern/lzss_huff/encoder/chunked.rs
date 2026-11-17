@@ -52,6 +52,15 @@ pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 /// faster and within noise on ratio (one case 0.9% worse, two cases better).
 pub const MT_MIN_MEMBER_SIZE: usize = 1024 * 1024;
 
+/// Longest slice the parallel parse cuts, in bytes.
+///
+/// Slices exist to spread work, but a slice that spans megabytes turns every
+/// candidate probe into a cold dictionary read; capping them keeps the working
+/// set near L2/L3 and also shortens the distance distribution a little. See the
+/// measurement table at the use site in `encode_chunked_mt_with_progress`.
+#[cfg(feature = "parallel")]
+const MT_MAX_SLICE: usize = 512 * 1024;
+
 /// The encode dimensions a chunked call runs under: the compression method and
 /// dictionary, the chunking, the stream's finality and distance table, plus the
 /// filter lead-in the streaming writer prepends to the first chunk's symbol
@@ -521,7 +530,33 @@ pub(crate) fn encode_chunked_mt_with_progress(
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(128 * 1024);
         let floored = by_count.max(caller.min(floor));
-        let cs = caller.min(floored).max(1);
+        // Cap: a slice that spans megabytes makes every candidate probe a cold
+        // DRAM read inside the dictionary, so the parse slows per byte even
+        // though each worker still has work. Measured on a 202 MB member (three
+        // 67 MB chunks, 24 workers): 2.8 MB slices take 10.5 s of waves, while
+        // capping at 1 MiB ...
+        // Largest slice the parse wants: a slice that spans megabytes makes
+        // every candidate probe a cold read inside the dictionary window, so
+        // the cost per byte grows with the member even though each worker still
+        // has work queued. Measured with `-m3 -md32m -mt24` on DLL corpora
+        // (time / archive size), uncapped -> 512 KiB cap:
+        //
+        // | member | uncapped | capped |
+        // | --- | --- | --- |
+        // | 53 MB | 5,077 ms / 12,926,745 | 3,304 ms / 12,914,454 |
+        // | 202 MB | 21,714 ms / 54,473,456 | 17,597 ms / 54,428,923 |
+        // | 1,000 MB | 80.1 s / 286,406,261 | 62.0 s / 286,414,589 |
+        //
+        // 256 KiB was slower than 512 KiB on the 1 GB member (64.6 s) for the
+        // same size, and it starts to bite on 13.9 MB members (slices are
+        // ~580 KiB there), so 512 KiB is the cap. `-m0` floor for the 202 MB
+        // member is 345 ms, i.e. this is all parse. 
+        let cap = std::env::var("RAR_RS_MT_MAX_SLICE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(MT_MAX_SLICE);
+        let cs = caller.min(floored).min(cap).max(1);
         // Snap the slice count to a whole number of waves. `len / cs` usually
         // lands one past a multiple (13,917,568 / 289,949 = 48.0006 -> 49), and
         // that lone last slice costs a whole wave of wall time for 16 bytes of
