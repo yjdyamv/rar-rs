@@ -139,7 +139,10 @@ fn encode_rar29_member(cx: &mut dyn Engine, data: &[u8], level: u8) -> RarResult
     // filtered member stays an ordinary chain link: the reader's window
     // holds the coded bytes, so the next member may keep matching them.
     use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
-    let candidates = rar29_filter_candidates(data, cx.write_ctx().compression.filters);
+    let candidates: Vec<_> = rar29_filter_candidates(data, cx.write_ctx().compression.filters)
+        .iter()
+        .flat_map(|records| group_by_kind(records))
+        .collect();
     let encoder = cx
         .write_ctx_mut()
         .solid
@@ -261,6 +264,31 @@ fn build_legacy_solid_encoder(
     }
 }
 
+/// One member's filter plan: the records to announce, in order, each carrying
+/// the filter that applies to it. Records of one member do not have to share a
+/// filter — WinRAR's own x86 members mix E8E9 and E8 from region to region.
+type FilterRecords = Vec<(Rar29FilterKind, std::ops::Range<usize>)>;
+
+/// Rebase a member's records onto a slice of it, dropping what falls outside.
+/// Used to rank candidates on a probe slice without coding the member.
+fn clip_records(
+    records: &[(Rar29FilterKind, std::ops::Range<usize>)],
+    start: usize,
+    len: usize,
+) -> Option<FilterRecords> {
+    let end = start + len;
+    let mut out = FilterRecords::new();
+    for (kind, range) in records {
+        let lo = range.start.max(start);
+        let hi = range.end.min(end);
+        if hi <= lo {
+            continue;
+        }
+        out.push((*kind, lo - start..hi - start));
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 /// Pick the best of the detector's filter candidates with a cheap probe, or
 /// none at all when plain already wins.
 ///
@@ -274,10 +302,7 @@ fn build_legacy_solid_encoder(
 /// Returning `None` is what stops `-m5` paying for a filter pass that PPMd
 /// always beats: 10.7 s of its 28.9 s on the kernel image went to an encode
 /// whose result was never emitted.
-fn best_filter_candidate(
-    data: &[u8],
-    candidates: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)>,
-) -> Option<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> {
+fn best_filter_candidate(data: &[u8], candidates: Vec<FilterRecords>) -> Option<FilterRecords> {
     use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
     if candidates.is_empty() {
         return None;
@@ -285,16 +310,18 @@ fn best_filter_candidate(
     const PROBE: usize = 256 * 1024;
     let probe_start = data.len().saturating_sub(PROBE) / 2;
     let probe = &data[probe_start..(probe_start + PROBE).min(data.len())];
-    let probe_ranges = [0..probe.len()];
     let probe_options = options_for_level(1);
     let plain = Unpack29Encoder::with_options(probe_options)
         .encode_member(probe)
         .ok()?
         .len();
-    let mut best: Option<(usize, (Rar29FilterKind, Vec<std::ops::Range<usize>>))> = None;
+    let mut best: Option<(usize, FilterRecords)> = None;
     for candidate in candidates {
+        let Some(records) = clip_records(&candidate, probe_start, probe.len()) else {
+            continue;
+        };
         let Ok(packed) = Unpack29Encoder::with_options(probe_options)
-            .encode_member_with_filter_ranges(probe, candidate.0, &probe_ranges)
+            .encode_member_with_filter_records(probe, &records)
         else {
             continue;
         };
@@ -305,8 +332,7 @@ fn best_filter_candidate(
     }
     // Strictly better than plain, or the filter does not earn its pass. A tie
     // keeps plain, matching the full-member comparison the trial used.
-    best.filter(|(size, _)| *size < plain)
-        .map(|(_, candidate)| candidate)
+    best.filter(|(size, _)| *size < plain).map(|(_, candidate)| candidate)
 }
 
 /// The standard-filter candidates the `-mc` policy allows for one member.
@@ -318,59 +344,69 @@ fn best_filter_candidate(
 /// whole member and *excludes the others*, the way WinRAR's `-mc` letters do.
 /// Before that exclusion `-mce+` still fell through to delta's auto branch and
 /// silently produced a delta member.
-fn rar29_filter_candidates(
-    data: &[u8],
-    policy: crate::options::FilterOptions,
-) -> Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> {
+///
+/// Each returned plan is a flat record list, so one plan can mix filters.
+fn rar29_filter_candidates(data: &[u8], policy: crate::options::FilterOptions) -> Vec<FilterRecords> {
     use crate::options::FilterMode;
     if data.is_empty() {
         return Vec::new();
     }
-    let whole = || std::iter::once(0..data.len()).collect::<Vec<_>>();
     if policy.x86 == FilterMode::Forced {
-        return vec![(Rar29FilterKind::E8E9, whole())];
+        return vec![vec![(Rar29FilterKind::E8E9, 0..data.len())]];
     }
     if policy.delta == FilterMode::Forced {
         let channels = policy.delta_channels.unwrap_or_else(|| {
             crate::codec::common::filters::auto_delta_filter_channels(data).unwrap_or(1)
         });
-        return vec![(
+        return vec![vec![(
             Rar29FilterKind::Delta {
                 channels: channels as usize,
             },
-            whole(),
-        )];
+            0..data.len(),
+        )]];
     }
-    let mut candidates: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
+    let mut candidates: Vec<FilterRecords> = Vec::new();
     if policy.x86 == FilterMode::Auto {
-        // The whole member, not the scanner's clusters: on a 13.9 MB kernel
-        // image at -m3 the scanner's ranges gained 169 KB over no filter while
-        // one whole-member record gains far more. E8E9 is listed first because
-        // it is the wider transform, and E8 second because on that same image
-        // the *narrower* one wins outright (6,643,533 against 6,665,714) - the
-        // probe picks per member, and WinRAR's own archives mix the two from
-        // region to region.
-        //
-        // The probe in `best_filter_candidate` decides whether the member wants
-        // a filter at all, so data that cannot carry either (text, random) still
-        // ends up unfiltered.
-        candidates.push((Rar29FilterKind::E8E9, whole()));
-        candidates.push((Rar29FilterKind::E8, whole()));
+        // Both filters, ranked per member by the probe. The record list is flat
+        // so a plan *could* mix them - WinRAR's own records do, region by
+        // region - but on a 13.9 MB kernel image the mix loses to uniform E8:
+        // choosing per 64 KiB region by E9 density gave 6,662,569 and choosing
+        // by coding each region standalone gave 6,646,254, against 6,643,533
+        // for one uniform E8 record over the member (and 6,665,714 for E8E9).
+        // A standalone region has none of the member's history around it, which
+        // makes both comparisons too noisy to beat the uniform choice.
+        candidates.push(vec![(Rar29FilterKind::E8E9, 0..data.len())]);
+        candidates.push(vec![(Rar29FilterKind::E8, 0..data.len())]);
     }
     if policy.delta == FilterMode::Auto
         && let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(data)
     {
-        candidates.push((
+        candidates.push(vec![(
             Rar29FilterKind::Delta {
                 channels: channels as usize,
             },
-            whole(),
-        ));
+            0..data.len(),
+        )]);
     }
     if let Some(channels) = crate::codec::common::filters::auto_audio_filter_channels(data) {
-        candidates.push((Rar29FilterKind::Audio { channels }, whole()));
+        candidates.push(vec![(Rar29FilterKind::Audio { channels }, 0..data.len())]);
     }
     candidates
+}
+
+/// Gather a flat record list back into one group per filter, which is the shape
+/// the solid-run encoder takes (it holds one program at a time).
+fn group_by_kind(
+    records: &[(Rar29FilterKind, std::ops::Range<usize>)],
+) -> Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> {
+    let mut out: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
+    for (kind, range) in records {
+        match out.iter_mut().find(|(seen, _)| seen == kind) {
+            Some((_, ranges)) => ranges.push(range.clone()),
+            None => out.push((*kind, vec![range.clone()])),
+        }
+    }
+    out
 }
 
 /// Non-solid RAR29 candidate selection: the smallest of LZ, the automatic VM
@@ -423,9 +459,9 @@ pub(super) fn best_rar29_member(
         (0..candidates.len() + 1 + usize::from(with_ppmd)).map(|_| None).collect();
     let plain = Unpack29Encoder::with_options(options).encode_member(data)?;
     results[0] = Some(plain);
-    for (index, (kind, ranges)) in candidates.iter().enumerate() {
+    for (index, records) in candidates.iter().enumerate() {
         if let Ok(packed) = Unpack29Encoder::with_options(options)
-            .encode_member_with_filter_ranges(data, *kind, ranges)
+            .encode_member_with_filter_records(data, records)
         {
             results[index + 1] = Some(packed);
         }

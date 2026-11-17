@@ -2459,22 +2459,23 @@ impl Unpack29Encoder {
         Ok(packed)
     }
 
-    /// Code one member through a list of same-kind filter ranges (e.g. every
-    /// x86 cluster the auto-scanner found), sharing one program record.
-    pub fn encode_member_with_filter_ranges(
+    /// Code one member through per-range filter records, where the filter can
+    /// differ from range to range — WinRAR's own x86 members mix E8E9 and E8
+    /// from region to region. Ranges are transformed in the order given and
+    /// each keeps its own VM program.
+    pub fn encode_member_with_filter_records(
         &mut self,
         input: &[u8],
-        kind: Rar29FilterKind,
-        ranges: &[std::ops::Range<usize>],
+        records: &[(Rar29FilterKind, std::ops::Range<usize>)],
     ) -> RarResult<Vec<u8>> {
-        if ranges.is_empty() {
+        if records.is_empty() {
             return self.encode_member(input);
         }
         let mut data = input.to_vec();
         let mut filters = Vec::new();
-        for range in ranges {
-            for chunk in split_rar29_filter_range(kind, range.clone()) {
-                filters.push(apply_rar29_filter(&mut data, kind, chunk)?);
+        for (kind, range) in records {
+            for chunk in split_rar29_filter_range(*kind, range.clone()) {
+                filters.push(apply_rar29_filter(&mut data, *kind, chunk)?);
             }
         }
         let (packed, transformed) = encode_filtered_member_blocks(
