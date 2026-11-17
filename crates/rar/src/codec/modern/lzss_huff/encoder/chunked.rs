@@ -115,6 +115,10 @@ struct MtJob<'a> {
     /// for callers that do not have one — the sequential-quality probe and
     /// tests).
     index: Option<&'a super::parse::RowIndex>,
+    /// Position-indexed four-byte chain, the `RAR_RS_PREV4` alternative to
+    /// `index` for the walk: same candidates, but its build is a linear pass
+    /// with sequential writes instead of the row index's counting sort.
+    prev4: Option<&'a super::parse::Prev4Index>,
     /// This slice carries the member's last block.
     is_last_block_of_member: bool,
     /// Filter records of this member, as absolute offsets: every slice emits
@@ -662,11 +666,25 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // which pays its lookbehind insert per slice instead of a whole-member
     // build: the measurement that decides whether the build is worth its
     // queries.
-    let need_index = !no_index_enabled();
+    let use_prev4 = walk_tier && super::parse::prev4_enabled();
+    // Parts of the prev4 build. Each part seeds its own head tables, so a part
+    // boundary is where a chain stops: more parts build faster but cut the
+    // reach to one part. `RAR_RS_PREV4_PARTS` sweeps the trade.
+    let prev4_parts = std::env::var("RAR_RS_PREV4_PARTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value >= 1)
+        .unwrap_or(8);
+    let need_index = !no_index_enabled() && !use_prev4;
     let lr_stage = std::time::Instant::now();
-    let ((), row_index) = pool.join(
+    let ((), (row_index, prev4_index)) = pool.join(
         || lr_shared.push(data),
-        || need_index.then(|| super::parse::RowIndex::build_with_threads(data, n_workers)),
+        || {
+            (
+                need_index.then(|| super::parse::RowIndex::build_with_threads(data, n_workers)),
+                use_prev4.then(|| super::parse::Prev4Index::build(data, prev4_parts)),
+            )
+        },
     );
     if mt_clock {
         eprintln!(
@@ -675,6 +693,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
         );
     }
     let row_index_ref = row_index.as_ref();
+    let prev4_ref = prev4_index.as_ref();
     let mt_waves = std::time::Instant::now();
     // Rayon's Scope::spawn returns nothing; each worker deposits its
     // packed bytes into its own slot and we collect them wave-by-wave in
@@ -734,6 +753,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
                                 lazy_thresh,
                                 depth: row_depth,
                                 index: row_index_ref,
+                                prev4: prev4_ref,
                                 is_last_block_of_member: is_final && k + 1 == n,
                                 records,
                                 // Only the first slice sees chain history as its
@@ -1034,6 +1054,48 @@ fn mt_slice_symbols_row_index(
     symbols
 }
 
+/// The walk over the position-indexed four-byte chain (`RAR_RS_PREV4`).
+///
+/// Same parser and same candidate contract as
+/// [`mt_slice_symbols_row_index`], but the candidates come from
+/// [`super::parse::Prev4Index`] instead of the counting-sorted row index, so
+/// the member-wide prelude is a linear pass instead of a bucket sort.
+#[cfg(feature = "parallel")]
+fn mt_slice_symbols_prev4(
+    state: &mut EncoderState,
+    slice: MtSlice<'_>,
+    prev4: &super::parse::Prev4Index,
+    depth: usize,
+) -> Vec<Symbol> {
+    let MtSlice {
+        data,
+        s0,
+        e0,
+        max_match,
+        dict_size,
+        variant,
+        ..
+    } = slice;
+    let mut dist_cache = state.dist_cache;
+    let mut last_length = state.last_length;
+    let symbols = super::parse::windowed_walk_parse(
+        data,
+        s0..e0,
+        &mut dist_cache,
+        &mut last_length,
+        super::parse::MatchLimits {
+            max_match,
+            window: dict_size,
+            variant,
+        },
+        WALK_LAZY_MAX,
+        |pos, _cache, runs| prev4.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
+    );
+    state.dist_cache = dist_cache;
+    state.last_length = last_length;
+    symbols
+}
+
 /// Filter records owned by one slice `[from, to)`, as deltas from the slice
 /// start — the position the reader has produced when it decodes the slice's
 /// first symbol.
@@ -1086,6 +1148,7 @@ fn encode_mt_slice(
         lazy_thresh,
         depth,
         index,
+        prev4,
         is_last_block_of_member,
         records,
         force_seed_tail,
@@ -1159,14 +1222,15 @@ fn encode_mt_slice(
     // distance-choosing pass needs.
     let two_phase = slice_two_phase();
     let mut tokens: Vec<(u32, u32)> = Vec::new();
-    let mut symbols = match (index, two_phase) {
-        (Some(index), true) => {
+    let mut symbols = match (index, prev4, two_phase) {
+        (Some(index), _, true) => {
             mt_slice_symbols_row_index(state, slice, index, depth, walk, Some(&mut tokens))
         }
-        (Some(index), false) => {
+        (Some(index), _, false) => {
             mt_slice_symbols_row_index(state, slice, index, depth, walk, None)
         }
-        (None, _) => mt_slice_symbols_low_step(
+        (None, Some(prev4), false) => mt_slice_symbols_prev4(state, slice, prev4, depth),
+        (None, _, _) => mt_slice_symbols_low_step(
             state,
             slice,
             chain_len,
