@@ -233,6 +233,16 @@ pub struct EncoderState {
     /// Long-range match history; `None` for compression levels where the
     /// long range search is disabled (method 1, like WinRAR).
     long_range: Option<match_finder::LongRange>,
+    /// The previous member's bytes waiting to enter `long_range`, and how many of
+    /// its leading bytes are already past the history bound (counted, not kept:
+    /// those could not be candidates anyway).
+    ///
+    /// The push only ever matters to a member that *follows*, and a standalone
+    /// member never queries the table at all, so it is deferred until one does.
+    /// That skips one member's worth of indexing per archive, which is the whole
+    /// cost when there is only one member.
+    pending: Vec<u8>,
+    pending_skipped: usize,
     /// BT4 tree finder reused across chunks of a member. Rebuilding it per
     /// chunk cost a full 32 MiB son-array memset plus page faults (and the
     /// tail re-seed walked the cold array); persisting it keeps the array
@@ -268,6 +278,8 @@ impl EncoderState {
         self.tail.clear();
         self.dist_cache = [0; DIST_CACHE_SIZE];
         self.last_length = 0;
+        self.pending.clear();
+        self.pending_skipped = 0;
         if let Some(lr) = self.long_range.as_mut() {
             lr.reset();
         }

@@ -633,12 +633,20 @@ pub(crate) fn encode_chunked_mt_with_progress(
         }
         None => match_finder::LongRange::new(dict_size),
     };
+    // The previous member's bytes enter the table here, and this member's wait for
+    // the next one: a standalone member never queries the table (`lr_q` is
+    // `None`), so indexing one member ahead skips the whole push for the last
+    // member of an archive — which is all of it when there is only one member.
+    // The leading bytes past the history bound are accounted for by count only.
+    let pending = std::mem::take(&mut seed.pending);
+    let pending_skipped = std::mem::take(&mut seed.pending_skipped);
     // Absolute stream position of `data[0]`. It is the *pushed* total, not
     // the retained history length: once the sampled window has slid, `hist`
     // starts at `hist_base() > 0` and the two differ by exactly that much —
     // using `hist_len()` here anchors every worker query short and silently
-    // drops long-range matches later in a chain.
-    let entry_len = lr_shared.total_pushed();
+    // drops long-range matches later in a chain. The pending bytes belong before
+    // `data`, so they count here even though the push is still to come.
+    let entry_len = lr_shared.total_pushed() + pending_skipped + pending.len();
     let seed_tail = std::mem::take(&mut seed.tail);
 
     // Slice boundaries: one fixed chunk per slice keeps the near-window
@@ -712,7 +720,12 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let first_wave_end = bounds[n_workers.min(n)];
     let lr_stage = std::time::Instant::now();
     let ((), (row_index, mut chain_builder)) = pool.join(
-        || lr_shared.push(data),
+        || {
+            if pending_skipped > 0 {
+                lr_shared.skip(pending_skipped);
+            }
+            lr_shared.push(&pending);
+        },
         || {
             (
                 need_index.then(|| super::parse::RowIndex::build_with_threads(data, n_workers)),
@@ -902,6 +915,18 @@ pub(crate) fn encode_chunked_mt_with_progress(
     }
     seed.dist_cache = [0u32; DIST_CACHE_SIZE];
     seed.last_length = 0;
+    // Hold this member's bytes for the member that may follow instead of indexing
+    // them now (see the pending push above). Only the last `max_hist` bytes can
+    // ever be candidates, so anything older is remembered as a count.
+    let hold = match_finder::LONG_RANGE_MAX.min(dict_size.max(match_finder::LONG_RANGE_STEP));
+    if data.len() > hold {
+        seed.pending_skipped = data.len() - hold;
+        seed.pending = data[data.len() - hold..].to_vec();
+    } else {
+        seed.pending_skipped = 0;
+        seed.pending.clear();
+        seed.pending.extend_from_slice(data);
+    }
     seed.long_range = Some(lr_shared);
     // Worker slices are independent frames, so the sequential path's
     // persistent tree must not survive a window the MT path consumed: its

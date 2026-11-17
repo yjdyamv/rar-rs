@@ -273,6 +273,17 @@ impl LongRange {
     /// its size (not just the overflow) before rebuilding the table; the
     /// long-range reachable distance then oscillates between
     /// `max_hist/2` and `max_hist`.
+    /// Account for `len` bytes without indexing them, because they are older than
+    /// the history bound and so can never be candidates.
+    ///
+    /// They must precede everything this table has already indexed: `base()`
+    /// derives the absolute offset of `hist[0]` as `total_pushed - hist.len()`,
+    /// which only holds while the retained bytes are the most recent ones
+    /// overall.
+    pub(crate) fn skip(&mut self, len: usize) {
+        self.total_pushed += len;
+    }
+
     pub fn push(&mut self, chunk: &[u8]) {
         if chunk.is_empty() {
             return;
