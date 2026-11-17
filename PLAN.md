@@ -373,6 +373,15 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
       `solid_search_parallel_matches_serial`）。30 MB 文本 solid m5：23.2 s →
       14–17 s（16 核）；剩下的差距在 match finder 本身（官方 1.0
       s），不是并行度。
+- [x] **无恢复记录时的重建改为原样搬块**（2026-11-17）：`rar r` 在既无 `.rev`
+      也无内联记录时，先前是「逐成员解压、再以 STORE 重新加入」，528,797 B 的归档
+      重建出 665,288 B，成员的时间戳和属性也一并丢掉。现在先**解码验证**每个成员
+      （模块原有承诺，不信任仅头部 CRC 正确的块），通过后**原样拷贝该成员的头+数据
+      块**：RAR5 文件块是连续跨度且不存绝对偏移，所以搬块无需任何修正。实测同一
+      归档重建为 **528,663 B**（官方 528,789），成员时间戳逐字节保留。带坏头的
+      归档、以及任何无法用「重新打开并逐成员解码」验证的产物，一律退回到解码+STORE
+      路径（宁可变慢也不能搬错）；legacy 源仍走 STORE（`unp_ver` 20 的既有理由）。
+      测试 `archive::reconstruct::tests::rebuild_keeps_the_members_compression`。
 - [ ] **逐文件与上游对拍**：`rars` 移植的出处目前是 in-tree claim（每个文件头 +
       inventory 表），尚未与上游 diff。不影响已定的许可表达式。
 
@@ -406,10 +415,6 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 - [`compression-perf/`](docs/issues/compression-perf/) —
   04（窗口级不可压缩跳过）、 09（DLL 解析速度）、15（价格驱动解析），均对应上面
   「性能」段的清单项。
-- [`recovery/`](docs/issues/recovery/) —
-  [无恢复记录时的重建应原样搬块](docs/issues/recovery/verbatim-rebuild.md)：现在
-  是解压后 STORE，官方是搬块，所以体积、时间戳、属性都丢。设计已定、所需 API 已
-  核实，未开工。
 
 ## 一致拒绝（别"修"）
 

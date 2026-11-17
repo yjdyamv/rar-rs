@@ -24,6 +24,7 @@ pub(crate) use encrypt::{
     build_archive_encrypt_header_block, derive_header_key, parse_archive_encrypt_header,
 };
 pub use parse::read_block;
+pub(crate) use locator::build_main_header;
 pub(crate) use parse::{
     BlockCursor, block_extra_area, locator_quick_open_offset, main_header_locator_fields,
     parse_block_bytes, parse_redirect_record, parse_service_block_name,
