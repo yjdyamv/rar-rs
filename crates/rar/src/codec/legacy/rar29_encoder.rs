@@ -44,9 +44,15 @@ const MAX_ENCODER_MATCH_OFFSET: usize = 1024 * 1024;
 const MAX_ENCODER_MATCH_LENGTH: usize = 258;
 const MAX_MATCH_CANDIDATES: usize = 256;
 
-/// Default LZ block size for table splitting (64 KiB, benchmarked optimal in
-/// rars).
-pub(crate) const RAR29_LZ_BLOCK_SIZE: usize = 64 * 1024;
+/// Default LZ block size for table splitting.
+///
+/// This is the number that sets the match finder's redundant work: every block
+/// gets its own finder and indexes the whole window behind it, so the inserts
+/// per input byte are `window / block_size`. At 64 KiB against a 1 MiB window
+/// that is 16 inserts per byte, where WinRAR's single sliding finder does one.
+/// Raising it to 256 KiB cuts that to 4 while leaving a 13.9 MB member with 54
+/// blocks to spread over the pool.
+pub(crate) const RAR29_LZ_BLOCK_SIZE: usize = 256 * 1024;
 
 // ── PPMd member encoding (m4/m5) ───────────────────────────────────────────
 
