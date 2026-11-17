@@ -347,70 +347,32 @@ pub(super) fn best_rar29_member(
     }
     let with_ppmd = level >= 4 && !data.is_empty();
     // Plain, then the filters in order, then PPMd: a tie keeps the earlier
-    // candidate. Each one runs on its own throwaway encoder, so they are
-    // independent and go to the pool together — the serial loop paid one full
-    // pass per candidate (measured: 4.6 s of a 5.7 s `-ma4 -m1` run).
-    let slots = candidates.len() + 1 + usize::from(with_ppmd);
-    let results = std::sync::Mutex::new(vec![None::<Vec<u8>>; slots]);
-    let plain_error = std::sync::Mutex::new(None::<crate::error::RarError>);
-    #[cfg(feature = "parallel")]
-    {
-        let results = &results;
-        let plain_error = &plain_error;
-        let candidates = &candidates;
-        crate::parallel::compression_pool().scope(|scope| {
-            scope.spawn(move |_| match Unpack29Encoder::with_options(options).encode_member(data) {
-                Ok(packed) => results.lock().unwrap()[0] = Some(packed),
-                Err(error) => *plain_error.lock().unwrap() = Some(error),
-            });
-            for (index, (kind, ranges)) in candidates.iter().enumerate() {
-                let slot = index + 1;
-                let kind = *kind;
-                scope.spawn(move |_| {
-                    if let Ok(packed) = Unpack29Encoder::with_options(options)
-                        .encode_member_with_filter_ranges(data, kind, ranges)
-                    {
-                        results.lock().unwrap()[slot] = Some(packed);
-                    }
-                });
-            }
-            if with_ppmd {
-                let slot = candidates.len() + 1;
-                scope.spawn(move |_| {
-                    if let Ok(packed) =
-                        Unpack29Encoder::with_options(options).encode_ppmd_member(data)
-                    {
-                        results.lock().unwrap()[slot] = Some(packed);
-                    }
-                });
-            }
-        });
-    }
-    #[cfg(not(feature = "parallel"))]
-    {
-        match Unpack29Encoder::with_options(options).encode_member(data) {
-            Ok(packed) => results.lock().unwrap()[0] = Some(packed),
-            Err(error) => *plain_error.lock().unwrap() = Some(error),
-        }
-        for (index, (kind, ranges)) in candidates.iter().enumerate() {
-            if let Ok(packed) = Unpack29Encoder::with_options(options)
-                .encode_member_with_filter_ranges(data, *kind, ranges)
-            {
-                results.lock().unwrap()[index + 1] = Some(packed);
-            }
-        }
-        if with_ppmd
-            && let Ok(packed) = Unpack29Encoder::with_options(options).encode_ppmd_member(data)
+    // candidate. Each runs on its own throwaway encoder.
+    //
+    // They run one at a time. Each candidate's blocks already saturate the pool
+    // through its own wave scope, and wrapping another scope around them cost
+    // wall time rather than saving it (measured: 5.0 s nested against 3.5 s
+    // sequential on a 13.9 MB kernel image, with the process using ~15 of 24
+    // threads either way).
+    let mut results: Vec<Option<Vec<u8>>> =
+        (0..candidates.len() + 1 + usize::from(with_ppmd)).map(|_| None).collect();
+    let plain = Unpack29Encoder::with_options(options).encode_member(data)?;
+    results[0] = Some(plain);
+    for (index, (kind, ranges)) in candidates.iter().enumerate() {
+        if let Ok(packed) = Unpack29Encoder::with_options(options)
+            .encode_member_with_filter_ranges(data, *kind, ranges)
         {
-            results.lock().unwrap()[candidates.len() + 1] = Some(packed);
+            results[index + 1] = Some(packed);
         }
     }
-    if let Some(error) = plain_error.into_inner().unwrap() {
-        return Err(error);
+    if with_ppmd
+        && let Ok(packed) = Unpack29Encoder::with_options(options).encode_ppmd_member(data)
+    {
+        results[candidates.len() + 1] = Some(packed);
     }
     let mut best_len = usize::MAX;
     let mut best: Option<Vec<u8>> = None;
-    for slot in results.into_inner().unwrap() {
+    for slot in results {
         if let Some(packed) = slot
             && packed.len() < best_len
         {

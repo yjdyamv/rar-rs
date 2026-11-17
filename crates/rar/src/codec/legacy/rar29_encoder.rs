@@ -429,14 +429,23 @@ fn encode_tokens_with_progress(
             insert_started.elapsed().as_millis()
         );
     }
-    tokenize(
+    let tokenize_started = std::time::Instant::now();
+    let tokens = tokenize(
         &combined,
         history.len(),
         combined.len(),
         &mut finder,
         options,
         progress,
-    )
+    );
+    if std::env::var_os("RAR_RS_MTTIME").is_some() {
+        eprintln!(
+            "MTTIME rar29 tokenize bytes={} {}ms",
+            input.len(),
+            tokenize_started.elapsed().as_millis()
+        );
+    }
+    tokens
 }
 
 /// Tokenise `combined[start..end]` against `finder`, which must already index
