@@ -437,6 +437,7 @@ impl Prev4Index {
         // silently lose every match more than one link away.
         let mut candidate = pos - first;
         let mut best_length = 0usize;
+        let mut best_distance = 0usize;
         let mut steps = depth;
         while steps > 0 {
             let distance = pos - candidate;
@@ -444,14 +445,28 @@ impl Prev4Index {
                 break;
             }
             steps -= 1;
-            if best_length == 0 || data[candidate + best_length] == data[pos + best_length] {
-                let length = match_length_at(data, pos, distance, max_length);
-                if length >= 4 && length > best_length {
-                    out.push((length as u32, distance as u32));
-                    best_length = length;
-                    if length == max_length {
-                        break;
-                    }
+            let length =
+                if best_length == 0 || data[candidate + best_length] == data[pos + best_length] {
+                    match_length_at(data, pos, distance, max_length)
+                } else {
+                    0
+                };
+            // The official's early stop (`FUN_1400468d4`): once a short match is
+            // established, a candidate far beyond it is only worth extending if
+            // it is also much longer. This is what keeps the average walk at a
+            // couple of links instead of the full budget.
+            if best_length >= 3
+                && distance > best_distance.saturating_mul(0x4000)
+                && length < best_length + 5
+            {
+                break;
+            }
+            if length >= 4 && length > best_length {
+                out.push((length as u32, distance as u32));
+                best_length = length;
+                best_distance = distance;
+                if length == max_length {
+                    break;
                 }
             }
             let step = self.prev[candidate] as usize;

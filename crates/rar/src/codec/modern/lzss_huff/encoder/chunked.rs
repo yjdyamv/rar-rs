@@ -509,13 +509,6 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
-    // The row index's candidate depth is the MT tier's level dial (see
-    // [`MT_ROW_INDEX_DEPTH`]); the chain budget above is the fallback tier's.
-    let row_depth = std::env::var("RAR_RS_MT_DEPTH")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(MT_ROW_INDEX_DEPTH[level]);
     // Speed-first ladder: the walk parses every rung, and `RAR_RS_MT_DP=1`
     // puts the priced DP back under `-m4`/`-m5` for anyone who wants our best
     // ratio instead of our best time. The walk's speed dial is how far back it
@@ -683,15 +676,39 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // which pays its lookbehind insert per slice instead of a whole-member
     // build: the measurement that decides whether the build is worth its
     // queries.
-    let use_prev4 = walk_tier && super::parse::prev4_enabled();
-    // Parts of the prev4 build. Each part seeds its own head tables, so a part
-    // boundary is where a chain stops: more parts build faster but cut the
-    // reach to one part. `RAR_RS_PREV4_PARTS` sweeps the trade.
+    // The fast rungs take the official's shape for the candidate structure: a
+    // position-indexed table filled in one sequential pass per part, with no
+    // counting sort. On the kernel image at `-m3` that is 42 ms of prelude
+    // against the row index's 120 ms, and at a shallow candidate depth the
+    // chain's pointer chase does not show (78 ms of waves at depth 4 against 89).
+    // At depth 64 the chase loses badly (141 against 110), so the ratio rungs
+    // keep the sorted index. `RAR_RS_PREV4` forces it everywhere.
+    let use_prev4 = walk_tier && (super::parse::prev4_enabled() || level <= PREV4_MAX_LEVEL);
+    // The candidate depth is the MT tier's level dial: [`PREV4_DEPTH`] for the
+    // position-indexed rungs, whose chain is a pointer chase, and
+    // [`MT_ROW_INDEX_DEPTH`] for the sorted ones, whose bucket walk is
+    // contiguous. `RAR_RS_MT_DEPTH` overrides both.
+    let row_depth = std::env::var("RAR_RS_MT_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(if use_prev4 {
+            PREV4_DEPTH[level]
+        } else {
+            MT_ROW_INDEX_DEPTH[level]
+        });
+    // Parts of the prev4 build. It has to be one: a chain cannot be built in
+    // independent ranges, because each part's head tables start empty and a walk
+    // stops at the part's first occurrence of a prefix. Measured on 9,251,209 B of
+    // markdown the exact build packs 244,419 B; 2 parts 393,459; 8 parts
+    // 1,231,478. The serial pass is the cheap one anyway — 49 ms of prelude
+    // against the counting sort's 120 — so `RAR_RS_PREV4_PARTS` only measures the
+    // trade.
     let prev4_parts = std::env::var("RAR_RS_PREV4_PARTS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value >= 1)
-        .unwrap_or(8);
+        .unwrap_or(1);
     let need_index = !no_index_enabled() && !use_prev4;
     let lr_stage = std::time::Instant::now();
     let ((), (row_index, prev4_index)) = pool.join(
@@ -918,6 +935,20 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 /// MT-only, like the row-index parse whose level dial it is.
 #[cfg(feature = "parallel")]
 const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 384];
+
+/// Highest level that takes the position-indexed candidate table instead of the
+/// sorted row index (see [`PREV4_DEPTH`]).
+#[cfg(feature = "parallel")]
+const PREV4_MAX_LEVEL: usize = 2;
+
+/// Candidate depth for the position-indexed rungs. Their chain is a pointer
+/// chase, so cost climbs quickly with depth: on the kernel image the exact build
+/// measured 149 / 178 / 204 / 261 ms of internal time at depth 4 / 8 / 16 / 32
+/// for 46.32 / 45.71 / 45.25 / 44.91%, while the sorted bucket's contiguous walk
+/// costs the same at any depth. The rungs that need reach therefore keep the row
+/// index; these two are the ones where the cheaper build pays.
+#[cfg(feature = "parallel")]
+const PREV4_DEPTH: [usize; 6] = [0, 4, 8, 0, 0, 0];
 
 /// Highest level the walk parses. Every rung: the walk is what lets each level
 /// match the official's time for that level (measured at `-md32m -mt24`,

@@ -16,11 +16,13 @@ RAR/UNRAR binary is required at runtime.
 - **Compression** — native LZSS+Huffman and PPMd, levels 0–5, dictionary
   controls, delta/x86 filters, solid archives, parallel compression,
   verification and extraction. The multi-threaded ladder runs the same walk
-  parser at every level, differentiated by how many candidates it compares per
-  position and, from `-m4` up, by the per-block filter decision. `-m4`/`-m5`
-  run at parity with WinRAR 7.23 and `-m3` within 1.3x on a 13.9 MB binary and
-  on 9.2 MB of markdown, with the packed size within 2.4 pp and 0.7 pp
-  respectively; `-m1`/`-m2` are slower but pack smaller (see `PLAN.md`).
+  parser at every level. The fast rungs use the candidate structure the official
+  does — a position-indexed table filled in one sequential pass, with no counting
+  sort — while the ratio rungs use a sorted index whose buckets read
+  contiguously, which is what a deep candidate walk needs. All five levels run
+  within 1.8x of WinRAR 7.23's time for the same level on a 13.9 MB binary, 9.2 MB
+  of markdown and 5.5 MB of Rust source; `-m4`/`-m5` are at parity with it and
+  `-m1`/`-m2` pack smaller (see `PLAN.md`).
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
   comments, SFX handling, string search, symlinks and hardlinks.
 - **Encryption** — file-level AES-256 with a chained HMAC-SHA256 KDF, plus
