@@ -408,9 +408,11 @@ fn encode_tokens_with_progress(
     progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> RarResult<Vec<EncodeToken>> {
     let history = &history[history.len().saturating_sub(options.max_match_distance)..];
+    let insert_started = std::time::Instant::now();
     let mut combined = Vec::with_capacity(history.len() + input.len());
     combined.extend_from_slice(history);
     combined.extend_from_slice(input);
+    let finder_started = std::time::Instant::now();
     let mut finder = MatchFinder::new(
         &combined,
         4,
@@ -418,15 +420,22 @@ fn encode_tokens_with_progress(
         options.max_match_candidates,
         options.max_match_distance,
     );
+    if std::env::var_os("RAR_RS_MTTIME").is_some() {
+        eprintln!(
+            "MTTIME rar29 finder-new bytes={} {}us",
+            input.len(),
+            finder_started.elapsed().as_micros()
+        );
+    }
     let insert_started = std::time::Instant::now();
     for history_pos in 0..history.len() {
         finder.insert(history_pos);
     }
     if std::env::var_os("RAR_RS_MTTIME").is_some() {
         eprintln!(
-            "MTTIME rar29 history-insert bytes={} {}ms",
+            "MTTIME rar29 history-insert bytes={} {}us",
             history.len(),
-            insert_started.elapsed().as_millis()
+            insert_started.elapsed().as_micros()
         );
     }
     let tokenize_started = std::time::Instant::now();
@@ -644,7 +653,18 @@ fn analyze_block(
     options: EncodeOptions,
     progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> RarResult<BlockAnalysis> {
-    analyze_tokens(encode_tokens_with_progress(input, history, options, progress)?, filter_count)
+    let clock = std::env::var_os("RAR_RS_MTTIME").is_some();
+    let tokens = encode_tokens_with_progress(input, history, options, progress)?;
+    let counted = std::time::Instant::now();
+    let analysis = analyze_tokens(tokens, filter_count)?;
+    if clock {
+        eprintln!(
+            "MTTIME rar29 analyze-block bytes={} tables={}us",
+            input.len(),
+            counted.elapsed().as_micros()
+        );
+    }
+    Ok(analysis)
 }
 
 /// [`analyze_block`] for a token stream the caller already produced — the
@@ -761,6 +781,8 @@ fn serialize_block(
     more_blocks_follow: bool,
     previous_levels: &mut [u8; TABLE_COUNT],
 ) -> RarResult<Vec<u8>> {
+    let clock = std::env::var_os("RAR_RS_MTTIME").is_some();
+    let started = std::time::Instant::now();
     let BlockAnalysis {
         table_lengths,
         tokens,
@@ -814,6 +836,9 @@ fn serialize_block(
             bits.write_bits(u32::from(byte), 8);
         }
     }
+
+    let tables_us = started.elapsed().as_micros();
+    let tokens_started = std::time::Instant::now();
 
     // ── Write tokens ─────────────────────────────────────────────────────
     let mut match_state = EncoderMatchState::default();
@@ -885,7 +910,16 @@ fn serialize_block(
         bits.write_bits(false as u32, 1);
         bits.write_bits(true as u32, 1);
     }
-    Ok(bits.into_bytes())
+    let packed = bits.into_bytes();
+    if clock {
+        eprintln!(
+            "MTTIME rar29 serialize-block bytes={} tokens={} tables={tables_us}us write={}us",
+            packed.len(),
+            tokens.len(),
+            tokens_started.elapsed().as_micros()
+        );
+    }
+    Ok(packed)
 }
 
 /// Encode one LZ block (or a single-block member when `more_blocks_follow` is
