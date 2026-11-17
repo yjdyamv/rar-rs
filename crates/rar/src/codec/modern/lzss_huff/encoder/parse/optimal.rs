@@ -1165,6 +1165,49 @@ fn length_bonus(distance: u32) -> u32 {
     u32::from(distance > 0x100) + u32::from(distance > 0x2000) + u32::from(distance > 0x40000)
 }
 
+/// How many distance tiers a match must clear to be worth encoding, i.e. the
+/// length it must reach before its distance code is counted.
+///
+/// The ladder mirrors RAR5's distance code: it grows by a slot every time the
+/// span doubles past 4, so the farther back a match points, the more literals it
+/// has to cover. `RAR_RS_LEN_BONUS` selects a ladder for A/B; the token shapes
+/// say the shipped one is too permissive at long range (on 9,251,209 B of
+/// markdown we encode 9k more matches beyond 4 KiB than the official does and end
+/// up 34 KiB larger).
+fn len_bonus_tiers(distance: u32) -> u32 {
+    match len_bonus_ladder() {
+        1 => {
+            u32::from(distance > 0x100)
+                + u32::from(distance > 0x2000)
+                + u32::from(distance > 0x20000)
+                + u32::from(distance > 0x200000)
+        }
+        2 => {
+            u32::from(distance > 0x80)
+                + u32::from(distance > 0x800)
+                + u32::from(distance > 0x8000)
+                + u32::from(distance > 0x80000)
+                + u32::from(distance > 0x800000)
+        }
+        _ => {
+            u32::from(distance > 0x100)
+                + u32::from(distance > 0x2000)
+                + u32::from(distance > 0x40000)
+        }
+    }
+}
+
+/// Which [`len_bonus_tiers`] ladder to use (`RAR_RS_LEN_BONUS`, 0 = shipped).
+fn len_bonus_ladder() -> u32 {
+    static LADDER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *LADDER.get_or_init(|| {
+        std::env::var("RAR_RS_LEN_BONUS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// Extra bits written after a length slot (0 for slots below 8). Depends on
 /// the slot alone, so a pass can tabulate it (see [`TokenPrices`]).
 const fn slot_extra_bits(slot: usize) -> u32 {
@@ -2061,7 +2104,7 @@ where
     runs.clear();
     emit(pos, reps, runs);
     let encodable = |length: u32, distance: u32| {
-        reps.contains(&distance) || (length as usize) >= length_bonus(distance) as usize + 2
+        reps.contains(&distance) || (length as usize) >= len_bonus_tiers(distance) as usize + 2
     };
     let mut longest = (0u32, 0u32);
     for &(length, distance) in runs.iter() {

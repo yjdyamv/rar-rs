@@ -1016,11 +1016,21 @@ const PREV4_DEPTH: [usize; 6] = [0, 2, 4, 8, 0, 0];
 #[cfg(feature = "parallel")]
 const WALK_MAX_LEVEL: usize = 5;
 
-/// The walk's one-step lazy lookahead for every rung. `RAR_RS_WALK_LAZY`
-/// measures the trade: on the kernel image `0` costs 13-21 ms and ~0.75 pp at
-/// the position-indexed rungs. It stays on because those rungs are already at
-/// or under the official's time for the level — the remaining budget is worth
-/// more as ratio than as milliseconds (see [`PREV4_DEPTH`]).
+/// The walk's one-step lazy lookahead for every rung: a match shorter than this
+/// makes the walk also price the match that starts one byte later, and take the
+/// literal if that one is longer.
+///
+/// This is the cheapest ratio we have found. On the kernel image (`-md32m -mt24`)
+/// the curve is (internal time in ms, packed size) at `-m3` / `-m5`:
+/// 8 -> 157/6,361,369 and 236/6,070,109; 16 -> 165/6,347,890 and 249/6,049,159;
+/// 32 -> 162/6,346,001 and 250/6,046,079; 64 -> 169/6,345,598 and 259/6,045,537;
+/// 128 -> 167/6,345,539 and 249/6,045,396. So 32 is the knee and 64 is within
+/// 400-700 B of the plateau; both are worth the few ms because these rungs are
+/// already at or under the official's time for the level. `RAR_RS_WALK_LAZY`
+/// overrides it.
+#[cfg(feature = "parallel")]
+const WALK_LAZY_MAX: u32 = 64;
+
 #[cfg(feature = "parallel")]
 fn walk_lazy() -> u32 {
     static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
@@ -1056,14 +1066,6 @@ pub(crate) static DP_TIER_FORCED: std::sync::atomic::AtomicBool =
 pub(crate) fn set_dp_tier(enabled: bool) {
     DP_TIER_FORCED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
-
-/// Lazy lookahead cap for the `-m1` walk. Matches shorter than this are worth
-/// one extra probe of the next position: a match starting one byte later that
-/// reaches further covers the skipped byte too. Measured on a kernel image the
-/// cap is not sensitive (8, 16 and 64 all give the same size), so it is set
-/// where the extra probe stops paying for itself.
-#[cfg(feature = "parallel")]
-const WALK_LAZY_MAX: u32 = 8;
 
 /// Whether row-index slices also consult the shared sampled long-range table.
 ///
