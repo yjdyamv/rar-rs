@@ -338,7 +338,6 @@ fn estimated_match_cost(
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn best_match(
-    input: &[u8],
     pos: usize,
     end: usize,
     finder: &mut MatchFinder,
@@ -346,7 +345,7 @@ fn best_match(
     state: &EncoderMatchState,
 ) -> Option<MatchCandidate> {
     let max_length = (end - pos).min(MAX_ENCODER_MATCH_LENGTH);
-    if options.max_match_candidates == 0 || pos + 3 >= input.len() || max_length < 4 {
+    if options.max_match_candidates == 0 || pos + 3 >= end || max_length < 4 {
         return None;
     }
     // The shared finder checks the 4-slot repeat-offset cache itself; carry
@@ -370,14 +369,13 @@ fn best_match(
 }
 
 fn lazy_match_decision(
-    input: &[u8],
     pos: usize,
+    end: usize,
     finder: &mut MatchFinder,
     options: EncodeOptions,
     state: &EncoderMatchState,
     current: MatchCandidate,
 ) -> (bool, Option<MatchCandidate>) {
-    let end = input.len();
     if !options.lazy_matching || pos + 1 >= end {
         return (false, None);
     }
@@ -387,7 +385,7 @@ fn lazy_match_decision(
         if pos + offset >= end {
             break;
         }
-        let next = best_match(input, pos + offset, end, finder, options, state);
+        let next = best_match(pos + offset, end, finder, options, state);
         if offset == 1 {
             cached_next = next;
         }
@@ -407,9 +405,8 @@ fn encode_tokens_with_progress(
     input: &[u8],
     history: &[u8],
     options: EncodeOptions,
-    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+    progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> RarResult<Vec<EncodeToken>> {
-    let mut tokens = Vec::new();
     let history = &history[history.len().saturating_sub(options.max_match_distance)..];
     let mut combined = Vec::with_capacity(history.len() + input.len());
     combined.extend_from_slice(history);
@@ -432,19 +429,40 @@ fn encode_tokens_with_progress(
             insert_started.elapsed().as_millis()
         );
     }
+    tokenize(
+        &combined,
+        history.len(),
+        combined.len(),
+        &mut finder,
+        options,
+        progress,
+    )
+}
 
-    let mut pos = history.len();
-    let end = combined.len();
+/// Tokenise `combined[start..end]` against `finder`, which must already index
+/// every position before `start` and be visible up to `end`.
+///
+/// The caller owns the finder so one member can share it across its blocks.
+fn tokenize(
+    combined: &[u8],
+    start: usize,
+    end: usize,
+    finder: &mut MatchFinder<'_>,
+    options: EncodeOptions,
+    mut progress: Option<&mut dyn FnMut(usize) -> bool>,
+) -> RarResult<Vec<EncodeToken>> {
+    let mut tokens = Vec::new();
+    let mut pos = start;
     let mut state = EncoderMatchState::default();
     let mut next_report = 0usize;
     let mut pending_match: Option<MatchCandidate> = None;
     while pos < end {
         let candidate = pending_match
             .take()
-            .or_else(|| best_match(&combined, pos, end, &mut finder, options, &state));
+            .or_else(|| best_match(pos, end, finder, options, &state));
         if let Some(candidate) = candidate {
             let (emit_literal, cached_next) =
-                lazy_match_decision(&combined, pos, &mut finder, options, &state, candidate);
+                lazy_match_decision(pos, end, finder, options, &state, candidate);
             if emit_literal {
                 tokens.push(EncodeToken::Literal(combined[pos]));
                 pos += 1;
@@ -464,7 +482,7 @@ fn encode_tokens_with_progress(
             tokens.push(EncodeToken::Literal(combined[pos]));
             pos += 1;
         }
-        let consumed = pos.saturating_sub(history.len());
+        let consumed = pos.saturating_sub(start);
         if consumed >= next_report {
             if progress
                 .as_deref_mut()
@@ -475,7 +493,7 @@ fn encode_tokens_with_progress(
             next_report = consumed.saturating_add(1024 * 1024);
         }
     }
-    if progress.is_some_and(|report| !report(input.len())) {
+    if progress.is_some_and(|report| !report(end - start)) {
         return Err(RarError::Cancelled);
     }
     Ok(tokens)
@@ -617,7 +635,12 @@ fn analyze_block(
     options: EncodeOptions,
     progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> RarResult<BlockAnalysis> {
-    let tokens = encode_tokens_with_progress(input, history, options, progress)?;
+    analyze_tokens(encode_tokens_with_progress(input, history, options, progress)?, filter_count)
+}
+
+/// [`analyze_block`] for a token stream the caller already produced — the
+/// member-wide-finder path tokenises each block itself.
+fn analyze_tokens(tokens: Vec<EncodeToken>, filter_count: usize) -> RarResult<BlockAnalysis> {
     let table_lengths = build_block_table_lengths(&tokens, filter_count)?;
     Ok(BlockAnalysis {
         tokens,
@@ -1000,7 +1023,6 @@ const RAR29_PARALLEL_MEMBER_THRESHOLD: usize = 1024 * 1024;
 /// case a borrow straight out of `input`; only blocks whose window straddles
 /// the history/input boundary (the first megabytes of a member that follows a
 /// carried/solid window) copy the few straddling bytes.
-#[cfg(feature = "parallel")]
 fn block_history<'a>(
     history_tail: &'a [u8],
     input: &'a [u8],
@@ -1840,31 +1862,85 @@ fn encode_filtered_member_blocks(
     inner.block_size = None;
     let mut programs: Vec<&'static [u8]> = Vec::new();
     let mut out = Vec::new();
-    let mut local_history = history[history.len().saturating_sub(MAX_HISTORY)..].to_vec();
+    // Pass 1 (serial, cheap): the per-block filter records, in order.
+    // `programs` accumulates as blocks are seen, so this cannot be reordered;
+    // it only encodes a program the first time it appears.
+    let mut plan: Vec<(usize, usize, Vec<Vec<u8>>)> = Vec::new();
     let mut base = 0usize;
     while base < data.len().max(1) {
         let end = (base + block_size).min(data.len());
-        let chunk = &data[base..end];
         let in_block: Vec<&OwnedVmFilterRecord> = filters
             .iter()
             .filter(|record| record.block_start >= base && record.block_start < end.max(base + 1))
             .collect();
         let records = encoded_filter_records_at(&in_block, base, window, &mut programs)?;
-        out.extend_from_slice(&encode_member_inner(
-            chunk,
-            &local_history,
-            &records,
-            inner,
-            end < data.len(),
-            levels,
-            None,
-        )?);
-        local_history.extend_from_slice(chunk);
-        let keep_from = local_history.len().saturating_sub(MAX_HISTORY);
-        if keep_from != 0 {
-            local_history.drain(..keep_from);
-        }
+        plan.push((base, end, records));
         base = end;
+    }
+    // Pass 2: analyse the blocks in waves, each with its own finder — the same
+    // shape as `encode_member_blocks_mt`, so the analysis is exactly the serial
+    // block loop's. Serialisation stays in order because the code-length tables
+    // chain block to block.
+    let history_tail = &history[history.len().saturating_sub(MAX_HISTORY)..];
+    let block_count = plan.len();
+    #[cfg(feature = "parallel")]
+    {
+        let pool = crate::parallel::compression_pool();
+        let wave = pool.current_num_threads().clamp(1, 64);
+        if std::env::var_os("RAR_RS_MTTIME").is_some() {
+            eprintln!("MTTIME rar29 filtered blocks={block_count} wave={wave}");
+        }
+        let mut first = 0usize;
+        while first < block_count {
+            let last = (first + wave).min(block_count);
+            let results =
+                std::sync::Mutex::new((0..last - first).map(|_| None).collect::<Vec<_>>());
+            {
+                let results_ref = &results;
+                let plan_ref = &plan;
+                pool.scope(|scope| {
+                    for (slot, k) in (first..last).enumerate() {
+                        let (start, end, records) = &plan_ref[k];
+                        let chunk = &data[*start..*end];
+                        let block_window =
+                            block_history(history_tail, data, *start, options.max_match_distance);
+                        let filter_count = records.len();
+                        scope.spawn(move |_| {
+                            let analysis =
+                                analyze_block(chunk, &block_window, filter_count, inner, None);
+                            *results_ref
+                                .lock()
+                                .unwrap()
+                                .get_mut(slot)
+                                .expect("wave slot") = Some(analysis);
+                        });
+                    }
+                });
+            }
+            let wave_results = std::mem::take(&mut *results.lock().unwrap());
+            for (offset, result) in wave_results.into_iter().enumerate() {
+                let analysis = result.expect("worker slot filled")?;
+                let (_, _, records) = &plan[first + offset];
+                out.extend_from_slice(&serialize_block(
+                    &analysis,
+                    records,
+                    first + offset + 1 < block_count,
+                    levels,
+                )?);
+            }
+            first = last;
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    for (index, (start, end, records)) in plan.iter().enumerate() {
+        let window = block_history(history_tail, data, *start, options.max_match_distance);
+        let analysis = analyze_block(&data[*start..*end], &window, records.len(), inner, None)?;
+        out.extend_from_slice(&serialize_block(
+            &analysis,
+            records,
+            index + 1 < block_count,
+            levels,
+        )?);
     }
     // `data` is already the transformed bytes (the caller transformed it
     // before calling); the solid chain must remember them, not the original.

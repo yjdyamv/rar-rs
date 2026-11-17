@@ -342,6 +342,9 @@ pub(super) fn best_rar29_member(
     let options = options_for_level(level);
     let method = crate::format::rar4::RAR4_METHOD_STORE + level;
     let candidates = rar29_filter_candidates(data, policy);
+    if std::env::var_os("RAR_RS_MTTIME").is_some() {
+        eprintln!("MTTIME rar29 candidates={}", candidates.len());
+    }
     let with_ppmd = level >= 4 && !data.is_empty();
     // Plain, then the filters in order, then PPMd: a tie keeps the earlier
     // candidate. Each one runs on its own throwaway encoder, so they are
@@ -350,6 +353,7 @@ pub(super) fn best_rar29_member(
     let slots = candidates.len() + 1 + usize::from(with_ppmd);
     let results = std::sync::Mutex::new(vec![None::<Vec<u8>>; slots]);
     let plain_error = std::sync::Mutex::new(None::<crate::error::RarError>);
+    #[cfg(feature = "parallel")]
     {
         let results = &results;
         let plain_error = &plain_error;
@@ -381,6 +385,25 @@ pub(super) fn best_rar29_member(
                 });
             }
         });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        match Unpack29Encoder::with_options(options).encode_member(data) {
+            Ok(packed) => results.lock().unwrap()[0] = Some(packed),
+            Err(error) => *plain_error.lock().unwrap() = Some(error),
+        }
+        for (index, (kind, ranges)) in candidates.iter().enumerate() {
+            if let Ok(packed) = Unpack29Encoder::with_options(options)
+                .encode_member_with_filter_ranges(data, *kind, ranges)
+            {
+                results.lock().unwrap()[index + 1] = Some(packed);
+            }
+        }
+        if with_ppmd
+            && let Ok(packed) = Unpack29Encoder::with_options(options).encode_ppmd_member(data)
+        {
+            results.lock().unwrap()[candidates.len() + 1] = Some(packed);
+        }
     }
     if let Some(error) = plain_error.into_inner().unwrap() {
         return Err(error);
