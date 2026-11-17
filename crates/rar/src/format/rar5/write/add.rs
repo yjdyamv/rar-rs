@@ -433,7 +433,10 @@ pub(crate) fn add_file_rar5(
     let (dsl, dict_bytes) = solid_dict_params(cx, dsl, dict_bytes);
     let chain_solid = cx.begin_solid_member();
     #[cfg(feature = "parallel")]
-    const MT_MIN: usize = crate::codec::DEFAULT_CHUNK_SIZE;
+    let mt_min = std::env::var("RAR_RS_MT_MIN")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(crate::codec::MT_MIN_MEMBER_SIZE);
     #[cfg(feature = "parallel")]
     let threads = cx.effective_threads();
     #[cfg(not(feature = "parallel"))]
@@ -441,7 +444,7 @@ pub(crate) fn add_file_rar5(
     let use_mt = {
         #[cfg(feature = "parallel")]
         {
-            threads > 1 && whole.len() >= MT_MIN
+            threads > 1 && whole.len() >= mt_min
         }
         #[cfg(not(feature = "parallel"))]
         {

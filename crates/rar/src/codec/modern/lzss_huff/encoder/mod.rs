@@ -28,7 +28,7 @@ pub(crate) use chunked::EncodeSpec;
 pub(crate) use chunked::encode_chunked_mt_with_progress;
 pub(crate) use chunked::encode_chunked_raw_with_lead;
 pub use chunked::{
-    DEFAULT_CHUNK_SIZE, encode_chunked_mt, encode_chunked_raw, encode_raw, encode_with_progress_raw,
+    DEFAULT_CHUNK_SIZE, MT_MIN_MEMBER_SIZE, encode_chunked_mt, encode_chunked_raw, encode_raw, encode_with_progress_raw,
 };
 pub use filter::{
     FILTER_PROBE_LEN, FilterProbe, MAX_FILTER_BLOCK_LENGTH, best_combined_specs,

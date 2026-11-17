@@ -33,6 +33,25 @@ use crate::version::ArchiveVersion;
 /// the chunk size instead of the whole file.
 pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
+/// Smallest member the parallel tier is used for, in bytes.
+///
+/// Below a few slices' worth the pool has nothing to overlap with: the fixed
+/// per-member cost (filter pick, row-index build) is paid in full while the
+/// parse itself shrinks. Measured on a kernel image at `-m3 -md32m -mt24`
+/// (time / archive size, sequential vs parallel):
+///
+/// | member | sequential | parallel |
+/// | --- | --- | --- |
+/// | 256 KiB | 207 ms / 115,212 | 179 ms / 115,212 |
+/// | 512 KiB | 255 ms / 187,388 | 256 ms / 187,388 |
+/// | 1 MiB | 363 ms / 360,979 | 218 ms / 359,082 |
+/// | 2 MiB | 535 ms / 804,743 | 264 ms / 799,645 |
+/// | 4 MiB | 1,103 ms / 1,810,492 | 358 ms / 1,827,026 |
+///
+/// So the crossover is about a mebibyte; above it the parallel tier is 1.7-3x
+/// faster and within noise on ratio (one case 0.9% worse, two cases better).
+pub const MT_MIN_MEMBER_SIZE: usize = 1024 * 1024;
+
 /// The encode dimensions a chunked call runs under: the compression method and
 /// dictionary, the chunking, the stream's finality and distance table, plus the
 /// filter lead-in the streaming writer prepends to the first chunk's symbol

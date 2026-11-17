@@ -497,17 +497,15 @@ pub fn encode_with_filters_mt(
         return encode_with_filters(data, method, dict_size_log, filters, variant);
     }
     // The MT tier pays for slices: with a 2 MiB slice floor a member under
-    // `MT_MIN_LEN` (four slices' worth) yields too few of them, so it is both
-    // slower per byte
-    // than the sequential parse and a little worse (its candidate depth is
-    // bounded, the sequential path descends the tree). Measured at `-mt8`:
-    // kernel32 845 KiB 40.23 % -> 41.03 %, ntdll 2.5 MiB 39.34 % -> 40.36 %,
-    // win32kfull 4.35 MiB 42.57 % -> 43.41 %; ntoskrnl 13.9 MiB goes 41.53 %
-    // -> 42.28 % for 3x the speed. Keep small members sequential.
+    // The MT tier pays for slices: below a few slices' worth it is both slower
+    // per byte than the sequential parse and can be slightly worse (its
+    // candidate depth is bounded, the sequential path descends the tree). The
+    // measured crossover is around a mebibyte; see `MT_MIN` in
+    // `format/rar5/write/add.rs` for the size curve behind the threshold.
     let mt_min_len = std::env::var("RAR_RS_MT_MIN_LEN")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(8 * 1024 * 1024);
+        .unwrap_or(MT_MIN_MEMBER_SIZE);
     if data.len() < mt_min_len {
         return encode_with_filters(data, method, dict_size_log, filters, variant);
     }

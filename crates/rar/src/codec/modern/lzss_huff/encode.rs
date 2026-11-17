@@ -16,6 +16,7 @@ pub(crate) use super::encoder::set_price_carry_enabled;
 pub(crate) use super::encoder::solid_filter_specs;
 pub use super::encoder::{
     DEFAULT_CHUNK_SIZE, EncoderState, FILTER_PROBE_LEN, FilterProbe, FilterSpec,
+    MT_MIN_MEMBER_SIZE,
     MAX_FILTER_BLOCK_LENGTH, encode_chunked_mt, encode_chunked_raw, encode_raw,
     encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
     encode_with_filters_continue, encode_with_filters_mt, encode_with_progress_raw,

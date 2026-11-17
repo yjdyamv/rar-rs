@@ -27,7 +27,8 @@ pub(crate) use encode::set_fast_path_enabled;
 pub(crate) use encode::set_price_carry_enabled;
 pub(crate) use encode::solid_filter_specs;
 pub use encode::{
-    DEFAULT_CHUNK_SIZE, EncodeOptions, EncoderState, FilterSpec, MAX_FILTER_BLOCK_LENGTH, encode,
+    DEFAULT_CHUNK_SIZE, EncodeOptions, EncoderState, FilterSpec, MAX_FILTER_BLOCK_LENGTH,
+    MT_MIN_MEMBER_SIZE, encode,
     encode_chunked, encode_chunked_mt, encode_chunked_raw, encode_raw,
     encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
     encode_with_filters_continue, encode_with_filters_mt, encode_with_progress_raw,
