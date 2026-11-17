@@ -421,8 +421,16 @@ fn encode_tokens_with_progress(
         options.max_match_candidates,
         options.max_match_distance,
     );
+    let insert_started = std::time::Instant::now();
     for history_pos in 0..history.len() {
         finder.insert(history_pos);
+    }
+    if std::env::var_os("RAR_RS_MTTIME").is_some() {
+        eprintln!(
+            "MTTIME rar29 history-insert bytes={} {}ms",
+            history.len(),
+            insert_started.elapsed().as_millis()
+        );
     }
 
     let mut pos = history.len();
@@ -976,8 +984,14 @@ fn read_block<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> RarResult<usi
 /// write pipeline already holds the whole member in memory, and at 64 KiB per
 /// block the parse now outweighs the pool/scope overhead. Below this the
 /// sequential path is used unchanged.
+///
+/// 64 MiB kept a 13.9 MB member on the serial path entirely, where every block
+/// pays a full 4 MB history insert and only one core tokenises: `-ma4 -m1` took
+/// 5.7 s against WinRAR's 0.11 s. The parallel path only overlaps tokenising —
+/// the code-length tables still chain block to block in order — so the archive
+/// is unchanged; 1 MiB is where the pool starts paying for itself.
 #[cfg(feature = "parallel")]
-const RAR29_PARALLEL_MEMBER_THRESHOLD: usize = 64 * 1024 * 1024;
+const RAR29_PARALLEL_MEMBER_THRESHOLD: usize = 1024 * 1024;
 
 /// The exact history window the sequential path hands the tokeniser for the
 /// block starting at `block_start`: the last
