@@ -1526,9 +1526,14 @@ pub(crate) fn split_rar29_filter_range(
     range: std::ops::Range<usize>,
 ) -> Vec<std::ops::Range<usize>> {
     const MAX_VM_FILTER_BLOCK_SIZE: usize = 128 * 1024;
+    // WinRAR emits x86 filter records 64 KiB at a time rather than at the
+    // largest block the VM accepts, and a finer split is what gives the
+    // per-record E8/E8E9 choice something to work with: a 128 KiB record can
+    // only be all-E8 or all-E8E9.
+    const X86_VM_FILTER_BLOCK_SIZE: usize = 64 * 1024;
     let (unit, chunk_size) = match kind {
         Rar29FilterKind::E8 | Rar29FilterKind::E8E9 | Rar29FilterKind::Itanium => {
-            (4, MAX_VM_FILTER_BLOCK_SIZE)
+            (4, X86_VM_FILTER_BLOCK_SIZE)
         }
         Rar29FilterKind::Delta { channels } => {
             let channels = channels.max(1);

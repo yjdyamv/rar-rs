@@ -345,12 +345,17 @@ fn rar29_filter_candidates(
     if policy.x86 == FilterMode::Auto {
         // The whole member, not the scanner's clusters: on a 13.9 MB kernel
         // image at -m3 the scanner's ranges gained 169 KB over no filter while
-        // one whole-member E8E9 record gained 379 KB (6,664,846 against
-        // 6,874,775), and WinRAR's own gain on the same file is 455 KB. The
-        // probe in `best_filter_candidate` decides whether the member wants a
-        // filter at all, so data that cannot carry E8E9 (text, random) still
+        // one whole-member record gains far more. E8E9 is listed first because
+        // it is the wider transform, and E8 second because on that same image
+        // the *narrower* one wins outright (6,643,533 against 6,665,714) - the
+        // probe picks per member, and WinRAR's own archives mix the two from
+        // region to region.
+        //
+        // The probe in `best_filter_candidate` decides whether the member wants
+        // a filter at all, so data that cannot carry either (text, random) still
         // ends up unfiltered.
         candidates.push((Rar29FilterKind::E8E9, whole()));
+        candidates.push((Rar29FilterKind::E8, whole()));
     }
     if policy.delta == FilterMode::Auto
         && let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(data)
