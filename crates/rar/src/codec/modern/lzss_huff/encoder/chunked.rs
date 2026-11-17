@@ -111,6 +111,11 @@ struct MtJob<'a> {
     depth: usize,
     /// How far back the walk's candidates may reach (see [`WALK_REACH`]).
     reach: usize,
+    /// Cap on the per-slice lookbehind this slice seeds (see [`PREVIEW_TAIL`]).
+    near_cap: usize,
+    /// Lazy lookahead for the walk's chain tier: `0` disables the second probe
+    /// (see [`PREVIEW_LAZY`]).
+    walk_lazy: u32,
     /// Shared read-only row index over the whole member (issue 15 step ③):
     /// every MT slice parses against it, which is what makes a slice
     /// self-sufficient. `None` selects the low-step chain tier (the fallback
@@ -514,14 +519,26 @@ pub(crate) fn encode_chunked_mt_with_progress(
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 0)
         .unwrap_or(MT_ROW_INDEX_DEPTH[level]);
-    // Speed-first ladder: the walk parses the fast rungs, the priced DP keeps
-    // the two top ones (it is the best ratio this encoder has). The walk's
-    // speed dial is how far back it may look — measured on the kernel image,
-    // 8 MB costs 492 bytes over a full reach while 512 KB costs 1.27 pp — so
-    // the rungs widen with the level. `RAR_RS_MT_WALK` forces the walk
-    // everywhere and `RAR_RS_WALK_REACH` overrides the per-level reach.
-    let walk_tier = level <= WALK_MAX_LEVEL
-        || std::env::var("RAR_RS_MT_WALK").is_ok_and(|value| value != "0");
+    // Speed-first ladder: the walk parses every rung, and `RAR_RS_MT_DP=1`
+    // puts the priced DP back under `-m4`/`-m5` for anyone who wants our best
+    // ratio instead of our best time. The walk's speed dial is how far back it
+    // may look — measured on the kernel image, 8 MB costs 492 bytes over a full
+    // reach while 512 KB costs 1.27 pp — so the rungs widen with the level.
+    // `RAR_RS_MT_WALK` forces the walk even over the DP.
+    let force_walk = std::env::var("RAR_RS_MT_WALK").is_ok_and(|value| value != "0");
+    let dp_rung = priced_dp_requested() && level >= 4;
+    let walk_tier = force_walk || (level <= WALK_MAX_LEVEL && !dp_rung);
+    // `-m1` is the preview rung: no member-wide index at all (its build is the
+    // whole per-member prelude), the walk over a per-slice chain with a short
+    // tail instead. Measured 208 ms / 51.22% against the indexed walk's
+    // 247 ms / 47.48% — 39 ms for 3.7 pp, which buys back 0.3x of the gap to
+    // the official's deliberately weak `-m1`.
+    let preview = level == 1 && !force_walk;
+    let near_cap = if preview {
+        PREVIEW_TAIL
+    } else {
+        near_window_max()
+    };
     // How far back the walk's candidates may reach, capped to the dictionary.
     let walk_reach = std::env::var("RAR_RS_WALK_REACH")
         .ok()
@@ -685,7 +702,9 @@ pub(crate) fn encode_chunked_mt_with_progress(
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value >= 1)
         .unwrap_or(8);
-    let need_index = !no_index_enabled() && !use_prev4;
+    // The preview rung builds no member-wide index: its prelude is the whole
+    // cost it is trying to avoid.
+    let need_index = !no_index_enabled() && !use_prev4 && !preview;
     let lr_stage = std::time::Instant::now();
     let ((), (row_index, prev4_index)) = pool.join(
         || lr_shared.push(data),
@@ -761,8 +780,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
                             &MtJob {
                                 chain_len,
                                 lazy_thresh,
-                                depth: row_depth,
+                                depth: if preview { PREVIEW_DEPTH } else { row_depth },
                                 reach: walk_reach,
+                                near_cap,
+                                walk_lazy: if preview { PREVIEW_LAZY } else { walk_lazy_max() },
                                 index: row_index_ref,
                                 prev4: prev4_ref,
                                 is_last_block_of_member: is_final && k + 1 == n,
@@ -911,11 +932,68 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 #[cfg(feature = "parallel")]
 const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 64, 24, 64, 128, 384];
 
-/// Highest level the walk parses. `-m4`/`-m5` keep the priced DP: it is the
-/// best ratio this encoder has, and a ladder whose top rung is also the
-/// fastest would no longer be a ladder.
+/// Highest level the walk parses. Every rung: the walk is what lets each level
+/// match the official's time for that level (measured at `-md32m -mt24`,
+/// 249/261/269/321/359 ms against the official's 138/195/239/377/388 ms), and
+/// the priced DP costs 1.6-1.8x that for 1.5-2.2 pp of ratio.
 #[cfg(feature = "parallel")]
-const WALK_MAX_LEVEL: usize = 3;
+const WALK_MAX_LEVEL: usize = 5;
+
+/// `-m1`'s per-slice lookbehind cap. The preview rung gives up cross-slice reach
+/// on purpose: seeding a wide tail is most of what a chain tier costs, and the
+/// official's `-m1` is a preview too (54.34% on the kernel image).
+#[cfg(feature = "parallel")]
+const PREVIEW_TAIL: usize = 32 * 1024;
+
+/// `-m1`'s candidate walk length. Depth 4 measured 208 ms / 51.22% against
+/// depth 64's 245 ms / 51.04%: past a handful of links a short tail has nothing
+/// more to offer.
+#[cfg(feature = "parallel")]
+const PREVIEW_DEPTH: usize = 4;
+
+/// `-m1`'s lazy lookahead: off. The one-step probe doubles the candidate work
+/// for every match shorter than the threshold, which a preview rung cannot
+/// afford; measured 90 -> 72 ms of waves for 0.3 pp.
+#[cfg(feature = "parallel")]
+const PREVIEW_LAZY: u32 = 0;
+
+/// The walk's lazy lookahead for the indexed rungs. `RAR_RS_WALK_LAZY` overrides
+/// it for measurement: on the preview rung disabling it made the archive both
+/// smaller and faster, so it is worth checking the wider rungs.
+#[cfg(feature = "parallel")]
+fn walk_lazy_max() -> u32 {
+    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RAR_RS_WALK_LAZY")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(WALK_LAZY_MAX)
+    })
+}
+
+/// `RAR_RS_MT_DP=1` puts the priced DP back under `-m4`/`-m5`: our best ratio
+/// (41.29% at `-m5` against the walk's 43.62%) for 1.7-2.1x the wall time.
+///
+/// The environment is read once per process, which a test cannot vary; the
+/// seam below forces it instead (same shape as the other test switches).
+#[cfg(feature = "parallel")]
+fn priced_dp_requested() -> bool {
+    #[cfg(test)]
+    if DP_TIER_FORCED.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_MT_DP").is_ok_and(|value| value != "0"))
+}
+
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) static DP_TIER_FORCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) fn set_dp_tier(enabled: bool) {
+    DP_TIER_FORCED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// How far back the walk's candidates may reach, by level (bytes). This is the
 /// dial the fast rungs spend their budget on: measured at the no-scan rung on
@@ -1011,6 +1089,7 @@ fn no_index_enabled() -> bool {
 }
 
 #[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)] // the slice, its search dials and the defer slot
 fn mt_slice_symbols_row_index(
     state: &mut EncoderState,
     slice: MtSlice<'_>,
@@ -1019,6 +1098,8 @@ fn mt_slice_symbols_row_index(
     depth: usize,
     // How far back the walk's candidates may reach (see [`WALK_REACH`]).
     reach: usize,
+    // Lazy lookahead for the walk (see [`walk_lazy_max`]).
+    lazy: u32,
     // Take the `-m1` walk instead of the priced DP.
     walk: bool,
     defer: Option<&mut Vec<(u32, u32)>>,
@@ -1060,7 +1141,7 @@ fn mt_slice_symbols_row_index(
                 window: dict_size,
                 variant,
             },
-            WALK_LAZY_MAX,
+            lazy,
             |pos, _cache, runs| {
                 index.collect(data, pos, reach.min(pos), max_match, depth, runs);
                 // A solid chain reaches back into earlier members, and those
@@ -1199,6 +1280,8 @@ fn encode_mt_slice(
         lazy_thresh,
         depth,
         reach,
+        near_cap,
+        walk_lazy,
         index,
         prev4,
         is_last_block_of_member,
@@ -1219,7 +1302,7 @@ fn encode_mt_slice(
     // Issue 15 step ③: with the shared row index there is no lookbehind frame
     // to build at all — the index already holds every position of the member,
     // so the slice copy, the tail seeding and the per-slice finder disappear.
-    let want = near_window_max().min(dict_size);
+    let want = near_cap.min(dict_size);
     let tail_ctx: Vec<u8> = if index.is_some() {
         Vec::new()
     } else if s0 >= want {
@@ -1275,12 +1358,19 @@ fn encode_mt_slice(
     let two_phase = slice_two_phase();
     let mut tokens: Vec<(u32, u32)> = Vec::new();
     let mut symbols = match (index, prev4, two_phase) {
-        (Some(index), _, true) => {
-            mt_slice_symbols_row_index(state, slice, index, depth, reach, walk, Some(&mut tokens))
-        }
-        (Some(index), _, false) => {
-            mt_slice_symbols_row_index(state, slice, index, depth, reach, walk, None)
-        }
+        (Some(index), _, true) => mt_slice_symbols_row_index(
+            state,
+            slice,
+            index,
+            depth,
+            reach,
+            walk_lazy,
+            walk,
+            Some(&mut tokens),
+        ),
+        (Some(index), _, false) => mt_slice_symbols_row_index(
+            state, slice, index, depth, reach, walk_lazy, walk, None,
+        ),
         (None, Some(prev4), false) => mt_slice_symbols_prev4(state, slice, prev4, depth, reach),
         (None, _, _) => mt_slice_symbols_low_step(
             state,
@@ -1290,6 +1380,7 @@ fn encode_mt_slice(
             seed_tail,
             depth,
             walk,
+            walk_lazy,
         ),
     };
     if two_phase {
@@ -1328,6 +1419,7 @@ fn encode_mt_slice(
 /// (already an accepted, documented divergence); the sequential path never
 /// reaches here.
 #[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)] // the slice plus the chain tier's four dials
 fn mt_slice_symbols_low_step(
     state: &mut EncoderState,
     slice: MtSlice<'_>,
@@ -1336,6 +1428,7 @@ fn mt_slice_symbols_low_step(
     seed_tail: bool,
     depth: usize,
     walk: bool,
+    walk_lazy: u32,
 ) -> Vec<Symbol> {
     let MtSlice {
         data,
@@ -1394,7 +1487,7 @@ fn mt_slice_symbols_low_step(
                     window: dict_size,
                     variant,
                 },
-                WALK_LAZY_MAX,
+                walk_lazy,
                 |pos, _cache, runs| {
                     while inserted < pos {
                         finder_ref.insert(inserted);
@@ -1407,7 +1500,6 @@ fn mt_slice_symbols_low_step(
         state.chain_parts = Some(finder.into_parts());
         return symbols;
     }
-
     // Long-range candidates only beyond what the near chain covers.
     let lr_q = if long_range {
         Some((lr_shared, tl + (e0 - s0), entry_len + s0))

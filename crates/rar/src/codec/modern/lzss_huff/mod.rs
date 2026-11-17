@@ -37,6 +37,8 @@ pub use encode::{
 pub(crate) use encode::{
     FILTER_PROBE_LEN, FilterProbe, filter_transform_wins, member_filter_probes,
 };
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) use encoder::set_dp_tier;
 pub(crate) use encoder::{
     best_combined_specs, delta_stream_window, forced_combined_specs,
     forced_combined_stream_window, merge_ranges, x86_stream_window,
@@ -845,9 +847,13 @@ mod mt_tests {
         impl Drop for Guard {
             fn drop(&mut self) {
                 set_price_carry_enabled(true);
+                set_dp_tier(false);
             }
         }
         let _g = Guard;
+        // The walk parses every level by default; this test measures the priced
+        // DP's block-to-block price carry, so put the DP back on `-m4`.
+        set_dp_tier(true);
 
         // Big enough that a slice spans several DP blocks: the carry only
         // crosses blocks, and the slice scheduler cuts a 1.5 MB member into
