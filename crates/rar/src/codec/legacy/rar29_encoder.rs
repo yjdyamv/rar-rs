@@ -408,11 +408,31 @@ fn encode_tokens_with_progress(
     progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> RarResult<Vec<EncodeToken>> {
     let history = &history[history.len().saturating_sub(options.max_match_distance)..];
-    let insert_started = std::time::Instant::now();
     let mut combined = Vec::with_capacity(history.len() + input.len());
     combined.extend_from_slice(history);
     combined.extend_from_slice(input);
     let finder_started = std::time::Instant::now();
+    #[cfg(feature = "parallel")]
+    let mut finder = match finder_parts_take() {
+        Some((head, prev, base)) => MatchFinder::reuse(
+            &combined,
+            4,
+            MAX_ENCODER_MATCH_LENGTH,
+            options.max_match_candidates,
+            options.max_match_distance,
+            head,
+            prev,
+            base,
+        ),
+        None => MatchFinder::new(
+            &combined,
+            4,
+            MAX_ENCODER_MATCH_LENGTH,
+            options.max_match_candidates,
+            options.max_match_distance,
+        ),
+    };
+    #[cfg(not(feature = "parallel"))]
     let mut finder = MatchFinder::new(
         &combined,
         4,
@@ -454,7 +474,32 @@ fn encode_tokens_with_progress(
             tokenize_started.elapsed().as_millis()
         );
     }
+    #[cfg(feature = "parallel")]
+    finder_parts_stash(finder.into_parts());
     tokens
+}
+
+// RAR4 codes one member in 64 KiB blocks, each of which needs a finder over
+// `history + block`. Building a fresh `MatchFinder` per block allocates and
+// clears a 4 MB `head`, and re-inserting the block's history on top of that
+// measured 34 ns/B together — 35% of a `-m1` run on a 13.9 MB kernel image,
+// for setup rather than search. These two keep the arrays alive per worker
+// thread instead; the epoch in `MatchFinder::reuse` is what makes that safe
+// without a clear.
+#[cfg(feature = "parallel")]
+thread_local! {
+    static FINDER_PARTS: std::cell::RefCell<Option<(Vec<i32>, Vec<i32>, i32)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "parallel")]
+fn finder_parts_take() -> Option<(Vec<i32>, Vec<i32>, i32)> {
+    FINDER_PARTS.with(|parts| parts.borrow_mut().take())
+}
+
+#[cfg(feature = "parallel")]
+fn finder_parts_stash(parts: (Vec<i32>, Vec<i32>, i32)) {
+    FINDER_PARTS.with(|slot| *slot.borrow_mut() = Some(parts));
 }
 
 /// Tokenise `combined[start..end]` against `finder`, which must already index

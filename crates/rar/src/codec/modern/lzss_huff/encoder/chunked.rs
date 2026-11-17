@@ -1519,9 +1519,16 @@ fn mt_slice_symbols_low_step(
     let chain = if walk { depth.max(4) } else { chain };
     let parts = state.chain_parts.take();
     let mut finder = match parts {
-        Some((head, prev)) => {
-            match_finder::MatchFinder::reuse(&combined, 2, max_match, chain, dict_size, head, prev)
-        }
+        Some((head, prev, base)) => match_finder::MatchFinder::reuse(
+            &combined,
+            2,
+            max_match,
+            chain,
+            dict_size,
+            head,
+            prev,
+            base,
+        ),
         None => match_finder::MatchFinder::new(&combined, 2, max_match, chain, dict_size),
     };
     if seed_tail {

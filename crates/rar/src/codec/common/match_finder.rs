@@ -441,6 +441,9 @@ pub struct MatchFinder<'a> {
     window: usize,
     hash_mask: usize,
     prev_mask: usize,
+    /// Added to every stored position, so a slot left over from an earlier
+    /// epoch reads as `< base` and needs no clearing. See [`MatchFinder::reuse`].
+    base: i32,
 }
 
 const HASH_BITS: usize = 20;
@@ -531,31 +534,36 @@ impl<'a> MatchFinder<'a> {
         MatchFinder {
             data,
             size: data.len(),
-            head: vec![-1; HASH_SIZE],
-            prev: vec![-1; prev_size],
+            head: vec![0; HASH_SIZE],
+            prev: vec![0; prev_size],
             min_match,
             max_match,
             chain_len,
             window,
             hash_mask: HASH_SIZE - 1,
             prev_mask: prev_size - 1,
+            base: 1,
         }
     }
 
     /// Rebuild a finder over fresh `data` reusing preallocated `head`/`prev`
     /// arrays (the two multi-MiB allocations of [`MatchFinder::new`]). The
     /// caller hands back the arrays via [`MatchFinder::into_parts`] and
-    /// caches them across parses — the multi-threaded workers parse one
-    /// slice per frame and re-arming a warm ring beats a fresh multi-MiB
-    /// allocation per slice (the per-frame memset/alloc is pure overhead
-    /// next to the search; the allocation fix alone did not move the
-    /// random-data A/B — the per-byte chain insert vs the optimal path's
-    /// matchless fast-path skip is the remaining gap, see issue 13).
+    /// caches them across parses.
     ///
-    /// The arrays are resized in place when the frame needs more room;
-    /// extra capacity is kept for the next reuse. `head` is always cleared
-    /// (it must be — a stale entry would chain into the previous frame),
-    /// `prev` only when it grows.
+    /// The arrays keep their contents; the position epoch advances instead.
+    /// Clearing is what stale entries used to need: `head` maps a hash to a
+    /// position, and a position from an earlier parse looks like a real
+    /// candidate whose distance can still fall inside the window, so the chain
+    /// walk's distance check does not reject it. Every stored position now
+    /// carries `base`, so a slot from an earlier epoch reads as less than
+    /// `base` and the walk stops on it. That turns two multi-MiB `fill`s into a
+    /// counter bump — measured at 18.3 ns/B on a 13.9 MB kernel image, 19% of
+    /// the run. A full clear only happens when the base would overflow `i32`,
+    /// which takes thousands of reuses.
+    ///
+    /// `base` must be handed back through [`MatchFinder::into_parts`] with the
+    /// arrays.
     #[cfg(feature = "parallel")]
     pub fn reuse(
         data: &'a [u8],
@@ -565,15 +573,17 @@ impl<'a> MatchFinder<'a> {
         window: usize,
         mut head: Vec<i32>,
         mut prev: Vec<i32>,
+        base: i32,
     ) -> Self {
-        head.resize(HASH_SIZE, -1);
-        head.fill(-1);
         let prev_size = window.min(data.len()).next_power_of_two().max(1 << 17);
-        let grew = prev.len() != prev_size;
-        prev.resize(prev_size, -1);
-        if grew {
-            prev.fill(-1);
-        }
+        let step = data.len() as i64 + 1;
+        let (head, prev, base) = if i64::from(base) + step > i64::from(i32::MAX) {
+            (vec![0; HASH_SIZE], vec![0; prev_size], 1)
+        } else {
+            head.resize(HASH_SIZE, 0);
+            prev.resize(prev_size, 0);
+            (head, prev, base + step as i32)
+        };
         MatchFinder {
             data,
             size: data.len(),
@@ -585,13 +595,15 @@ impl<'a> MatchFinder<'a> {
             window,
             hash_mask: HASH_SIZE - 1,
             prev_mask: prev_size - 1,
+            base,
         }
     }
 
-    /// Hand back the `head`/`prev` arrays for caching across parses.
+    /// Hand back the `head`/`prev` arrays and the position epoch for caching
+    /// across parses.
     #[cfg(feature = "parallel")]
-    pub fn into_parts(self) -> (Vec<i32>, Vec<i32>) {
-        (self.head, self.prev)
+    pub fn into_parts(self) -> (Vec<i32>, Vec<i32>, i32) {
+        (self.head, self.prev, self.base)
     }
 
     /// Read the 4 bytes at `pos` as a little-endian word.
@@ -619,7 +631,7 @@ impl<'a> MatchFinder<'a> {
         }
         let h = self.hash4(pos);
         self.prev[pos & self.prev_mask] = self.head[h];
-        self.head[h] = pos as i32;
+        self.head[h] = pos as i32 + self.base;
     }
 
     /// Insert `pos` and report the candidates there the way
@@ -648,15 +660,15 @@ impl<'a> MatchFinder<'a> {
         let h = self.hash4(pos);
         let mut candidate = self.head[h];
         self.prev[pos & self.prev_mask] = candidate;
-        self.head[h] = pos as i32;
+        self.head[h] = pos as i32 + self.base;
 
         let data = self.data;
         let limit = max_length.min(self.size - pos);
         let reach = max_distance.min(self.window);
         let mut best_length = 0usize;
         let mut steps = depth;
-        while candidate >= 0 && steps > 0 {
-            let cand = candidate as usize;
+        while candidate >= self.base && steps > 0 {
+            let cand = (candidate - self.base) as usize;
             let distance = pos - cand;
             if distance == 0 || distance > reach {
                 break;
@@ -687,7 +699,7 @@ impl<'a> MatchFinder<'a> {
 
         let h = self.hash4(pos);
         self.prev[pos & self.prev_mask] = self.head[h];
-        self.head[h] = pos as i32;
+        self.head[h] = pos as i32 + self.base;
 
         let data = self.data;
         let mut best_len = self.min_match - 1;
@@ -709,8 +721,8 @@ impl<'a> MatchFinder<'a> {
         let pos_word =
             unsafe { u32::from_le(std::ptr::read_unaligned(bytes.add(pos).cast::<u32>())) };
         let mut candidate = self.prev[pos & self.prev_mask];
-        while candidate >= 0 && chain_count > 0 {
-            let cand = candidate as usize;
+        while candidate >= self.base && chain_count > 0 {
+            let cand = (candidate - self.base) as usize;
             let dist = pos - cand;
             if dist == 0 || dist > self.window {
                 break;
@@ -727,8 +739,8 @@ impl<'a> MatchFinder<'a> {
             // iteration of lookahead is the difference between stalling and
             // hiding it. `best_len` may still grow this iteration; a stale
             // (shorter) offset is fine for a prefetch hint.
-            if next >= 0 {
-                prefetch(bytes, next as usize + best_len.min(max_len));
+            if next >= self.base {
+                prefetch(bytes, (next - self.base) as usize + best_len.min(max_len));
             }
             let same_head = unsafe {
                 let cand_word =

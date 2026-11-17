@@ -264,10 +264,9 @@ pub struct EncoderState {
     /// parse, reused across slices. The `combined` frame is reallocated per
     /// slice (the finder borrows it), but the two multi-MiB `head`/`prev`
     /// arrays survive in [`match_finder::MatchFinder::reuse`]/[`match_finder::MatchFinder::into_parts`] — re-arming
-    /// a warm ring beats a fresh allocation + memset per slice; the random-
-    /// data A/B regression of the low-step tier is the chain's per-byte
-    /// insert, not this allocation (see issue 13).
-    chain_parts: Option<(Vec<i32>, Vec<i32>)>,
+    /// a warm ring beats a fresh allocation per slice, and the position epoch
+    /// that travels with them is what lets the ring skip its clear entirely.
+    chain_parts: Option<(Vec<i32>, Vec<i32>, i32)>,
 }
 
 impl EncoderState {
