@@ -745,15 +745,27 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 /// the MT tier's speed/ratio dial, the job the chain budget did for the old
 /// greedy tier, and what makes `-m` mean something under `-mt` again.
 ///
-/// Measured at `-mt8`, dict 32m, real CLI (level 0 is store, unused):
+/// Measured at `-mt24`, dict 32m, real CLI on a 13.9 MB kernel image and a
+/// 5.9 MB source tree (`level 0 is store, unused`). Sizes are exact; times
+/// are ranges because this machine drifts ±25% between runs — taken from
+/// interleaved repeats, never from one pass:
 ///
-/// | level | depth | 12.5 MiB DLL        | 4.88 MiB source tree |
-/// | ----- | ----- | ------------------- | -------------------- |
-/// | 1     | 16    | 2106 ms / 5,949,729 | 739 ms / 973,459     |
-/// | 2     | 32    | 1787 ms / 5,897,174 | 897 ms / 951,894     |
-/// | 3     | 64    | 2013 ms / 5,858,387 | 2167 ms / 935,472    |
-/// | 4     | 128   | 2306 ms / 5,830,234 | 1992 ms / 923,202    |
-/// | 5     | 256   | 2791 ms / 5,809,527 | 1891 ms / 914,457    |
+/// | level | depth | 13.9 MB kernel  | 5.9 MB sources |
+/// | ----- | ----- | --------------- | -------------- |
+/// | 1     | 16    | 530-545 / 5,969,224 | 300-310 / 1,167,853 |
+/// | 2     | 24    | 520-650 / 5,936,057 | 230-245 / 1,151,079 |
+/// | 3     | 64    | 575-595 / 5,878,519 | 270-280 / 1,119,405 |
+/// | 4     | 128   | 635-675 / 5,850,530 | 305-315 / 1,103,730 |
+/// | 5     | 384   | 765-925 / 5,820,788 | 435-445 / 1,087,081 |
+///
+/// The rungs are spaced so each one buys a similar slice of ratio rather than
+/// doubling the dial: on the kernel the steps are 0.55%, 0.96%, 0.47% and
+/// 0.51%. The old ladder (16/32/64/128/256) spent its budget backwards — its
+/// steps were 0.88%, 0.64%, 0.48% and 0.35%, so the top rung was starved
+/// while the bottom two overlapped. Depth is a weak cost dial (48x the depth
+/// moves the kernel by about 1.5x in time) but a real ratio dial (3.7% of
+/// size over the same range), which is why the rungs are chosen by how much
+/// size each step buys.
 ///
 /// The packed column is monotone in depth on both corpora; the **time is not**,
 /// which is worth remembering when tuning: a deeper walk finds the long match
@@ -767,7 +779,7 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 /// the cheap rung (+2.3% on the source tree, still 3.6x faster than sequential).
 /// MT-only, like the row-index parse whose level dial it is.
 #[cfg(feature = "parallel")]
-const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 256];
+const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 24, 64, 128, 384];
 
 /// Whether row-index slices also consult the shared sampled long-range table.
 ///
