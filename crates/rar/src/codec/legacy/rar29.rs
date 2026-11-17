@@ -765,6 +765,30 @@ impl Rar29Decoder {
     /// belong to an earlier solid-chain member and are not this member's
     /// concern.
     fn validate_member_filters(&self, member_start: usize, member_end: usize) -> Res<()> {
+        if std::env::var_os("RAR_RS_VMFILTER").is_some() {
+            let mine: Vec<&VmFilter> = self
+                .filters
+                .iter()
+                .filter(|f| f.start >= member_start)
+                .collect();
+            let covered: usize = mine.iter().map(|f| f.size).sum();
+            eprintln!(
+                "VMFILTER member={member_start}..{member_end} len={} records={} covered={}",
+                member_end.saturating_sub(member_start),
+                mine.len(),
+                covered
+            );
+            for f in mine {
+                let kind = self.programs.get(f.program).map(|p| &p.kind);
+                eprintln!(
+                    "VMFILTER   start={} end={} size={} program={} kind={kind:?}",
+                    f.start,
+                    f.start + f.size,
+                    f.size,
+                    f.program
+                );
+            }
+        }
         for filter in &self.filters {
             let filter_end = filter
                 .start
