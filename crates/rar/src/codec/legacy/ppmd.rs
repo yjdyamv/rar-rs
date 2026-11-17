@@ -1679,6 +1679,17 @@ impl PpmdEncoder {
     pub(crate) fn finish_keeping_model(mut self) -> Result<(Vec<u8>, PpmdDecoder)> {
         self.model.encode_symbol(self.esc_char, &mut self.range)?;
         self.model.encode_symbol(2, &mut self.range)?;
+        if std::env::var_os("RAR_RS_MTTIME").is_some() {
+            let states: usize = self.model.contexts.iter().map(|c| c.states.len()).sum();
+            eprintln!(
+                "MTTIME ppmd model contexts={} states={} state_bytes={} size_of_state={} size_of_context={}",
+                self.model.contexts.len(),
+                states,
+                states * std::mem::size_of::<State>(),
+                std::mem::size_of::<State>(),
+                std::mem::size_of::<Context>(),
+            );
+        }
         Ok((self.range.finish(), self.model))
     }
 
