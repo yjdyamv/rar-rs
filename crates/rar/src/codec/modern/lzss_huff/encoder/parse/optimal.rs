@@ -2056,6 +2056,13 @@ where
                 &mut runs,
                 &next_short,
             );
+            // One-step lazy: a match one byte later that reaches strictly further
+            // is worth the literal, because it covers the skipped byte too. The
+            // official's judge (`FUN_14004600c`) is *narrower* than this and is
+            // paired with a deferred-match mechanism we do not have in the walk;
+            // transplanting the rule alone measured worse (kernel image `-m3`
+            // 6,345,598 -> 6,427,665 B), so the walk keeps this form. The
+            // sequential parser's `lazy2` is the faithful port.
             if next.0 > best.0 {
                 chosen = (0, 0);
             }
