@@ -104,14 +104,57 @@ pub fn crc64_xz(data: &[u8]) -> u64 {
     crc64_update(data, CRC64_XZ_INIT) ^ CRC64_XZ_INIT
 }
 
-fn crc64_update(data: &[u8], initial: u64) -> u64 {
-    let mut crc = initial;
-    for &byte in data {
-        crc ^= byte as u64;
-        for _ in 0..8 {
+/// Byte-at-a-time tables for the reflected CRC-64 this module uses: entry `i` of
+/// `[0]` is the CRC of the single byte `i`, and the rest are derived so a whole
+/// 64-bit word can be consumed per step (slicing by eight).
+static CRC64_TABLES: [[u64; 256]; 8] = build_crc64_tables();
+
+const fn build_crc64_tables() -> [[u64; 256]; 8] {
+    let mut tables = [[0u64; 256]; 8];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u64;
+        let mut bit = 0;
+        while bit < 8 {
             let mask = 0u64.wrapping_sub(crc & 1);
             crc = (crc >> 1) ^ (CRC64_XZ_POLY & mask);
+            bit += 1;
         }
+        tables[0][i] = crc;
+        i += 1;
+    }
+    let mut slice = 1;
+    while slice < 8 {
+        let mut i = 0;
+        while i < 256 {
+            let previous = tables[slice - 1][i];
+            tables[slice][i] = (previous >> 8) ^ tables[0][(previous & 0xff) as usize];
+            i += 1;
+        }
+        slice += 1;
+    }
+    tables
+}
+
+fn crc64_update(data: &[u8], initial: u64) -> u64 {
+    // A word at a time through the eight tables: this was a bitwise loop (eight
+    // shift-xor rounds per byte) and ran at 217 MB/s, which made the CRC pass over
+    // a 13.9 MB prefix cost 64 ms — more than the parity computation it feeds.
+    let mut crc = initial;
+    let (words, tail) = data.as_chunks::<8>();
+    for word in words {
+        let low = crc ^ u64::from_le_bytes(*word);
+        crc = CRC64_TABLES[7][(low & 0xff) as usize]
+            ^ CRC64_TABLES[6][((low >> 8) & 0xff) as usize]
+            ^ CRC64_TABLES[5][((low >> 16) & 0xff) as usize]
+            ^ CRC64_TABLES[4][((low >> 24) & 0xff) as usize]
+            ^ CRC64_TABLES[3][((low >> 32) & 0xff) as usize]
+            ^ CRC64_TABLES[2][((low >> 40) & 0xff) as usize]
+            ^ CRC64_TABLES[1][((low >> 48) & 0xff) as usize]
+            ^ CRC64_TABLES[0][((low >> 56) & 0xff) as usize];
+    }
+    for &byte in tail {
+        crc = (crc >> 8) ^ CRC64_TABLES[0][((crc ^ byte as u64) & 0xff) as usize];
     }
     crc
 }

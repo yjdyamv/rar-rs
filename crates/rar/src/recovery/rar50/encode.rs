@@ -239,6 +239,99 @@ fn mul_tables(gf: &Gf16, col: u16) -> ([u16; 256], [u16; 256]) {
     (low, high)
 }
 
+/// The scalar form of one parity row's shard XOR: two 256-entry tables per
+/// coefficient, one per byte of the 16-bit symbol.
+fn xor_row_scalar(buf: &[u8], parity: &mut [u8], low: &[u16; 256], high: &[u16; 256]) {
+    let (pairs, _) = buf.as_chunks::<2>();
+    let (outs, _) = parity.as_chunks_mut::<2>();
+    for (pair, out) in pairs.iter().zip(outs.iter_mut()) {
+        let symbol = low[pair[0] as usize] ^ high[pair[1] as usize];
+        out[0] ^= symbol as u8;
+        out[1] ^= (symbol >> 8) as u8;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod ssse3 {
+    use super::Gf16;
+    use std::arch::x86_64::*;
+
+    /// One coefficient's multiply as eight 16-entry nibble tables: `mul` splits a
+    /// 16-bit symbol into four nibbles and multiplication is linear over XOR, so
+    /// the product is the XOR of the four tables' entries. Each table is stored
+    /// as exactly sixteen bytes because `pshufb` reads the register that way.
+    pub(super) struct RowTables {
+        low: [[u8; 16]; 4],
+        high: [[u8; 16]; 4],
+    }
+
+    impl RowTables {
+        pub(super) fn new(gf: &Gf16, col: u16) -> Self {
+            let mut low = [[0u8; 16]; 4];
+            let mut high = [[0u8; 16]; 4];
+            for (k, (low, high)) in low.iter_mut().zip(high.iter_mut()).enumerate() {
+                for v in 0..16usize {
+                    let product = gf.mul(col, (v as u16) << (4 * k as u16));
+                    low[v] = product as u8;
+                    high[v] = (product >> 8) as u8;
+                }
+            }
+            Self { low, high }
+        }
+    }
+
+    pub(super) fn available() -> bool {
+        std::arch::is_x86_feature_detected!("ssse3")
+    }
+
+    /// XOR `col * symbol` for eight symbols (sixteen bytes) per iteration.
+    ///
+    /// The symbols' low bytes are gathered into lanes 0-7, then their two nibbles
+    /// feed the first two tables; the high bytes likewise feed the last two. The
+    /// low and high result bytes accumulate separately and are interleaved back
+    /// into symbol order at the end.
+    ///
+    /// # Safety
+    /// Requires ssse3; `parity` must be at least as long as `buf`.
+    #[target_feature(enable = "ssse3")]
+    pub(super) unsafe fn apply(buf: &[u8], parity: &mut [u8], tables: &RowTables) {
+        // SAFETY: ssse3 is enabled for this function and the caller checks it; the
+        // loads and stores stay inside `buf`/`parity` because both come from the
+        // same `chunks_exact(16)` ranges.
+        unsafe {
+            let even = _mm_setr_epi8(0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1);
+            let odd = _mm_setr_epi8(1, 3, 5, 7, 9, 11, 13, 15, -1, -1, -1, -1, -1, -1, -1, -1);
+            let nibble = _mm_set1_epi8(0x0f);
+            let low: [__m128i; 4] =
+                std::array::from_fn(|k| _mm_loadu_si128(tables.low[k].as_ptr().cast()));
+            let high: [__m128i; 4] =
+                std::array::from_fn(|k| _mm_loadu_si128(tables.high[k].as_ptr().cast()));
+            let (blocks, _) = buf.as_chunks::<16>();
+            let (outs, _) = parity.as_chunks_mut::<16>();
+            for (src, dst) in blocks.iter().zip(outs.iter_mut()) {
+                let symbols = _mm_loadu_si128(src.as_ptr().cast());
+                let lo_bytes = _mm_shuffle_epi8(symbols, even);
+                let hi_bytes = _mm_shuffle_epi8(symbols, odd);
+                let n0 = _mm_and_si128(lo_bytes, nibble);
+                let n1 = _mm_and_si128(_mm_srli_epi16(lo_bytes, 4), nibble);
+                let n2 = _mm_and_si128(hi_bytes, nibble);
+                let n3 = _mm_and_si128(_mm_srli_epi16(hi_bytes, 4), nibble);
+                let lo = _mm_xor_si128(
+                    _mm_xor_si128(_mm_shuffle_epi8(low[0], n0), _mm_shuffle_epi8(low[1], n1)),
+                    _mm_xor_si128(_mm_shuffle_epi8(low[2], n2), _mm_shuffle_epi8(low[3], n3)),
+                );
+                let hi = _mm_xor_si128(
+                    _mm_xor_si128(_mm_shuffle_epi8(high[0], n0), _mm_shuffle_epi8(high[1], n1)),
+                    _mm_xor_si128(_mm_shuffle_epi8(high[2], n2), _mm_shuffle_epi8(high[3], n3)),
+                );
+                let product = _mm_unpacklo_epi8(lo, hi);
+                let prior = _mm_loadu_si128(dst.as_ptr().cast());
+                _mm_storeu_si128(dst.as_mut_ptr().cast(), _mm_xor_si128(prior, product));
+            }
+        }
+    }
+}
+
 /// Read up to `buf.len()` bytes from `reader`, returning the count actually read
 /// (0 on a clean EOF). Like `read_exact` but tolerant of a short/empty tail so
 /// callers can pad the remainder with zeros instead of erroring.
@@ -323,12 +416,25 @@ pub(crate) fn build_structural_inline_recovery_data_streaming<R: Read>(
         // read-only, and each row is written by exactly one worker, so the output
         // does not depend on the schedule.
         let apply = |j: usize, parity: &mut [u8]| {
-            let (low, high) = mul_tables(gf, matrix[j][s]);
-            for word_offset in (0..group_count).step_by(2) {
-                let symbol = low[buf[word_offset] as usize] ^ high[buf[word_offset + 1] as usize];
-                parity[word_offset] ^= symbol as u8;
-                parity[word_offset + 1] ^= (symbol >> 8) as u8;
+            let col = matrix[j][s];
+            #[cfg(target_arch = "x86_64")]
+            {
+                // Eight symbols per `pshufb` iteration; the shard's tail, and any
+                // CPU without ssse3, go through the scalar form.
+                if ssse3::available() {
+                    let tables = ssse3::RowTables::new(gf, col);
+                    let whole = buf.len() & !15;
+                    // SAFETY: ssse3 is present (just checked) and `whole` keeps
+                    // both slices on their 16-byte grid, so `apply`'s loads and
+                    // stores stay in bounds.
+                    unsafe { ssse3::apply(&buf[..whole], &mut parity[..whole], &tables) };
+                    let (low, high) = mul_tables(gf, col);
+                    xor_row_scalar(&buf[whole..], &mut parity[whole..], &low, &high);
+                    return;
+                }
             }
+            let (low, high) = mul_tables(gf, col);
+            xor_row_scalar(&buf, parity, &low, &high);
         };
         #[cfg(feature = "parallel")]
         {
