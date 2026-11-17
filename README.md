@@ -21,9 +21,9 @@ RAR/UNRAR binary is required at runtime.
   sort — while the ratio rungs use a sorted index whose buckets read
   contiguously, which is what a deep candidate walk needs. Every level runs within
   1.1x of WinRAR 7.23's time for the same level on a 13.9 MB binary, 9.2 MB of
-  markdown and 5.5 MB of Rust source, except `-m1` on the large binary (1.65x);
+  markdown and 5.5 MB of Rust source, except `-m1` on the large binary (1.5x);
   `-m1`/`-m2` pack smaller than its same level and `-m3`..`-m5` come within
-  3.3 pp (see `PLAN.md`).
+  3.2 pp (see `PLAN.md`).
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
   comments, SFX handling, string search, symlinks and hardlinks.
 - **Encryption** — file-level AES-256 with a chained HMAC-SHA256 KDF, plus
