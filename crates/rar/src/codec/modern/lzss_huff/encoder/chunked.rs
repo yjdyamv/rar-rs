@@ -920,15 +920,16 @@ const WALK_MAX_LEVEL: usize = 3;
 /// How far back the walk's candidates may reach, by level (bytes). This is the
 /// dial the fast rungs spend their budget on: measured at the no-scan rung on
 /// the kernel image, 512 KB packs 6,434,014 B in 252 ms, 2 MB 6,287,387 in
-/// 266 ms and 8 MB 6,217,902 in 283 ms — ~20 ms per point of ratio, and 8 MB is
-/// within 492 B of a full 32 MB window. The rungs widen so each level buys a
-/// visible step.
+/// 266 ms and 8 MB 6,217,902 in 283 ms. The user picked the fastest point
+/// (1.07x the official's `-m3`), so the ladder stays at the narrow end and the
+/// rungs below `-m3` are narrower still; `RAR_RS_WALK_REACH` can widen `-m3` to
+/// 8 MB for 1.55 pp at ~30 ms.
 #[cfg(feature = "parallel")]
 const WALK_REACH: [usize; 6] = [
     0,
+    128 * 1024,
+    256 * 1024,
     512 * 1024,
-    2 * 1024 * 1024,
-    8 * 1024 * 1024,
     2 * 1024 * 1024,
     8 * 1024 * 1024,
 ];

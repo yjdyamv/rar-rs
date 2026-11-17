@@ -1758,6 +1758,33 @@ fn walk_near_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("RAR_RS_WALK_NEAR").is_ok_and(|value| value != "0"))
 }
 
+/// Whether the walk uses the official's *acceptance gates* instead of simply
+/// keeping the longest candidate (`RAR_RS_WALK_GATES`, **off by default:
+/// measured worse**).
+///
+/// This is `FUN_140044794`'s rule, read off the disassembly: a candidate only
+/// becomes the new best when it clears a distance-weighted gate —
+/// `prev2` (a 3-byte match) needs `dist <= 0x2000` and `best < 2 || dist <
+/// best_dist << 7`, `prev4` (4 bytes) needs `dist <= 0x40000` and `best < 3 ||
+/// dist < best_dist << 6`, and the hash chain accepts a length `> 4` only when
+/// `len > best + 1 || dist >> 5 <= best_dist`. The effect is that a *much*
+/// nearer short match beats a longer far one.
+///
+/// That is exactly the shape the histograms show we are missing: the official
+/// emits far more 2- and 3-byte matches and 4KB-inside distances, and fewer
+/// 4-15 byte matches, than a longest-wins walk does.
+///
+/// Implemented faithfully, though, it is *worse* for us: `-m3` goes 6,217,902
+/// (44.68%) to 6,252,827 (44.93%). Its gates are tuned around the official's
+/// own candidate classes (`prev1`/`prev2`/`prev4` plus a five-byte chain) and
+/// its adaptive prices; against a four-byte bucket plus two head tables the
+/// distance preference just discards length we could have used.
+#[cfg(feature = "parallel")]
+fn walk_gates_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_WALK_GATES").is_ok_and(|value| value != "0"))
+}
+
 /// Whether the walk chooses its candidate by estimated bit *saving* instead of
 /// by length (`RAR_RS_WALK_PRICED`, **off by default: measured worse**).
 ///
@@ -2024,6 +2051,47 @@ where
             if encodable(length, distance) && length > longest.0 {
                 longest = (length, distance);
             }
+        }
+    }
+    if walk_gates_enabled() {
+        // The official's acceptance gates, in its own order: the 2-byte
+        // source, the 3-byte one, then the four-byte chain.
+        let mut best = (0u32, usize::MAX);
+        // Both picks must fit the span that is left, or the match runs past the
+        // block and every distance after it desynchronises.
+        if max_length >= 2
+            && let Some(&(2, distance)) = short.iter().find(|&&(length, _)| length == 2)
+        {
+            let distance = distance as usize;
+            if distance <= 0x100 {
+                best = (2, distance);
+            }
+        }
+        if max_length >= 3
+            && let Some(&(3, distance)) = short.iter().find(|&&(length, _)| length == 3)
+        {
+            let distance = distance as usize;
+            if distance <= 0x2000 && (best.0 < 2 || distance < best.1.saturating_mul(0x80)) {
+                best = (3, distance);
+            }
+        }
+        for &(length, distance) in runs.iter() {
+            let length = length.min(max_length as u32);
+            let distance = distance as usize;
+            if !encodable(length, distance as u32) {
+                continue;
+            }
+            let better = if length == 4 {
+                best.0 < 3 || distance < best.1.saturating_mul(0x40)
+            } else {
+                length > 4 && (length > best.0 + 1 || (distance >> 5) <= best.1)
+            };
+            if better {
+                best = (length, distance);
+            }
+        }
+        if best.0 >= 2 {
+            return (best.0, best.1 as u32);
         }
     }
     if longest.0 < 2 {

@@ -140,13 +140,13 @@ pub(super) fn encode_with_filter_policy(
             let clock = std::env::var_os("RAR_RS_MTTIME").is_some();
             let pick_started = std::time::Instant::now();
             // Speed-first default: the per-block scan measures 213 blocks x 13
-            // candidate channels and costs 44-58 ms of a member's wall time,
-            // but measured it buys only 0.64 pp on a kernel image and nothing
-            // at all on Rust sources or markdown — the x86 filter wins nearly
-            // every block anyway. The fast rungs (`-m1`..`-m3`, the walk) emit
-            // one whole-member E8E9 record instead; the ratio rungs
-            // (`-m4`/`-m5`, the priced DP) keep the scan, since that is what
-            // they are for. `RAR_RS_FILTER_SCAN` forces either way.
+            // candidate channels and costs 44-58 ms of a member's wall time, but
+            // measured it buys only 0.63 pp on a kernel image and nothing at all
+            // on Rust sources or markdown — the x86 filter wins nearly every
+            // block anyway. The fast rungs (`-m1`..`-m3`) emit one whole-member
+            // E8E9 record instead; `-m4`/`-m5` keep the scan. The user pinned
+            // `-m3` at the fastest point, so speed wins here;
+            // `RAR_RS_FILTER_SCAN=1` buys the 0.63 pp back for ~30 ms.
             let scan = match std::env::var("RAR_RS_FILTER_SCAN") {
                 Ok(value) => value != "0",
                 Err(_) => method >= 4,
