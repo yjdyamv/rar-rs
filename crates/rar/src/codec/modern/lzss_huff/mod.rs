@@ -857,7 +857,9 @@ mod mt_tests {
         let encode = || {
             encode_chunked_mt(
                 &data,
-                3,
+                // Level 4 is a priced-DP rung: the fast rungs (`-m1`..`-m3`)
+                // parse with the walk and carry no price table at all.
+                4,
                 6,
                 DEFAULT_CHUNK_SIZE,
                 &mut EncoderState::default(),

@@ -137,29 +137,49 @@ pub(super) fn encode_with_filter_policy(
             .map(|v| v != "0")
             .unwrap_or(true);
         if combined {
-            // Trial encodes run at the cheapest method on measured grounds:
-            // on ntoskrnl m3 an m1 trial packed 5,789,172 bytes while a
-            // method-3 trial managed 5,850,197 (at m3 "plain" wins more
-            // often, so the trial over-picks no-filter), and a full-method
-            // trial also costs a second full compression (~1.2 s here).
-            // The trial is only a ranking signal, and the cheap one ranks
-            // better; `RAR_RS_TRIAL_METHOD` overrides it for experiments.
-            let trial_method = std::env::var("RAR_RS_TRIAL_METHOD")
-                .ok()
-                .and_then(|v| v.parse::<u8>().ok())
-                .filter(|&m| (1..=5).contains(&m))
-                .unwrap_or(1);
             let clock = std::env::var_os("RAR_RS_MTTIME").is_some();
             let pick_started = std::time::Instant::now();
-            let specs = lzss_huff::best_combined_specs(
-                data,
-                method,
-                dsl,
-                variant,
-                None,
-                lzss_huff::FILTER_E8E9,
-                trial_method,
-            );
+            // Speed-first default: the per-block scan measures 213 blocks x 13
+            // candidate channels and costs 44-58 ms of a member's wall time,
+            // but measured it buys only 0.64 pp on a kernel image and nothing
+            // at all on Rust sources or markdown — the x86 filter wins nearly
+            // every block anyway. The fast rungs (`-m1`..`-m3`, the walk) emit
+            // one whole-member E8E9 record instead; the ratio rungs
+            // (`-m4`/`-m5`, the priced DP) keep the scan, since that is what
+            // they are for. `RAR_RS_FILTER_SCAN` forces either way.
+            let scan = match std::env::var("RAR_RS_FILTER_SCAN") {
+                Ok(value) => value != "0",
+                Err(_) => method >= 4,
+            };
+            let specs = if scan {
+                // Trial encodes run at the cheapest method on measured grounds:
+                // on ntoskrnl m3 an m1 trial packed 5,789,172 bytes while a
+                // method-3 trial managed 5,850,197 (at m3 "plain" wins more
+                // often, so the trial over-picks no-filter), and a full-method
+                // trial also costs a second full compression (~1.2 s here).
+                // `RAR_RS_TRIAL_METHOD` overrides it for experiments.
+                let trial_method = std::env::var("RAR_RS_TRIAL_METHOD")
+                    .ok()
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .filter(|&m| (1..=5).contains(&m))
+                    .unwrap_or(1);
+                lzss_huff::best_combined_specs(
+                    data,
+                    method,
+                    dsl,
+                    variant,
+                    None,
+                    lzss_huff::FILTER_E8E9,
+                    trial_method,
+                )
+            } else {
+                vec![lzss_huff::FilterSpec::new(
+                    lzss_huff::FILTER_E8E9,
+                    0,
+                    0,
+                    data.len() as u32,
+                )]
+            };
             if clock {
                 eprintln!(
                     "MTTIME filter_pick={}ms specs={}",

@@ -109,6 +109,8 @@ struct MtJob<'a> {
     lazy_thresh: usize,
     /// Candidates compared per position (the row-index tier's level dial).
     depth: usize,
+    /// How far back the walk's candidates may reach (see [`WALK_REACH`]).
+    reach: usize,
     /// Shared read-only row index over the whole member (issue 15 step ③):
     /// every MT slice parses against it, which is what makes a slice
     /// self-sufficient. `None` selects the low-step chain tier (the fallback
@@ -512,13 +514,21 @@ pub(crate) fn encode_chunked_mt_with_progress(
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 0)
         .unwrap_or(MT_ROW_INDEX_DEPTH[level]);
-    // Level 1 is the fastest rung: it takes the walk over the same row index
-    // instead of pricing every reachable position. The walk needs its own lazy
-    // threshold because `LEVEL_PARAMS` zeroes it for the greedy chain tier.
-    // `RAR_RS_MT_WALK` forces it at every level: the walk's parse is several
-    // times cheaper than the priced DP, so it is the tier a speed-first
-    // mapping would put under the higher levels.
-    let walk_tier = level == 1 || std::env::var("RAR_RS_MT_WALK").is_ok_and(|value| value != "0");
+    // Speed-first ladder: the walk parses the fast rungs, the priced DP keeps
+    // the two top ones (it is the best ratio this encoder has). The walk's
+    // speed dial is how far back it may look — measured on the kernel image,
+    // 8 MB costs 492 bytes over a full reach while 512 KB costs 1.27 pp — so
+    // the rungs widen with the level. `RAR_RS_MT_WALK` forces the walk
+    // everywhere and `RAR_RS_WALK_REACH` overrides the per-level reach.
+    let walk_tier = level <= WALK_MAX_LEVEL
+        || std::env::var("RAR_RS_MT_WALK").is_ok_and(|value| value != "0");
+    // How far back the walk's candidates may reach, capped to the dictionary.
+    let walk_reach = std::env::var("RAR_RS_WALK_REACH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value >= 4096)
+        .unwrap_or(WALK_REACH[level])
+        .min(dict_size);
     // MT parse is the low-step tier by design: workers price a bounded
     // candidate set from the shared row index instead of descending the BT4
     // tree at every position, which cuts the per-position step count well
@@ -752,6 +762,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
                                 chain_len,
                                 lazy_thresh,
                                 depth: row_depth,
+                                reach: walk_reach,
                                 index: row_index_ref,
                                 prev4: prev4_ref,
                                 is_last_block_of_member: is_final && k + 1 == n,
@@ -900,6 +911,28 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 #[cfg(feature = "parallel")]
 const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 64, 24, 64, 128, 384];
 
+/// Highest level the walk parses. `-m4`/`-m5` keep the priced DP: it is the
+/// best ratio this encoder has, and a ladder whose top rung is also the
+/// fastest would no longer be a ladder.
+#[cfg(feature = "parallel")]
+const WALK_MAX_LEVEL: usize = 3;
+
+/// How far back the walk's candidates may reach, by level (bytes). This is the
+/// dial the fast rungs spend their budget on: measured at the no-scan rung on
+/// the kernel image, 512 KB packs 6,434,014 B in 252 ms, 2 MB 6,287,387 in
+/// 266 ms and 8 MB 6,217,902 in 283 ms — ~20 ms per point of ratio, and 8 MB is
+/// within 492 B of a full 32 MB window. The rungs widen so each level buys a
+/// visible step.
+#[cfg(feature = "parallel")]
+const WALK_REACH: [usize; 6] = [
+    0,
+    512 * 1024,
+    2 * 1024 * 1024,
+    8 * 1024 * 1024,
+    2 * 1024 * 1024,
+    8 * 1024 * 1024,
+];
+
 /// Lazy lookahead cap for the `-m1` walk. Matches shorter than this are worth
 /// one extra probe of the next position: a match starting one byte later that
 /// reaches further covers the skipped byte too. Measured on a kernel image the
@@ -983,6 +1016,8 @@ fn mt_slice_symbols_row_index(
     index: &super::parse::RowIndex,
     // Candidates compared per position; the MT tier's level dial.
     depth: usize,
+    // How far back the walk's candidates may reach (see [`WALK_REACH`]).
+    reach: usize,
     // Take the `-m1` walk instead of the priced DP.
     walk: bool,
     defer: Option<&mut Vec<(u32, u32)>>,
@@ -1011,14 +1046,8 @@ fn mt_slice_symbols_row_index(
     };
     let mut dist_cache = state.dist_cache;
     let mut last_length = state.last_length;
-    // How far back the row index may reach. Full by default; `RAR_RS_WALK_REACH`
-    // (bytes) caps it to measure what a bounded per-slice chain — the shape
-    // that would let the walk drop the member-wide index — would cost in ratio.
-    let reach = std::env::var("RAR_RS_WALK_REACH")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value >= 4096)
-        .map_or(dict_size, |value| value.min(dict_size));
+    // The reach cap is the walk's dial; the priced DP keeps the whole window,
+    // since its ratio is what the top rungs are for.
     let symbols = if walk {
         super::parse::windowed_walk_parse(
             data,
@@ -1031,7 +1060,27 @@ fn mt_slice_symbols_row_index(
                 variant,
             },
             WALK_LAZY_MAX,
-            |pos, _cache, runs| index.collect(data, pos, reach.min(pos), max_match, depth, runs),
+            |pos, _cache, runs| {
+                index.collect(data, pos, reach.min(pos), max_match, depth, runs);
+                // A solid chain reaches back into earlier members, and those
+                // bytes are not in `data`: the sampled table is the only source
+                // that can see them (the same probe `windowed_priced_parse`
+                // makes). Standalone members pass `lr_q = None`.
+                if let Some((long_range, near_reach, anchor)) = lr_q
+                    && pos + 4 <= e0
+                {
+                    let chunk_off = pos - s0;
+                    if let Some((long_distance, long_length)) = long_range.find_from(
+                        &data[s0..e0],
+                        chunk_off,
+                        anchor,
+                        near_reach + chunk_off + 1,
+                        max_match,
+                    ) {
+                        runs.push((long_length as u32, long_distance));
+                    }
+                }
+            },
         )
     } else {
         super::parse::windowed_priced_parse(
@@ -1066,6 +1115,7 @@ fn mt_slice_symbols_prev4(
     slice: MtSlice<'_>,
     prev4: &super::parse::Prev4Index,
     depth: usize,
+    reach: usize,
 ) -> Vec<Symbol> {
     let MtSlice {
         data,
@@ -1089,7 +1139,7 @@ fn mt_slice_symbols_prev4(
             variant,
         },
         WALK_LAZY_MAX,
-        |pos, _cache, runs| prev4.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
+        |pos, _cache, runs| prev4.collect(data, pos, reach.min(pos), max_match, depth, runs),
     );
     state.dist_cache = dist_cache;
     state.last_length = last_length;
@@ -1147,6 +1197,7 @@ fn encode_mt_slice(
         chain_len,
         lazy_thresh,
         depth,
+        reach,
         index,
         prev4,
         is_last_block_of_member,
@@ -1224,12 +1275,12 @@ fn encode_mt_slice(
     let mut tokens: Vec<(u32, u32)> = Vec::new();
     let mut symbols = match (index, prev4, two_phase) {
         (Some(index), _, true) => {
-            mt_slice_symbols_row_index(state, slice, index, depth, walk, Some(&mut tokens))
+            mt_slice_symbols_row_index(state, slice, index, depth, reach, walk, Some(&mut tokens))
         }
         (Some(index), _, false) => {
-            mt_slice_symbols_row_index(state, slice, index, depth, walk, None)
+            mt_slice_symbols_row_index(state, slice, index, depth, reach, walk, None)
         }
-        (None, Some(prev4), false) => mt_slice_symbols_prev4(state, slice, prev4, depth),
+        (None, Some(prev4), false) => mt_slice_symbols_prev4(state, slice, prev4, depth, reach),
         (None, _, _) => mt_slice_symbols_low_step(
             state,
             slice,
