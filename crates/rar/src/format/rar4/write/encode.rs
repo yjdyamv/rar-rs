@@ -261,15 +261,43 @@ fn build_legacy_solid_encoder(
     }
 }
 
-/// Non-solid RAR29 candidate selection: the smallest of LZ, the automatic VM
-/// filters (E8/E8E9, delta, audio) and the PPMd trial on m4/m5. Returns
-/// `None` when nothing shrinks the input, so an owning caller can fall back
-/// to STORE without copying its buffer.
+/// Pick the best of the detector's filter candidates with a cheap probe.
 ///
-/// The solid-run path is separate: it reuses the persistent encoder,
-/// searches the same filter list against the carried chain, and then pits
-/// the best LZ result against the chain-continuing PPMd trial
-/// (`Unpack29Encoder::encode_solid_member_with_filter_candidates`).
+/// The trial used to encode the whole member once per candidate — four full
+/// passes over a 13.9 MB member — where WinRAR codes it once. Encoding one
+/// 256 KiB slice from the middle of the member at the cheapest level ranks the
+/// candidates for a fraction of that, and the member is then coded exactly once
+/// with the winner. The slice is large enough to show a filter's effect (a
+/// delta channel is local, x86 clusters are dense) and small enough to cost
+/// about 1% of a full pass.
+fn best_filter_candidate(
+    data: &[u8],
+    candidates: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)>,
+) -> Option<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> {
+    use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
+    if candidates.len() <= 1 {
+        return candidates.into_iter().next();
+    }
+    const PROBE: usize = 256 * 1024;
+    let probe_start = data.len().saturating_sub(PROBE) / 2;
+    let probe = &data[probe_start..(probe_start + PROBE).min(data.len())];
+    let probe_ranges = [0..probe.len()];
+    let probe_options = options_for_level(1);
+    let mut best: Option<(usize, (Rar29FilterKind, Vec<std::ops::Range<usize>>))> = None;
+    for candidate in candidates {
+        let Ok(packed) = Unpack29Encoder::with_options(probe_options)
+            .encode_member_with_filter_ranges(probe, candidate.0, &probe_ranges)
+        else {
+            continue;
+        };
+        let size = packed.len();
+        if best.as_ref().is_none_or(|(best_size, _)| size < *best_size) {
+            best = Some((size, candidate));
+        }
+    }
+    best.map(|(_, candidate)| candidate)
+}
+
 /// The standard-filter candidates the `-mc` policy allows for one member.
 ///
 /// Shared by the non-solid and solid paths so both search the same list in
@@ -330,6 +358,15 @@ fn rar29_filter_candidates(
     candidates
 }
 
+/// Non-solid RAR29 candidate selection: the smallest of LZ, the automatic VM
+/// filters (E8/E8E9, delta, audio) and the PPMd trial on m4/m5. Returns
+/// `None` when nothing shrinks the input, so an owning caller can fall back
+/// to STORE without copying its buffer.
+///
+/// The solid-run path is separate: it reuses the persistent encoder,
+/// searches the same filter list against the carried chain, and then pits
+/// the best LZ result against the chain-continuing PPMd trial
+/// (`Unpack29Encoder::encode_solid_member_with_filter_candidates`).
 pub(super) fn best_rar29_member(
     data: &[u8],
     level: u8,
@@ -351,7 +388,9 @@ pub(super) fn best_rar29_member(
     let candidates = if level <= 2 {
         Vec::new()
     } else {
-        rar29_filter_candidates(data, policy)
+        best_filter_candidate(data, rar29_filter_candidates(data, policy))
+            .into_iter()
+            .collect()
     };
     if std::env::var_os("RAR_RS_MTTIME").is_some() {
         eprintln!("MTTIME rar29 candidates={}", candidates.len());
