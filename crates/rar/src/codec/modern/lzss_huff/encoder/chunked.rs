@@ -787,7 +787,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
                                 lazy_thresh,
                                 depth: row_depth,
                                 reach: walk_reach,
-                                walk_lazy: walk_lazy_max(),
+                                walk_lazy: walk_lazy(),
                                 index: row_index_ref,
                                 prev4: prev4_ref,
                                 is_last_block_of_member: is_final && k + 1 == n,
@@ -939,16 +939,17 @@ const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 384];
 /// Highest level that takes the position-indexed candidate table instead of the
 /// sorted row index (see [`PREV4_DEPTH`]).
 #[cfg(feature = "parallel")]
-const PREV4_MAX_LEVEL: usize = 2;
+const PREV4_MAX_LEVEL: usize = 3;
 
 /// Candidate depth for the position-indexed rungs. Their chain is a pointer
-/// chase, so cost climbs quickly with depth: on the kernel image the exact build
-/// measured 149 / 178 / 204 / 261 ms of internal time at depth 4 / 8 / 16 / 32
-/// for 46.32 / 45.71 / 45.25 / 44.91%, while the sorted bucket's contiguous walk
-/// costs the same at any depth. The rungs that need reach therefore keep the row
-/// index; these two are the ones where the cheaper build pays.
+/// chase, so cost climbs quickly with depth — best of five at `-m1` on the
+/// kernel image: depth 1 198 ms / 48.21%, 2 **183** / 47.14%, 3 206 / 46.64%,
+/// 4 220 / 46.32%, 6 224 / 45.94%, 8 255 / 45.71%, 16 281 / 45.25%. Depth 1 is
+/// *slower* than 2 because the main source usually finds nothing and the
+/// short-match fallback then runs for every position. The ladder keeps the
+/// cheapest point that still improves on the rung below.
 #[cfg(feature = "parallel")]
-const PREV4_DEPTH: [usize; 6] = [0, 4, 8, 0, 0, 0];
+const PREV4_DEPTH: [usize; 6] = [0, 2, 4, 8, 0, 0];
 
 /// Highest level the walk parses. Every rung: the walk is what lets each level
 /// match the official's time for that level (measured at `-md32m -mt24`,
@@ -957,17 +958,21 @@ const PREV4_DEPTH: [usize; 6] = [0, 4, 8, 0, 0, 0];
 #[cfg(feature = "parallel")]
 const WALK_MAX_LEVEL: usize = 5;
 
-/// The walk's lazy lookahead for the indexed rungs. `RAR_RS_WALK_LAZY`
-/// overrides it for measurement: `0` costs ~40 ms less and ~0.8 pp more.
+/// The walk's one-step lazy lookahead for every rung. `RAR_RS_WALK_LAZY`
+/// measures the trade: on the kernel image `0` costs 13-21 ms and ~0.75 pp at
+/// the position-indexed rungs. It stays on because those rungs are already at
+/// or under the official's time for the level — the remaining budget is worth
+/// more as ratio than as milliseconds (see [`PREV4_DEPTH`]).
 #[cfg(feature = "parallel")]
-fn walk_lazy_max() -> u32 {
-    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("RAR_RS_WALK_LAZY")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(WALK_LAZY_MAX)
-    })
+fn walk_lazy() -> u32 {
+    static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    OVERRIDE
+        .get_or_init(|| {
+            std::env::var("RAR_RS_WALK_LAZY")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .unwrap_or(WALK_LAZY_MAX)
 }
 
 /// `RAR_RS_MT_DP=1` puts the priced DP back under `-m4`/`-m5`: our best ratio
@@ -1180,16 +1185,27 @@ fn mt_slice_symbols_prev4(
     prev4: &super::parse::Prev4Index,
     depth: usize,
     reach: usize,
+    lazy: u32,
 ) -> Vec<Symbol> {
     let MtSlice {
         data,
         s0,
         e0,
+        entry_len,
+        lr_shared,
         max_match,
         dict_size,
+        long_range,
         variant,
-        ..
     } = slice;
+    // A solid chain reaches back into earlier members, and those bytes are not
+    // in `data`: only the sampled table can see them (the same probe
+    // `mt_slice_symbols_row_index` makes).
+    let lr_q = if long_range && (entry_len > 0 || LONG_RANGE_INSIDE_MEMBER) {
+        Some((lr_shared, s0, entry_len + s0))
+    } else {
+        None
+    };
     let mut dist_cache = state.dist_cache;
     let mut last_length = state.last_length;
     let symbols = super::parse::windowed_walk_parse(
@@ -1202,8 +1218,24 @@ fn mt_slice_symbols_prev4(
             window: dict_size,
             variant,
         },
-        WALK_LAZY_MAX,
-        |pos, _cache, runs| prev4.collect(data, pos, reach.min(pos), max_match, depth, runs),
+        lazy,
+        |pos, _cache, runs| {
+            prev4.collect(data, pos, reach.min(pos), max_match, depth, runs);
+            if let Some((long_range, near_reach, anchor)) = lr_q
+                && pos + 4 <= e0
+            {
+                let chunk_off = pos - s0;
+                if let Some((long_distance, long_length)) = long_range.find_from(
+                    &data[s0..e0],
+                    chunk_off,
+                    anchor,
+                    near_reach + chunk_off + 1,
+                    max_match,
+                ) {
+                    runs.push((long_length as u32, long_distance));
+                }
+            }
+        },
     );
     state.dist_cache = dist_cache;
     state.last_length = last_length;
@@ -1352,7 +1384,9 @@ fn encode_mt_slice(
         (Some(index), _, false) => mt_slice_symbols_row_index(
             state, slice, index, depth, reach, walk_lazy, walk, None,
         ),
-        (None, Some(prev4), false) => mt_slice_symbols_prev4(state, slice, prev4, depth, reach),
+        (None, Some(prev4), false) => {
+            mt_slice_symbols_prev4(state, slice, prev4, depth, reach, walk_lazy)
+        }
         (None, _, _) => mt_slice_symbols_low_step(
             state,
             slice,
