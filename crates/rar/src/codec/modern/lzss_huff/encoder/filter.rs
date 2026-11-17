@@ -444,6 +444,10 @@ pub(crate) fn solid_filter_specs(
 fn forward_transform(data: &[u8], specs: &[FilterSpec]) -> Vec<u8> {
     let mut transformed = data.to_vec();
     let dump = std::env::var("RAR_RS_DUMP_SPECS").is_ok();
+    #[cfg(feature = "parallel")]
+    if !dump && forward_transform_parallel(&mut transformed, specs) {
+        return transformed;
+    }
     for f in specs {
         let start = f.block_start as usize;
         let end = (start + f.block_length as usize).min(transformed.len());
@@ -468,6 +472,65 @@ fn forward_transform(data: &[u8], specs: &[FilterSpec]) -> Vec<u8> {
         transformed[start..end].copy_from_slice(&t);
     }
     transformed
+}
+
+/// Apply the specs to `transformed` across the compression pool: the regions
+/// are independent, so each one transforms its own slice.
+///
+/// This used to be the serial piece in front of the encoder — on ntoskrnl
+/// (~88% of the member filtered, 213 blocks) about 21 ms of the run. Returns
+/// `false` and leaves the caller's serial loop to it when the specs are not a
+/// sorted, disjoint set of in-bounds regions (the forced single-region modes
+/// and any hand-built spec list keep the old path, and so keeps its bytes).
+#[cfg(feature = "parallel")]
+fn forward_transform_parallel(transformed: &mut [u8], specs: &[FilterSpec]) -> bool {
+    use rayon::prelude::*;
+
+    let pool = crate::parallel::compression_pool();
+    if pool.current_num_threads() <= 1 || specs.len() < 2 {
+        return false;
+    }
+    if std::env::var("RAR_RS_PT").is_ok_and(|value| value == "0") {
+        return false;
+    }
+    for pair in specs.windows(2) {
+        let previous_end = pair[0].block_start as usize + pair[0].block_length as usize;
+        if previous_end > pair[1].block_start as usize {
+            return false;
+        }
+    }
+
+    // Split the buffer into the disjoint slices the specs describe. Anything
+    // the guard above did not prove (order, bounds) aborts before any write.
+    let len = transformed.len();
+    let mut parts: Vec<(&mut [u8], FilterSpec)> = Vec::with_capacity(specs.len());
+    let mut rest: Option<&mut [u8]> = Some(transformed);
+    let mut consumed = 0usize;
+    for f in specs {
+        let start = f.block_start as usize;
+        if start < consumed {
+            return false;
+        }
+        let end = (start + f.block_length as usize).min(len);
+        if start >= end {
+            continue;
+        }
+        let remaining = rest.take().expect("parts cover the buffer once");
+        let (_, after) = remaining.split_at_mut(start - consumed);
+        let (mid, tail) = after.split_at_mut(end - start);
+        parts.push((mid, *f));
+        rest = Some(tail);
+        consumed = end;
+    }
+    if parts.len() != specs.len() {
+        return false;
+    }
+
+    parts.par_iter_mut().for_each(|(out, f)| {
+        let t = apply_filter_encode(f.filter_type, out, f.channels, f.block_start as u64);
+        out.copy_from_slice(&t);
+    });
+    true
 }
 
 /// Multi-threaded variant of [`encode_with_filters`]: the forward transform

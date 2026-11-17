@@ -511,7 +511,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // Level 1 is the fastest rung: it takes the walk over the same row index
     // instead of pricing every reachable position. The walk needs its own lazy
     // threshold because `LEVEL_PARAMS` zeroes it for the greedy chain tier.
-    let walk_tier = level == 1;
+    // `RAR_RS_MT_WALK` forces it at every level: the walk's parse is several
+    // times cheaper than the priced DP, so it is the tier a speed-first
+    // mapping would put under the higher levels.
+    let walk_tier = level == 1 || std::env::var("RAR_RS_MT_WALK").is_ok_and(|value| value != "0");
     // MT parse is the low-step tier by design: workers price a bounded
     // candidate set from the shared row index instead of descending the BT4
     // tree at every position, which cuts the per-position step count well
@@ -654,10 +657,19 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // pair takes the longer of the two.
     let mt_clock = std::env::var_os("RAR_RS_MTTIME").is_some();
     let pool = crate::parallel::compression_pool();
+    // The row index is the member-wide candidate structure every worker queries.
+    // `RAR_RS_NOINDEX` drops it and falls back to the per-slice chain tier,
+    // which pays its lookbehind insert per slice instead of a whole-member
+    // build: the measurement that decides whether the build is worth its
+    // queries.
+    let need_index = !no_index_enabled();
     let lr_stage = std::time::Instant::now();
     let ((), row_index) = pool.join(
         || lr_shared.push(data),
-        || super::parse::RowIndex::build_with_threads(data, n_workers),
+        || {
+            need_index
+                .then(|| super::parse::RowIndex::build_with_threads(data, n_workers))
+        },
     );
     if mt_clock {
         eprintln!(
@@ -665,7 +677,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
             lr_stage.elapsed().as_millis()
         );
     }
-    let row_index_ref = &row_index;
+    let row_index_ref = row_index.as_ref();
     let mt_waves = std::time::Instant::now();
     // Rayon's Scope::spawn returns nothing; each worker deposits its
     // packed bytes into its own slot and we collect them wave-by-wave in
@@ -724,7 +736,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
                                 chain_len,
                                 lazy_thresh,
                                 depth: row_depth,
-                                index: Some(row_index_ref),
+                                index: row_index_ref,
                                 is_last_block_of_member: is_final && k + 1 == n,
                                 records,
                                 // Only the first slice sees chain history as its
@@ -937,6 +949,16 @@ fn slice_two_phase() -> bool {
     std::env::var("RAR_RS_MT_TWO_PHASE").is_ok_and(|value| value != "0")
 }
 
+/// Drop the member-wide row index and use the per-slice chain tier instead
+/// (`RAR_RS_NOINDEX`, off by default). The prelude's build is ~100 ms of a
+/// fast member's wall time, but it is also what makes every worker's query
+/// cheap; this switch measures both sides of that trade.
+#[cfg(feature = "parallel")]
+fn no_index_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_NOINDEX").is_ok_and(|value| value != "0"))
+}
+
 #[cfg(feature = "parallel")]
 fn mt_slice_symbols_row_index(
     state: &mut EncoderState,
@@ -972,6 +994,14 @@ fn mt_slice_symbols_row_index(
     };
     let mut dist_cache = state.dist_cache;
     let mut last_length = state.last_length;
+    // How far back the row index may reach. Full by default; `RAR_RS_WALK_REACH`
+    // (bytes) caps it to measure what a bounded per-slice chain — the shape
+    // that would let the walk drop the member-wide index — would cost in ratio.
+    let reach = std::env::var("RAR_RS_WALK_REACH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value >= 4096)
+        .map_or(dict_size, |value| value.min(dict_size));
     let symbols = if walk {
         super::parse::windowed_walk_parse(
             data,
@@ -984,7 +1014,7 @@ fn mt_slice_symbols_row_index(
                 variant,
             },
             WALK_LAZY_MAX,
-            |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
+            |pos, _cache, runs| index.collect(data, pos, reach.min(pos), max_match, depth, runs),
         )
     } else {
         super::parse::windowed_priced_parse(
