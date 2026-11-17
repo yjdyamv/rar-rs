@@ -1786,7 +1786,11 @@ fn writer_filter_policy_controls_member_filters() {
             },
         )
         .unwrap();
-        archive.add(&src, 3).unwrap();
+        // Level 4 keeps the per-block filter decision: the fast rungs
+        // (`-m1`..`-m3`) emit one whole-member E8E9 record instead (see
+        // `filter_policy.rs`), which is deliberately not what this test is
+        // about.
+        archive.add(&src, 4).unwrap();
         archive.close().unwrap();
 
         let mut archive = RarArchive::open(&path).unwrap();

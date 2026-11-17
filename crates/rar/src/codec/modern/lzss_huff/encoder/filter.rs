@@ -179,22 +179,38 @@ pub fn encode_with_filters_into(
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
 
-    let mut filter_symbols: Vec<Symbol> = specs
-        .iter()
-        .map(|f| Symbol::Filter {
-            block_start: f.block_start,
-            block_length: f.block_length,
-            filter_type: f.filter_type,
-            channels: f.channels,
-        })
-        .collect();
     let mut output = Vec::new();
     let mut chunk_start = 0usize;
-    let mut first_chunk = true;
+    // Records are handed to the chunk that owns each region's start, as a
+    // delta from the chunk start: the reader resolves `BlockStart` modulo the
+    // window from the position it has produced, so a record must stay within
+    // one dictionary window of the data it describes. Front-loading the whole
+    // member only worked while the dictionary covered the whole member.
+    //
+    // That is also why the chunk shrinks under a small dictionary: the chunk is
+    // the granularity a record can be emitted at, so it has to fit inside the
+    // window. Unfiltered members keep the plain chunk bound.
+    let chunk_cap = if specs.is_empty() {
+        DEFAULT_CHUNK_SIZE
+    } else {
+        DEFAULT_CHUNK_SIZE.min((dict_size / 2).max(64 * 1024))
+    };
+    let mut spec_idx = 0usize;
     while chunk_start < transformed.len() {
-        let chunk_end = (chunk_start + DEFAULT_CHUNK_SIZE).min(transformed.len());
+        let chunk_end = (chunk_start + chunk_cap).min(transformed.len());
         let chunk = &transformed[chunk_start..chunk_end];
         let is_final = chunk_end >= transformed.len();
+        let mut lead: Vec<Symbol> = Vec::new();
+        while spec_idx < specs.len() && (specs[spec_idx].block_start as usize) < chunk_end {
+            let f = &specs[spec_idx];
+            lead.push(Symbol::Filter {
+                block_start: (f.block_start as usize).saturating_sub(chunk_start) as u32,
+                block_length: f.block_length,
+                filter_type: f.filter_type,
+                channels: f.channels,
+            });
+            spec_idx += 1;
+        }
         // Levels 2-5 use the optimal parse, like the unfiltered path.
         let mut symbols = if level >= 2 {
             find_matches_optimal(
@@ -225,14 +241,11 @@ pub fn encode_with_filters_into(
                 long_range,
             )
         };
-        // The filter records lead the first chunk's symbol stream so they
-        // are read before any output is produced (write_pos = the member
-        // start), keeping the recorded positions member-relative.
-        if first_chunk {
-            let mut filters = std::mem::take(&mut filter_symbols);
-            filters.append(&mut symbols);
-            symbols = filters;
-            first_chunk = false;
+        // The records lead their chunk's symbol stream, so they are read at
+        // the position that makes their delta correct.
+        if !lead.is_empty() {
+            lead.append(&mut symbols);
+            symbols = lead;
         }
 
         let emit_started = std::time::Instant::now();
@@ -312,15 +325,6 @@ pub fn encode_with_filters_continue(
         }
     }
     let transformed = forward_transform(data, &specs);
-    let lead: Vec<Symbol> = specs
-        .iter()
-        .map(|f| Symbol::Filter {
-            block_start: f.block_start,
-            block_length: f.block_length,
-            filter_type: f.filter_type,
-            channels: f.channels,
-        })
-        .collect();
     encode_chunked_mt_with_progress(
         &transformed,
         EncodeSpec {
@@ -329,7 +333,7 @@ pub fn encode_with_filters_continue(
             chunk_size: DEFAULT_CHUNK_SIZE,
             is_final: true,
             variant,
-            lead: Some(&lead),
+            filter_records: &specs,
         },
         state,
         threads,
@@ -439,11 +443,25 @@ pub(crate) fn solid_filter_specs(
 /// and multi-threaded filtered encoders.
 fn forward_transform(data: &[u8], specs: &[FilterSpec]) -> Vec<u8> {
     let mut transformed = data.to_vec();
+    let dump = std::env::var("RAR_RS_DUMP_SPECS").is_ok();
+    #[cfg(feature = "parallel")]
+    if !dump && forward_transform_parallel(&mut transformed, specs) {
+        return transformed;
+    }
     for f in specs {
         let start = f.block_start as usize;
         let end = (start + f.block_length as usize).min(transformed.len());
         if start >= end {
             continue;
+        }
+        if dump {
+            eprintln!(
+                "SPEC type={} start={} len={} end={}",
+                f.filter_type,
+                start,
+                end - start,
+                end
+            );
         }
         let t = apply_filter_encode(
             f.filter_type,
@@ -454,6 +472,65 @@ fn forward_transform(data: &[u8], specs: &[FilterSpec]) -> Vec<u8> {
         transformed[start..end].copy_from_slice(&t);
     }
     transformed
+}
+
+/// Apply the specs to `transformed` across the compression pool: the regions
+/// are independent, so each one transforms its own slice.
+///
+/// This used to be the serial piece in front of the encoder — on ntoskrnl
+/// (~88% of the member filtered, 213 blocks) about 21 ms of the run. Returns
+/// `false` and leaves the caller's serial loop to it when the specs are not a
+/// sorted, disjoint set of in-bounds regions (the forced single-region modes
+/// and any hand-built spec list keep the old path, and so keeps its bytes).
+#[cfg(feature = "parallel")]
+fn forward_transform_parallel(transformed: &mut [u8], specs: &[FilterSpec]) -> bool {
+    use rayon::prelude::*;
+
+    let pool = crate::parallel::compression_pool();
+    if pool.current_num_threads() <= 1 || specs.len() < 2 {
+        return false;
+    }
+    if std::env::var("RAR_RS_PT").is_ok_and(|value| value == "0") {
+        return false;
+    }
+    for pair in specs.windows(2) {
+        let previous_end = pair[0].block_start as usize + pair[0].block_length as usize;
+        if previous_end > pair[1].block_start as usize {
+            return false;
+        }
+    }
+
+    // Split the buffer into the disjoint slices the specs describe. Anything
+    // the guard above did not prove (order, bounds) aborts before any write.
+    let len = transformed.len();
+    let mut parts: Vec<(&mut [u8], FilterSpec)> = Vec::with_capacity(specs.len());
+    let mut rest: Option<&mut [u8]> = Some(transformed);
+    let mut consumed = 0usize;
+    for f in specs {
+        let start = f.block_start as usize;
+        if start < consumed {
+            return false;
+        }
+        let end = (start + f.block_length as usize).min(len);
+        if start >= end {
+            continue;
+        }
+        let remaining = rest.take().expect("parts cover the buffer once");
+        let (_, after) = remaining.split_at_mut(start - consumed);
+        let (mid, tail) = after.split_at_mut(end - start);
+        parts.push((mid, *f));
+        rest = Some(tail);
+        consumed = end;
+    }
+    if parts.len() != specs.len() {
+        return false;
+    }
+
+    parts.par_iter_mut().for_each(|(out, f)| {
+        let t = apply_filter_encode(f.filter_type, out, f.channels, f.block_start as u64);
+        out.copy_from_slice(&t);
+    });
+    true
 }
 
 /// Multi-threaded variant of [`encode_with_filters`]: the forward transform
@@ -497,17 +574,15 @@ pub fn encode_with_filters_mt(
         return encode_with_filters(data, method, dict_size_log, filters, variant);
     }
     // The MT tier pays for slices: with a 2 MiB slice floor a member under
-    // `MT_MIN_LEN` (four slices' worth) yields too few of them, so it is both
-    // slower per byte
-    // than the sequential parse and a little worse (its candidate depth is
-    // bounded, the sequential path descends the tree). Measured at `-mt8`:
-    // kernel32 845 KiB 40.23 % -> 41.03 %, ntdll 2.5 MiB 39.34 % -> 40.36 %,
-    // win32kfull 4.35 MiB 42.57 % -> 43.41 %; ntoskrnl 13.9 MiB goes 41.53 %
-    // -> 42.28 % for 3x the speed. Keep small members sequential.
+    // The MT tier pays for slices: below a few slices' worth it is both slower
+    // per byte than the sequential parse and can be slightly worse (its
+    // candidate depth is bounded, the sequential path descends the tree). The
+    // measured crossover is around a mebibyte; see `MT_MIN` in
+    // `format/rar5/write/add.rs` for the size curve behind the threshold.
     let mt_min_len = std::env::var("RAR_RS_MT_MIN_LEN")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(8 * 1024 * 1024);
+        .unwrap_or(MT_MIN_MEMBER_SIZE);
     if data.len() < mt_min_len {
         return encode_with_filters(data, method, dict_size_log, filters, variant);
     }
@@ -523,15 +598,6 @@ pub fn encode_with_filters_mt(
         }
     }
     let transformed = forward_transform(data, &specs);
-    let lead: Vec<Symbol> = specs
-        .iter()
-        .map(|f| Symbol::Filter {
-            block_start: f.block_start,
-            block_length: f.block_length,
-            filter_type: f.filter_type,
-            channels: f.channels,
-        })
-        .collect();
     let mut state = EncoderState::default();
     encode_chunked_mt_with_progress(
         &transformed,
@@ -541,7 +607,7 @@ pub fn encode_with_filters_mt(
             chunk_size: DEFAULT_CHUNK_SIZE,
             is_final: true,
             variant,
-            lead: Some(&lead),
+            filter_records: &specs,
         },
         &mut state,
         threads,

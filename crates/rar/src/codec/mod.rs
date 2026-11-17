@@ -30,6 +30,7 @@ pub use modern::lzss_huff;
 
 pub use lzss_huff::{
     DEFAULT_CHUNK_SIZE, DecodeOptions, DecoderState, EncodeOptions, EncoderState, FilterSpec,
+    MT_MIN_MEMBER_SIZE,
     MAX_FILTER_BLOCK_LENGTH, MAX_STREAMING_FILTER_BUFFER, decode, decode_raw, decode_standalone,
     decode_standalone_to_writer, decode_to_writer, encode, encode_chunked, encode_chunked_raw,
     encode_raw, encode_with_auto_x86_filter, encode_with_filters, encode_with_progress_raw,

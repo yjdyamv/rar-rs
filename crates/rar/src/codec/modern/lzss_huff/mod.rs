@@ -27,7 +27,8 @@ pub(crate) use encode::set_fast_path_enabled;
 pub(crate) use encode::set_price_carry_enabled;
 pub(crate) use encode::solid_filter_specs;
 pub use encode::{
-    DEFAULT_CHUNK_SIZE, EncodeOptions, EncoderState, FilterSpec, MAX_FILTER_BLOCK_LENGTH, encode,
+    DEFAULT_CHUNK_SIZE, EncodeOptions, EncoderState, FilterSpec, MAX_FILTER_BLOCK_LENGTH,
+    MT_MIN_MEMBER_SIZE, encode,
     encode_chunked, encode_chunked_mt, encode_chunked_raw, encode_raw,
     encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
     encode_with_filters_continue, encode_with_filters_mt, encode_with_progress_raw,
@@ -36,8 +37,10 @@ pub use encode::{
 pub(crate) use encode::{
     FILTER_PROBE_LEN, FilterProbe, filter_transform_wins, member_filter_probes,
 };
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) use encoder::set_dp_tier;
 pub(crate) use encoder::{
-    Symbol, best_combined_specs, delta_stream_window, forced_combined_specs,
+    best_combined_specs, delta_stream_window, forced_combined_specs,
     forced_combined_stream_window, merge_ranges, x86_stream_window,
 };
 // The shared match finder (`codec::common`) reports descent steps into the
@@ -844,9 +847,13 @@ mod mt_tests {
         impl Drop for Guard {
             fn drop(&mut self) {
                 set_price_carry_enabled(true);
+                set_dp_tier(false);
             }
         }
         let _g = Guard;
+        // The walk parses every level by default; this test measures the priced
+        // DP's block-to-block price carry, so put the DP back on `-m4`.
+        set_dp_tier(true);
 
         // Big enough that a slice spans several DP blocks: the carry only
         // crosses blocks, and the slice scheduler cuts a 1.5 MB member into
@@ -856,7 +863,9 @@ mod mt_tests {
         let encode = || {
             encode_chunked_mt(
                 &data,
-                3,
+                // Level 4 is a priced-DP rung: the fast rungs (`-m1`..`-m3`)
+                // parse with the walk and carry no price table at all.
+                4,
                 6,
                 DEFAULT_CHUNK_SIZE,
                 &mut EncoderState::default(),

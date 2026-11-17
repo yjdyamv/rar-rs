@@ -186,6 +186,21 @@ where
         starts: Vec::new(),
     };
     let mut arrays = DpArrays::default();
+    // The near 2-/3-byte sources the row index cannot report (see
+    // [`ShortHeads`]). Maintained across the slice's blocks: positions are
+    // visited in order, so one forward pass keeps the heads correct.
+    let mut heads = if short_sources_enabled() {
+        Some(ShortHeads::new())
+    } else {
+        None
+    };
+    let mut inserted = start;
+    if let Some(heads) = heads.as_mut() {
+        for p in start.saturating_sub(ShortHeads::BACK)..start {
+            heads.insert(combined, p);
+        }
+    }
+    let mut short_buf: Vec<(u32, u32)> = Vec::new();
     let mut block_start = start;
     while block_start < end {
         let block_end = (block_start + block_size).min(end);
@@ -193,9 +208,24 @@ where
         matches.reset(span);
         let mut longest = 0usize;
         for pos in block_start..block_end {
+            if let Some(heads) = heads.as_mut() {
+                while inserted < pos {
+                    heads.insert(combined, inserted);
+                    inserted += 1;
+                }
+                heads.candidates(combined, pos, &mut short_buf);
+            } else {
+                short_buf.clear();
+            }
             matches.starts.push(matches.runs.len() as u32);
             let before = matches.runs.len();
             emit(pos, &probe_cache, &mut matches.runs);
+            // The short candidates go in front of this position's run range so
+            // it stays ascending in length, which is what the collector's
+            // "beats the best so far" ordering means to the parser.
+            for candidate in short_buf.iter().rev() {
+                matches.runs.insert(before, *candidate);
+            }
             let mut length = 0usize;
             for &(run_length, _) in &matches.runs[before..] {
                 length = length.max(run_length as usize);
@@ -281,15 +311,195 @@ pub(crate) fn set_price_carry_enabled(enabled: bool) {
     PRICE_CARRY_DISABLED.store(!enabled, Ordering::Relaxed);
 }
 
-/// Buckets in [`RowIndex`]: a 4-byte hash, like the sequential finders' key
-/// length. Hashing four bytes means every bucket member is a potential 4-byte
-/// match, so no candidate is probed and thrown away on the minimum length.
+/// Bits of the [`RowIndex`] key: a 4-byte hash, like the sequential finders'
+/// key length. Hashing four bytes means every bucket member is a potential
+/// 4-byte match, so no candidate is probed and thrown away on the minimum
+/// length.
 ///
-/// MT-only (see [`windowed_priced_parse`]).
+/// The bucket count is the build's locality dial, not just a collision rate:
+/// the two output arrays (`positions`, `slot`) are per *position* and always
+/// 56 MB each, but how they are written depends on how many buckets the cursor
+/// table spans. Fewer buckets pack the scatter into a smaller working set and
+/// build far faster (the docs measured 16 bits at 32 ms against 20 bits at
+/// 95 ms), at the cost of more hash collisions inside a bucket, which the
+/// `depth` walk then rejects one by one. `RAR_RS_RI_BITS` sweeps it.
 #[cfg(feature = "parallel")]
-const ROW_INDEX_HASH_BITS: u32 = 20;
+fn row_index_hash_bits() -> u32 {
+    static BITS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *BITS.get_or_init(|| {
+        std::env::var("RAR_RS_RI_BITS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|&bits| (12..=26).contains(&bits))
+            .unwrap_or(DEFAULT_ROW_INDEX_HASH_BITS)
+    })
+}
+
+/// Default [`row_index_hash_bits`]: what the DP tier's measurements settled on.
 #[cfg(feature = "parallel")]
-const ROW_INDEX_BUCKETS: usize = 1 << ROW_INDEX_HASH_BITS;
+const DEFAULT_ROW_INDEX_HASH_BITS: u32 = 20;
+
+/// The hash the chain and its head table share. It is deliberately the same one
+/// [`RowIndex`] uses, which is what makes the two report identical candidates at
+/// the same depth (`prev4_candidates_match_the_row_index` checks exactly that).
+#[cfg(feature = "parallel")]
+fn prev4_hash(data: &[u8], pos: usize) -> usize {
+    let value = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+    (value.wrapping_mul(0x9E37_79B1) >> (32 - row_index_hash_bits())) as usize
+}
+
+/// Fill one link per position over `[from, from + out.len())`.
+///
+/// `heads[hash]` holds `position + 1` of the last position with that hash, so a
+/// range builds correctly as long as `heads` already covers everything before
+/// `from`. That is what lets the MT driver build wave by wave instead of paying
+/// the whole pass before the parse starts.
+#[cfg(feature = "parallel")]
+pub(crate) fn prev4_extend(heads: &mut [u32], data: &[u8], out: &mut [u32], from: usize) {
+    for (offset, slot) in out.iter_mut().enumerate() {
+        let pos = from + offset;
+        let hash = prev4_hash(data, pos);
+        let last = heads[hash];
+        *slot = if last == 0 {
+            0
+        } else {
+            (pos + 1 - last as usize) as u32
+        };
+        heads[hash] = (pos + 1) as u32;
+    }
+}
+
+/// Position-indexed predecessor chain: for every position, the distance back to
+/// the previous position with the same hash (`0` = none).
+///
+/// This is the official's shape: `FUN_140043670` allocates the chain at
+/// `ctx+0x120` as `window * 4` bytes and `FUN_1400468d4` walks it as
+/// `ring[cand % ctx[0x10]]`, one link per position. What matters is *where it
+/// writes*: `prev[pos]` is the position's own index, so the build is one linear
+/// pass with sequential writes. `RowIndex` instead counting-sorts into bucket
+/// order, and that scatter (plus its count and merge passes) is the prelude's
+/// whole cost. Candidate *order* is the same (newest first), and a candidate is
+/// still verified by its bytes, so a hash collision only ends a walk early.
+///
+/// It also *extends*: the head table is the entire state, so a later range can be
+/// appended without touching the earlier one. The MT driver uses that to take the
+/// prelude off the critical path — wave `w` reads `prev[..end_w]` while the
+/// extension fills `prev[end_w..end_{w+1}]`, and those ranges are disjoint, so
+/// one task builds the next wave's range while the others parse. That is why the
+/// fields are readable rather than private.
+///
+/// A whole-member build therefore has to go through here range by range; it
+/// cannot be split into parallel ranges, because each range's head tables would
+/// start empty and a walk stops at that range's first occurrence of a prefix
+/// (measured on 9,251,209 B of markdown: exact 244,419 B, 2 ranges 393,459,
+/// 8 ranges 1,231,478).
+#[cfg(feature = "parallel")]
+pub(crate) struct Prev4Builder {
+    pub(crate) heads: Vec<u32>,
+    pub(crate) prev: Vec<u32>,
+    /// Positions `[..built]` have their link filled.
+    pub(crate) built: usize,
+}
+
+#[cfg(feature = "parallel")]
+impl Prev4Builder {
+    pub(crate) fn new(len: usize) -> Self {
+        Self {
+            heads: vec![0u32; 1usize << row_index_hash_bits()],
+            prev: vec![0u32; len],
+            built: 0,
+        }
+    }
+
+    /// Advance the chain to `to`; `[..built]` is already filled.
+    pub(crate) fn extend(&mut self, data: &[u8], to: usize) {
+        let to = to.clamp(self.built, data.len().saturating_sub(3));
+        if to > self.built {
+            let from = self.built;
+            prev4_extend(&mut self.heads, data, &mut self.prev[from..to], from);
+            self.built = to;
+        }
+    }
+}
+
+/// Same contract as [`RowIndex::collect`]: ascending-length runs, newest
+/// candidate first, at most `depth` links compared.
+///
+/// The walk stops early on the official's rule (`FUN_1400468d4`) — a candidate
+/// much farther than the best so far is not worth extending unless it is also
+/// much longer — which is what keeps a chain walk at 2-3 links on average
+/// instead of the full budget.
+#[cfg(feature = "parallel")]
+pub(crate) fn prev4_collect(
+    prev: &[u32],
+    data: &[u8],
+    pos: usize,
+    max_distance: usize,
+    max_match: usize,
+    depth: usize,
+    out: &mut Vec<(u32, u32)>,
+) {
+    out.clear();
+    if pos + 3 >= data.len() {
+        return;
+    }
+    let max_length = max_match.min(data.len() - pos);
+    let first = prev[pos] as usize;
+    if first == 0 {
+        return;
+    }
+    // `prev` holds *relative* steps, so the walk advances the candidate by
+    // each link; stepping from `pos` instead would land on `pos - step` and
+    // silently lose every match more than one link away.
+    let mut candidate = pos - first;
+    let mut best_length = 0usize;
+    let mut best_distance = 0usize;
+    let mut steps = depth;
+    while steps > 0 {
+        let distance = pos - candidate;
+        if distance > max_distance {
+            break;
+        }
+        steps -= 1;
+        let length = if best_length == 0 || data[candidate + best_length] == data[pos + best_length]
+        {
+            match_length_at(data, pos, distance, max_length)
+        } else {
+            0
+        };
+        // The official's early stop (`FUN_1400468d4`): once a short match is
+        // established, a candidate far beyond it is only worth extending if
+        // it is also much longer. This is what keeps the average walk at a
+        // couple of links instead of the full budget.
+        if best_length >= 3
+            && distance > best_distance.saturating_mul(0x4000)
+            && length < best_length + 5
+        {
+            break;
+        }
+        if length >= 4 && length > best_length {
+            out.push((length as u32, distance as u32));
+            best_length = length;
+            best_distance = distance;
+            if length == max_length {
+                break;
+            }
+        }
+        let step = prev[candidate] as usize;
+        if step == 0 || step > candidate {
+            break;
+        }
+        candidate -= step;
+    }
+}
+
+/// Whether the walk takes its four-byte candidates from [`Prev4Index`]
+/// (`RAR_RS_PREV4`, off by default) instead of the counting-sorted row index.
+#[cfg(feature = "parallel")]
+pub(crate) fn prev4_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_PREV4").is_ok_and(|value| value != "0"))
+}
 
 /// Most workers the split build will use. Past a handful the merge traffic and
 /// the per-worker cursor tables eat the gain (the build is bandwidth-bound).
@@ -402,16 +612,17 @@ impl RowIndex {
 
     fn build_serial(data: &[u8]) -> Self {
         let count = data.len().saturating_sub(3);
-        let mut starts = vec![0u32; ROW_INDEX_BUCKETS + 1];
+        let buckets = 1usize << row_index_hash_bits();
+        let mut starts = vec![0u32; buckets + 1];
         for pos in 0..count {
             starts[Self::hash(data, pos) + 1] += 1;
         }
-        for hash in 0..ROW_INDEX_BUCKETS {
+        for hash in 0..buckets {
             starts[hash + 1] += starts[hash];
         }
         // Place through a private cursor: `starts` must keep the bucket ends,
         // so writing back into it would collapse every range to empty.
-        let mut cursor: Vec<u32> = starts[..ROW_INDEX_BUCKETS].to_vec();
+        let mut cursor: Vec<u32> = starts[..buckets].to_vec();
         let mut positions = vec![0u32; count];
         let mut slot = vec![0u32; count];
         let mut avail = vec![0u16; count];
@@ -435,12 +646,11 @@ impl RowIndex {
     /// starts, then parallel placement.
     #[cfg(feature = "parallel")]
     fn build_split(data: &[u8], count: usize, parts: usize) -> Self {
+        let buckets = 1usize << row_index_hash_bits();
         let chunk = count.div_ceil(parts);
         let range = |part: usize| (part * chunk).min(count)..(((part + 1) * chunk).min(count));
         let pool = crate::parallel::compression_pool();
-        let mut tables: Vec<Vec<u32>> = (0..parts)
-            .map(|_| vec![0u32; ROW_INDEX_BUCKETS + 1])
-            .collect();
+        let mut tables: Vec<Vec<u32>> = (0..parts).map(|_| vec![0u32; buckets + 1]).collect();
         pool.scope(|scope| {
             for (part, table) in tables.iter_mut().enumerate() {
                 let range = range(part);
@@ -455,20 +665,19 @@ impl RowIndex {
         // serial prefix sums are shared, but each worker starts where the
         // workers before it left that bucket, which keeps the buckets ordered
         // by position.
-        let mut starts = vec![0u32; ROW_INDEX_BUCKETS + 1];
-        for hash in 1..=ROW_INDEX_BUCKETS {
+        let mut starts = vec![0u32; buckets + 1];
+        for hash in 1..=buckets {
             let mut total = 0u32;
             for table in &tables {
                 total += table[hash];
             }
             starts[hash] = total;
         }
-        for hash in 0..ROW_INDEX_BUCKETS {
+        for hash in 0..buckets {
             starts[hash + 1] += starts[hash];
         }
-        let mut cursors: Vec<Vec<u32>> =
-            (0..parts).map(|_| vec![0u32; ROW_INDEX_BUCKETS]).collect();
-        for hash in 0..ROW_INDEX_BUCKETS {
+        let mut cursors: Vec<Vec<u32>> = (0..parts).map(|_| vec![0u32; buckets]).collect();
+        for hash in 0..buckets {
             let mut taken = 0u32;
             let base = starts[hash];
             for (part, table) in tables.iter().enumerate() {
@@ -520,7 +729,7 @@ impl RowIndex {
 
     fn hash(data: &[u8], pos: usize) -> usize {
         let value = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-        (value.wrapping_mul(0x9E37_79B1) >> (32 - ROW_INDEX_HASH_BITS)) as usize
+        (value.wrapping_mul(0x9E37_79B1) >> (32 - row_index_hash_bits())) as usize
     }
 
     /// Longest match at `pos` among the newest `depth` candidates within
@@ -954,6 +1163,49 @@ impl MatchDistancePlan {
 /// The length bonus added at decode time for a match at `distance`.
 fn length_bonus(distance: u32) -> u32 {
     u32::from(distance > 0x100) + u32::from(distance > 0x2000) + u32::from(distance > 0x40000)
+}
+
+/// How many distance tiers a match must clear to be worth encoding, i.e. the
+/// length it must reach before its distance code is counted.
+///
+/// The ladder mirrors RAR5's distance code: it grows by a slot every time the
+/// span doubles past 4, so the farther back a match points, the more literals it
+/// has to cover. `RAR_RS_LEN_BONUS` selects a ladder for A/B; the token shapes
+/// say the shipped one is too permissive at long range (on 9,251,209 B of
+/// markdown we encode 9k more matches beyond 4 KiB than the official does and end
+/// up 34 KiB larger).
+fn len_bonus_tiers(distance: u32) -> u32 {
+    match len_bonus_ladder() {
+        1 => {
+            u32::from(distance > 0x100)
+                + u32::from(distance > 0x2000)
+                + u32::from(distance > 0x20000)
+                + u32::from(distance > 0x200000)
+        }
+        2 => {
+            u32::from(distance > 0x80)
+                + u32::from(distance > 0x800)
+                + u32::from(distance > 0x8000)
+                + u32::from(distance > 0x80000)
+                + u32::from(distance > 0x800000)
+        }
+        _ => {
+            u32::from(distance > 0x100)
+                + u32::from(distance > 0x2000)
+                + u32::from(distance > 0x40000)
+        }
+    }
+}
+
+/// Which [`len_bonus_tiers`] ladder to use (`RAR_RS_LEN_BONUS`, 0 = shipped).
+fn len_bonus_ladder() -> u32 {
+    static LADDER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *LADDER.get_or_init(|| {
+        std::env::var("RAR_RS_LEN_BONUS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0)
+    })
 }
 
 /// Extra bits written after a length slot (0 for slots below 8). Depends on
@@ -1557,6 +1809,462 @@ type TokenFrequencies = (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>);
 
 /// Symbols plus their frequency vectors, as produced by [`convert_tokens`].
 type ConvertedTokens = (Vec<Symbol>, TokenFrequencies);
+
+/// Whether the MT parsers consult the [`ShortHeads`] near 2-/3-byte sources.
+/// `RAR_RS_WALK_SHORT=0` restores the row-index-only behaviour for A/B.
+#[cfg(feature = "parallel")]
+fn short_sources_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_WALK_SHORT").map_or(true, |value| value != "0"))
+}
+
+/// Whether the walk may replace its longest match with a shorter but nearer
+/// one. Off by default: measured on three corpora, keeping the longest is
+/// smaller everywhere (kernel image 6,273,184 -> 6,129,621 B, Rust sources
+/// 1,097,055 -> 1,078,670 B, markdown 250,825 -> 244,018 B), which is also
+/// what the official chain rule does — it only ever *grows* the best match
+/// (`len > best+1 || dist>>5 <= best_dist`). `RAR_RS_WALK_NEAR=1` restores the
+/// old nearer-is-better pick for A/B.
+#[cfg(feature = "parallel")]
+fn walk_near_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_WALK_NEAR").is_ok_and(|value| value != "0"))
+}
+
+/// Whether the walk uses the official's *acceptance gates* instead of simply
+/// keeping the longest candidate (`RAR_RS_WALK_GATES`, **off by default:
+/// measured worse**).
+///
+/// This is `FUN_140044794`'s rule, read off the disassembly: a candidate only
+/// becomes the new best when it clears a distance-weighted gate —
+/// `prev2` (a 3-byte match) needs `dist <= 0x2000` and `best < 2 || dist <
+/// best_dist << 7`, `prev4` (4 bytes) needs `dist <= 0x40000` and `best < 3 ||
+/// dist < best_dist << 6`, and the hash chain accepts a length `> 4` only when
+/// `len > best + 1 || dist >> 5 <= best_dist`. The effect is that a *much*
+/// nearer short match beats a longer far one.
+///
+/// That is exactly the shape the histograms show we are missing: the official
+/// emits far more 2- and 3-byte matches and 4KB-inside distances, and fewer
+/// 4-15 byte matches, than a longest-wins walk does.
+///
+/// Implemented faithfully, though, it is *worse* for us: `-m3` goes 6,217,902
+/// (44.68%) to 6,252,827 (44.93%). Its gates are tuned around the official's
+/// own candidate classes (`prev1`/`prev2`/`prev4` plus a five-byte chain) and
+/// its adaptive prices; against a four-byte bucket plus two head tables the
+/// distance preference just discards length we could have used.
+#[cfg(feature = "parallel")]
+fn walk_gates_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_WALK_GATES").is_ok_and(|value| value != "0"))
+}
+
+/// Whether the walk chooses its candidate by estimated bit *saving* instead of
+/// by length (`RAR_RS_WALK_PRICED`, **off by default: measured worse**).
+///
+/// The histograms say the ratio gap is short and near matches — on the kernel
+/// image the official emits 60k more two-byte and 61k more three-byte matches
+/// and 154k more inside 4 KB, against 140k fewer literals — and our walk only
+/// reaches for a short match when nothing longer exists. So the idea was to let
+/// them compete on what they save.
+///
+/// It does not work with a slot-cost proxy: `-m3` goes 6,217,902 (44.68%) to
+/// 6,291,522 (45.21%). The slot index is not a code length, and a 2-byte match
+/// that "saves" 8 bits by the proxy also costs the four bytes of match it
+/// displaces. This is the same shape as the one-step-back experiment in
+/// `non-dp-plan.md`: a greedy needs a real entropy model to price against, and
+/// the priced DP — which has one — is the rung we keep for ratio.
+#[cfg(feature = "parallel")]
+fn walk_priced_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_WALK_PRICED").is_ok_and(|value| value != "0"))
+}
+
+/// Rough bit cost of one match from its slots alone — the walk carries no
+/// entropy model to price with. `8 * length` for the literals it replaces minus
+/// this is the saving the match has to justify.
+#[cfg(feature = "parallel")]
+fn estimated_match_bits(length: u32, distance: u32, variant: ArchiveVersion, cached: bool) -> u32 {
+    let length_slot = encode_length_slot(length);
+    let length_bits = length_slot as u32 + slot_extra_bits(length_slot);
+    let distance_bits = if cached {
+        2
+    } else {
+        let (slot, _, extra) = encode_distance_slot(distance, variant);
+        slot as u32 + extra as u32
+    };
+    length_bits + distance_bits
+}
+
+/// Nearest-previous-position heads that give the walk its 2- and 3-byte
+/// candidates.
+///
+/// The row index is keyed by four bytes, so it can only report matches of
+/// length >= 4: our MT walk emitted literally **one** short match on the
+/// 13.9 MB kernel image, against ~275k in the official encoder's stream (and
+/// ~155k in our own sequential one). Those cheap near matches matter because a
+/// fresh match of raw length 2 still needs a distance <= 0x100 and one of raw
+/// length 3 a distance <= 0x2000 (see [`length_bonus`]), i.e. they live inside
+/// a tiny window and cost almost nothing to find.
+///
+/// Two direct-mapped tables — the nearest position with the same first byte
+/// (`prev1`) and the same two bytes (`prev2`) — reproduce the official's two
+/// short sources in O(1) per position, with tables that stay in L1/L2.
+#[cfg(feature = "parallel")]
+struct ShortHeads {
+    head1: Vec<u32>,
+    head2: Vec<u32>,
+}
+
+#[cfg(feature = "parallel")]
+impl ShortHeads {
+    const NO: u32 = u32::MAX;
+    /// Farthest back the tables need seeding: a raw-length-3 match is only
+    /// encodable within 0x2000 bytes, and raw-length-2 only within 0x100.
+    const BACK: usize = 0x2000;
+
+    fn new() -> Self {
+        Self {
+            head1: vec![Self::NO; 256],
+            head2: vec![Self::NO; 1 << 16],
+        }
+    }
+
+    #[inline]
+    fn insert(&mut self, data: &[u8], pos: usize) {
+        if pos + 2 <= data.len() {
+            self.head1[data[pos] as usize] = pos as u32;
+            self.head2[usize::from(data[pos]) | (usize::from(data[pos + 1]) << 8)] = pos as u32;
+        }
+    }
+
+    /// The `prev1` 2-byte candidate, then the `prev2` 3-byte one. Longer
+    /// matches are left to the row index, so the lengths are capped at 2 and 3
+    /// (a candidate that reaches further is reported there).
+    #[inline]
+    fn candidates(&self, data: &[u8], pos: usize, out: &mut Vec<(u32, u32)>) {
+        out.clear();
+        if pos + 3 > data.len() {
+            return;
+        }
+        let c = self.head1[data[pos] as usize];
+        if c != Self::NO {
+            let candidate = c as usize;
+            let distance = pos.wrapping_sub(candidate);
+            if candidate < pos && distance <= 0x100 && data[candidate + 1] == data[pos + 1] {
+                out.push((2, distance as u32));
+            }
+        }
+        let c = self.head2[usize::from(data[pos]) | (usize::from(data[pos + 1]) << 8)];
+        if c != Self::NO {
+            let candidate = c as usize;
+            let distance = pos.wrapping_sub(candidate);
+            if candidate < pos && distance <= 0x2000 && data[candidate + 2] == data[pos + 2] {
+                out.push((3, distance as u32));
+            }
+        }
+    }
+}
+
+/// The `-m1` tier's parse: a greedy walk with a one-step lazy lookahead over
+/// the shared row index plus the [`ShortHeads`] near 2-/3-byte sources.
+///
+/// The priced DP costs 1.9x the wall time of this walk for about 1.5% of ratio
+/// on a kernel image, which is the wrong trade on the fastest rung. Candidates
+/// come from the same row index, so the walk sees what the DP sees; it commits
+/// to the local choice instead of pricing every reachable position.
+#[cfg(feature = "parallel")]
+pub(crate) fn windowed_walk_parse<F>(
+    combined: &[u8],
+    span: std::ops::Range<usize>,
+    dist_cache: &mut [u32; DIST_CACHE_SIZE],
+    last_length: &mut u32,
+    limits: super::MatchLimits,
+    lazy_thresh: u32,
+    mut emit: F,
+) -> Vec<Symbol>
+where
+    F: FnMut(usize, &[u32; DIST_CACHE_SIZE], &mut Vec<(u32, u32)>),
+{
+    // Two states: the walk needs a live cache to rank candidates, and
+    // `convert_tokens` derives its own as it emits. Running them separately
+    // keeps the emitted cache transitions exactly the decoder's, instead of
+    // applying every remembered distance twice.
+    let mut decide = EncoderMatchState::new(*dist_cache, *last_length);
+    let mut encode_state = EncoderMatchState::new(*dist_cache, *last_length);
+    let mut tokens: Vec<(u32, u32)> = Vec::new();
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    let mut short: Vec<(u32, u32)> = Vec::new();
+    // The match parked for one position (see the loop below): length, distance
+    // and the position it starts at.
+    let mut pending: Option<(u32, u32, usize)> = None;
+    // The near 2-/3-byte sources, seeded from the lookbehind window so a slice
+    // starts with the same history the sequential encoder would have.
+    let short_enabled = short_sources_enabled();
+    let mut heads = if short_enabled {
+        Some(ShortHeads::new())
+    } else {
+        None
+    };
+    let mut inserted = span.start;
+    if let Some(heads) = heads.as_mut() {
+        let seed_from = span.start.saturating_sub(ShortHeads::BACK);
+        for p in seed_from..span.start {
+            heads.insert(combined, p);
+        }
+    }
+    let mut pos = span.start;
+    while pos < span.end {
+        if let Some(heads) = heads.as_mut() {
+            while inserted < pos {
+                heads.insert(combined, inserted);
+                inserted += 1;
+            }
+            heads.candidates(combined, pos, &mut short);
+        } else {
+            short.clear();
+        }
+        let best = walk_best(
+            &mut emit,
+            combined,
+            &decide.reps,
+            pos,
+            limits.window.min(pos),
+            limits.max_match.min(span.end - pos),
+            limits.variant,
+            &mut runs,
+            &short,
+        );
+        // The official parks a match for one position instead of committing it:
+        // `FUN_140044794` writes it into a pending slot and only emits it once the
+        // *next* position fails to beat it. That deferral is worth 1.68 pp — the
+        // sequential parser's ablation puts its interleaved form at 48.71% with
+        // it disabled and 47.03% with it, on the kernel image at `-m3` — and the
+        // walk had the same one-position lookahead but threw the match away.
+        if let Some((held_len, held_dist, held_at)) = pending {
+            // Replace the parked match when the new one is longer, or when it is
+            // just as long and at least four times nearer. Measured against the
+            // walk without parking (kernel image, `-md32m -mt24`): -18,007 /
+            // -17,517 / -16,642 B at `-m1`/`-m3`/`-m5` (-0.13 pp) and neutral on
+            // the source and markdown corpora. The stricter rule (two bytes
+            // longer or four times the distance) gains 0.16 pp on the kernel but
+            // gives back 5 KB on markdown, `FUN_1400478e0`'s "keeps growing" test
+            // loses on both, and "strictly longer only" reproduces the old walk
+            // byte for byte, which is how this port was checked.
+            let displace = best.0 >= 2
+                && (best.0 > held_len
+                    || (best.0 >= held_len && (best.1 as u64) * 4 < held_dist as u64));
+            if displace {
+                // Give up the parked match for the single byte it was holding and
+                // park this one in its place.
+                tokens.push((0, u32::from(combined[held_at])));
+                pending = Some((best.0, best.1, pos));
+                pos += 1;
+                continue;
+            }
+            // Commit the parked match; the bytes it covers are never searched.
+            tokens.push((held_len, held_dist));
+            decide.remember(held_len, held_dist);
+            pending = None;
+            pos = held_at + held_len as usize;
+            continue;
+        }
+        if best.0 >= 2 {
+            // Short matches are parked so the next position can displace them;
+            // a long one is committed at once, because at that length the next
+            // position almost never beats it and the probe is pure cost.
+            if pend_rule() && best.0 < lazy_thresh && pos + 1 < span.end {
+                pending = Some((best.0, best.1, pos));
+                pos += 1;
+                continue;
+            }
+            tokens.push(best);
+            decide.remember(best.0, best.1);
+            pos += best.0 as usize;
+        } else {
+            // A literal token, not a skipped byte: `convert_tokens` walks the
+            // block by the tokens it is given, so an omitted literal would
+            // desynchronise every distance after it.
+            tokens.push((0, u32::from(combined[pos])));
+            pos += 1;
+        }
+    }
+    // A match still parked at the end covers the member's last bytes.
+    if let Some((held_len, held_dist, _)) = pending {
+        tokens.push((held_len, held_dist));
+    }
+    let (symbols, _) = convert_tokens(&tokens, combined, span, &mut encode_state, limits.variant);
+    *dist_cache = encode_state.reps;
+    *last_length = encode_state.last_length;
+    symbols
+}
+
+/// Whether the walk parks a match for one position so the next one can displace
+/// it (`RAR_RS_WALK_PEND=0` restores the old commit-immediately form for A/B).
+#[cfg(feature = "parallel")]
+fn pend_rule() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_WALK_PEND").map_or(true, |value| value != "0"))
+}
+
+/// The walk's decision at one position: the candidate it would commit to.
+///
+/// `short` carries the near 2-/3-byte candidates the row index cannot report
+/// (see [`ShortHeads`]); they compete with `runs` on equal terms.
+#[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)] // the two candidate sources plus their buffers
+fn walk_best<F>(
+    emit: &mut F,
+    combined: &[u8],
+    reps: &[u32; DIST_CACHE_SIZE],
+    pos: usize,
+    max_distance: usize,
+    max_length: usize,
+    variant: ArchiveVersion,
+    runs: &mut Vec<(u32, u32)>,
+    short: &[(u32, u32)],
+) -> (u32, u32)
+where
+    F: FnMut(usize, &[u32; DIST_CACHE_SIZE], &mut Vec<(u32, u32)>),
+{
+    if max_distance == 0 || max_length < 2 {
+        return (0, 0);
+    }
+    runs.clear();
+    emit(pos, reps, runs);
+    let encodable = |length: u32, distance: u32| {
+        reps.contains(&distance) || (length as usize) >= len_bonus_tiers(distance) as usize + 2
+    };
+    let mut longest = (0u32, 0u32);
+    for &(length, distance) in runs.iter() {
+        let length = length.min(max_length as u32);
+        if encodable(length, distance) && length > longest.0 {
+            longest = (length, distance);
+        }
+    }
+    // The row index reports only matches of length >= 4, so a short candidate
+    // is a pure fallback: it is reached for only where those found nothing.
+    // Letting it compete turned a 2-byte match at a tiny distance into the
+    // "nearest nearly-as-long" pick over a real match, which measurably lost
+    // ratio (46.11% against 45.75% on the kernel image).
+    if longest.0 < 2 {
+        for &(length, distance) in short.iter() {
+            let length = length.min(max_length as u32);
+            if encodable(length, distance) && length > longest.0 {
+                longest = (length, distance);
+            }
+        }
+    }
+    if walk_gates_enabled() {
+        // The official's acceptance gates, in its own order: the 2-byte
+        // source, the 3-byte one, then the four-byte chain.
+        let mut best = (0u32, usize::MAX);
+        // Both picks must fit the span that is left, or the match runs past the
+        // block and every distance after it desynchronises.
+        if max_length >= 2
+            && let Some(&(2, distance)) = short.iter().find(|&&(length, _)| length == 2)
+        {
+            let distance = distance as usize;
+            if distance <= 0x100 {
+                best = (2, distance);
+            }
+        }
+        if max_length >= 3
+            && let Some(&(3, distance)) = short.iter().find(|&&(length, _)| length == 3)
+        {
+            let distance = distance as usize;
+            if distance <= 0x2000 && (best.0 < 2 || distance < best.1.saturating_mul(0x80)) {
+                best = (3, distance);
+            }
+        }
+        for &(length, distance) in runs.iter() {
+            let length = length.min(max_length as u32);
+            let distance = distance as usize;
+            if !encodable(length, distance as u32) {
+                continue;
+            }
+            let better = if length == 4 {
+                best.0 < 3 || distance < best.1.saturating_mul(0x40)
+            } else {
+                length > 4 && (length > best.0 + 1 || (distance >> 5) <= best.1)
+            };
+            if better {
+                best = (length, distance);
+            }
+        }
+        if best.0 >= 2 {
+            return (best.0, best.1 as u32);
+        }
+    }
+    if longest.0 < 2 {
+        return (0, 0);
+    }
+    if walk_priced_enabled() {
+        let mut best = (0u32, 0u32);
+        let mut best_saving = i64::MIN;
+        for &(length, distance) in short.iter().chain(runs.iter()) {
+            let length = length.min(max_length as u32);
+            if length < 2 || !encodable(length, distance) {
+                continue;
+            }
+            let cached = reps.contains(&distance);
+            let cost = i64::from(estimated_match_bits(length, distance, variant, cached));
+            let saving = 8 * i64::from(length) - cost;
+            if saving > best_saving || (saving == best_saving && length > best.0) {
+                best_saving = saving;
+                best = (length, distance);
+            }
+        }
+        if best.0 >= 2 {
+            // The comparison already weighed the rep cache, so the post-hoc rep
+            // pass below would only second-guess it.
+            return best;
+        }
+    }
+    // Prefer the nearest candidate that reaches nearly as far: a shorter
+    // distance costs fewer bits, so a slightly shorter match can be cheaper.
+    let mut pick = longest;
+    if !runs.is_empty() && walk_near_enabled() {
+        let mut pick_distance = u32::MAX;
+        for &(length, distance) in runs.iter() {
+            let length = length.min(max_length as u32);
+            if encodable(length, distance)
+                && (length * 4 >= longest.0 * 3 || length.saturating_add(3) >= longest.0)
+                && distance < pick_distance
+            {
+                pick = (length, distance);
+                pick_distance = distance;
+            }
+        }
+    }
+    // A remembered distance costs fewer bits than a fresh one, so a `repeat`
+    // that reaches nearly as far is the better commit. The boundary rules come
+    // from the official encoder: shorter by one, two or three bytes is only
+    // worth it while the fresh distance is still cheap to encode.
+    for &repeat in reps.iter() {
+        if repeat == 0 || repeat as usize > max_distance {
+            continue;
+        }
+        let length = match_length_at(combined, pos, repeat as usize, max_length) as u32;
+        if length < 2 {
+            continue;
+        }
+        let near = pick.0.saturating_sub(3) <= length || pick.0 * 3 <= length * 4;
+        let boundary_ok = if length + 1 == pick.0 {
+            pick.1 > 0xff
+        } else if length + 2 == pick.0 {
+            pick.1 > 0x7ff
+        } else if length + 3 == pick.0 {
+            pick.1 > 0x7fff
+        } else {
+            true
+        };
+        if near && boundary_ok {
+            pick = (length, repeat);
+            break;
+        }
+    }
+    pick
+}
 
 /// Convert a token stream into symbols with a live cache walk, counting
 /// symbol frequencies at the same time (the block writer counts them the
@@ -2856,4 +3564,53 @@ fn extends_at(combined: &[u8], pos: usize, length: u32, distance: u32) -> bool {
     pos + length < combined.len()
         && copy < combined.len()
         && combined[copy] == combined[pos + length]
+}
+
+/// Diagnostic: do [`Prev4Builder`] and [`RowIndex`] report the same candidates?
+///
+/// Both walk the same-hash predecessors newest-first under the same depth and
+/// the same four-byte hash, so their runs must agree item for item. A mismatch
+/// localises the `RAR_RS_PREV4` ratio loss to either the parse (candidate
+/// lists differ) or the tables (they do not).
+///
+/// ```text
+/// RAR_RS_PREV4_CMP_FILE=C:\Windows\System32\ntoskrnl.exe \
+///   cargo test --release -p rar-rs --features parallel --lib \
+///   prev4_candidates -- --ignored --nocapture
+/// ```
+#[cfg(all(test, feature = "parallel"))]
+#[test]
+#[ignore = "diagnostic: needs RAR_RS_PREV4_CMP_FILE"]
+fn prev4_candidates_match_the_row_index() {
+    let path =
+        std::env::var("RAR_RS_PREV4_CMP_FILE").expect("set RAR_RS_PREV4_CMP_FILE to a corpus");
+    let data = std::fs::read(&path).expect("read corpus");
+    let count = data.len().saturating_sub(4);
+    let index = RowIndex::build(&data);
+    let mut builder = Prev4Builder::new(data.len());
+    builder.extend(&data, data.len());
+    let chain = &builder.prev[..];
+    let mut from_index = Vec::new();
+    let mut from_prev4 = Vec::new();
+    let mut mismatched = 0usize;
+    // No distance cap: the point is to compare the candidate *sets*, not the
+    // window a particular dictionary would impose.
+    let unbounded = usize::MAX / 4;
+    for pos in 0..count {
+        // `RowIndex::collect` appends: its callers clear, so do the same here.
+        from_index.clear();
+        index.collect(&data, pos, unbounded, 0x1001, 64, &mut from_index);
+        prev4_collect(chain, &data, pos, unbounded, 0x1001, 64, &mut from_prev4);
+        if from_index != from_prev4 {
+            mismatched += 1;
+            if mismatched <= 8 {
+                eprintln!(
+                    "pos {pos}:\n  row  ={:?}\n  prev4={:?}",
+                    from_index, from_prev4
+                );
+            }
+        }
+    }
+    eprintln!("checked {count} positions, {mismatched} mismatched");
+    assert_eq!(mismatched, 0, "the two candidate sources must agree");
 }

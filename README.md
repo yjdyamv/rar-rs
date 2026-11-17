@@ -1,6 +1,6 @@
 # rar-rs
 
-> Last verified: 2026-10-05 @ `7ff7360b`; implementation details are
+> Last verified: 2026-11-17 @ `7b2353a`; implementation details are
 > authoritative in the source.
 
 **Pure-Rust RAR archive library and command-line tools.** Create, read, extract,
@@ -15,7 +15,15 @@ RAR/UNRAR binary is required at runtime.
   `-ma15` / `-ma2` / `-ma4`), including legacy codecs, solid chains and volumes.
 - **Compression** — native LZSS+Huffman and PPMd, levels 0–5, dictionary
   controls, delta/x86 filters, solid archives, parallel compression,
-  verification and extraction.
+  verification and extraction. The multi-threaded ladder runs the same walk
+  parser at every level. The fast rungs use the candidate structure the official
+  does — a position-indexed table filled in one sequential pass, with no counting
+  sort — while the ratio rungs use a sorted index whose buckets read
+  contiguously, which is what a deep candidate walk needs. Every level runs within
+  1.1x of WinRAR 7.23's time for the same level on a 13.9 MB binary, 9.2 MB of
+  markdown and 5.5 MB of Rust source, except `-m1` on the large binary (1.5x);
+  `-m1`/`-m2` pack smaller than its same level and `-m3`..`-m5` come within
+  3.2 pp (see `PLAN.md`).
 - **Archive operations** — append, update, delete, rename, freshen, move, lock,
   comments, SFX handling, string search, symlinks and hardlinks.
 - **Encryption** — file-level AES-256 with a chained HMAC-SHA256 KDF, plus

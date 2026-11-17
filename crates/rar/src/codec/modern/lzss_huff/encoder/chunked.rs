@@ -13,6 +13,7 @@ use super::*;
 use std::sync::atomic::Ordering;
 
 use super::emit::{encode_block, encode_empty_block};
+use super::FilterSpec;
 #[cfg(feature = "parallel")]
 use super::parse::find_matches_in_range;
 #[cfg(feature = "parallel")]
@@ -32,6 +33,34 @@ use crate::version::ArchiveVersion;
 /// slices keeps the symbol table (and match finder) memory proportional to
 /// the chunk size instead of the whole file.
 pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
+/// Smallest member the parallel tier is used for, in bytes.
+///
+/// Below a few slices' worth the pool has nothing to overlap with: the fixed
+/// per-member cost (filter pick, row-index build) is paid in full while the
+/// parse itself shrinks. Measured on a kernel image at `-m3 -md32m -mt24`
+/// (time / archive size, sequential vs parallel):
+///
+/// | member | sequential | parallel |
+/// | --- | --- | --- |
+/// | 256 KiB | 207 ms / 115,212 | 179 ms / 115,212 |
+/// | 512 KiB | 255 ms / 187,388 | 256 ms / 187,388 |
+/// | 1 MiB | 363 ms / 360,979 | 218 ms / 359,082 |
+/// | 2 MiB | 535 ms / 804,743 | 264 ms / 799,645 |
+/// | 4 MiB | 1,103 ms / 1,810,492 | 358 ms / 1,827,026 |
+///
+/// So the crossover is about a mebibyte; above it the parallel tier is 1.7-3x
+/// faster and within noise on ratio (one case 0.9% worse, two cases better).
+pub const MT_MIN_MEMBER_SIZE: usize = 1024 * 1024;
+
+/// Longest slice the parallel parse cuts, in bytes.
+///
+/// Slices exist to spread work, but a slice that spans megabytes turns every
+/// candidate probe into a cold dictionary read; capping them keeps the working
+/// set near L2/L3 and also shortens the distance distribution a little. See the
+/// measurement table at the use site in `encode_chunked_mt_with_progress`.
+#[cfg(feature = "parallel")]
+const MT_MAX_SLICE: usize = 512 * 1024;
 
 /// The encode dimensions a chunked call runs under: the compression method and
 /// dictionary, the chunking, the stream's finality and distance table, plus the
@@ -55,9 +84,17 @@ pub(crate) struct EncodeSpec<'a> {
     pub is_final: bool,
     /// RAR5 (64-entry) or RAR7/v70 (80-entry) distance table.
     pub variant: ArchiveVersion,
-    /// Filter records of a filtered member, prepended to the first chunk's
-    /// symbol stream (or slice's, under `parallel`).
-    pub lead: Option<&'a [Symbol]>,
+    /// Filter records of a filtered member, in the coordinate system of the
+    /// data buffer (member-absolute for whole-member calls, window-relative for
+    /// the streaming writer).
+    ///
+    /// A record for a late region must not be front-loaded: RARLAB readers
+    /// resolve `BlockStart` modulo the dictionary from the position produced so
+    /// far (`Filter.BlockStart=(BlockStart+UnpPtr)%MaxWinSize`), so a record
+    /// late region of a member larger than the dictionary describes a
+    /// different area than intended — the archive decodes without a structural
+    /// error and fails its CRC instead.
+    pub filter_records: &'a [FilterSpec],
 }
 
 /// One multi-threaded wave's fixed parameters: everything every worker slice of
@@ -72,17 +109,27 @@ struct MtJob<'a> {
     lazy_thresh: usize,
     /// Candidates compared per position (the row-index tier's level dial).
     depth: usize,
+    /// How far back the walk's candidates may reach (see [`WALK_REACH`]).
+    reach: usize,
+    /// Lazy lookahead for the walk (see [`walk_lazy_max`]).
+    walk_lazy: u32,
     /// Shared read-only row index over the whole member (issue 15 step ③):
     /// every MT slice parses against it, which is what makes a slice
     /// self-sufficient. `None` selects the low-step chain tier (the fallback
     /// for callers that do not have one — the sequential-quality probe and
     /// tests).
     index: Option<&'a super::parse::RowIndex>,
+    /// Position-indexed chain, the `RAR_RS_PREV4` alternative to `index` for
+    /// the walk: same candidates, but a linear pass with sequential writes
+    /// instead of the row index's counting sort. A plain slice, not the owning
+    /// type, because the driver builds it wave by wave: wave `w` may read
+    /// exactly what is built when it starts.
+    prev4: Option<&'a [u32]>,
     /// This slice carries the member's last block.
     is_last_block_of_member: bool,
-    /// Filter records of a filtered member, prepended to the first slice's
-    /// symbol stream so they precede all output (member-relative positions).
-    lead_symbols: Option<&'a [Symbol]>,
+    /// Filter records of this member, as absolute offsets: every slice emits
+    /// the records that start inside it (see [`slice_records`]).
+    records: &'a [FilterSpec],
     /// Seed the lookbehind even when its sampled windows look random. The
     /// incompressibility probe only measures whether the tail repeats *inside
     /// itself*, which says nothing about how the slice relates to bytes from an
@@ -92,6 +139,9 @@ struct MtJob<'a> {
     /// assumes the near finder covered them — cross-member duplicates then
     /// silently stop compressing.
     force_seed_tail: bool,
+    /// Run the `-m1` walk instead of the priced DP. Same candidates, no
+    /// per-position pricing: the fastest rung trades ratio for wall time.
+    walk: bool,
 }
 
 /// One multi-threaded worker slice: the buffer, the half-open range inside it,
@@ -185,18 +235,17 @@ pub fn encode_chunked_raw(
             chunk_size,
             is_final,
             variant,
-            lead: None,
+            filter_records: &[],
         },
         state,
         progress,
     )
 }
 
-/// Sequential variant of [`encode_chunked_raw`] that prepends `lead`
-/// symbols (filter records of a filtered member) to the first chunk's
-/// symbol stream, so the records are read before any block output. Used by
-/// the streaming writer for per-window delta filter records while keeping
-/// the persistent encoder state across chunks/windows.
+/// Sequential variant of [`encode_chunked_raw`] that carries the filter
+/// records of a streaming window. Used by the streaming writer, which hands
+/// over window-relative records while the persistent encoder state carries on
+/// across chunks and windows.
 pub(crate) fn encode_chunked_raw_with_lead(
     data: &[u8],
     spec: EncodeSpec<'_>,
@@ -222,7 +271,7 @@ fn encode_chunked_raw_inner(
         chunk_size,
         is_final,
         variant,
-        lead,
+        filter_records: records,
     } = spec;
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
@@ -260,6 +309,9 @@ fn encode_chunked_raw_inner(
 
     let mut output = Vec::new();
     let mut chunk_start = 0usize;
+    // Cursor into `records`: they are sorted by `block_start`, so one pass
+    // over the chunks hands each record to the chunk that owns its region.
+    let mut spec_idx = 0usize;
     let mut next_report = 0u64;
 
     while chunk_start < data.len() {
@@ -302,14 +354,23 @@ fn encode_chunked_raw_inner(
             super::profile::add(super::profile::GREEDY, greedy_started);
             greedy
         };
-        // Filter records of a filtered member lead the first chunk's symbol
-        // stream (read before any output, member-relative positions).
-        if chunk_start == 0
-            && let Some(lead) = lead
-        {
-            let mut joined = lead.to_vec();
-            joined.append(&mut symbols);
-            symbols = joined;
+        // Filter records are emitted by the chunk that owns each region's
+        // start, as a delta from the chunk start (see
+        // [`EncodeSpec::filter_records`]).
+        let mut lead: Vec<Symbol> = Vec::new();
+        while spec_idx < records.len() && (records[spec_idx].block_start as usize) < chunk_end {
+            let f = &records[spec_idx];
+            lead.push(Symbol::Filter {
+                block_start: (f.block_start as usize).saturating_sub(chunk_start) as u32,
+                block_length: f.block_length,
+                filter_type: f.filter_type,
+                channels: f.channels,
+            });
+            spec_idx += 1;
+        }
+        if !lead.is_empty() {
+            lead.append(&mut symbols);
+            symbols = lead;
         }
 
         let emit_started = std::time::Instant::now();
@@ -400,7 +461,7 @@ pub fn encode_chunked_mt(
             chunk_size,
             is_final,
             variant,
-            lead: None,
+            filter_records: &[],
         },
         seed,
         threads,
@@ -425,9 +486,9 @@ pub fn encode_chunked_mt(
 /// the long-range history absorbs the whole window, and the repeat-distance
 /// cache resets. `progress` reports the input bytes covered once each wave
 /// of slices completes (waves run in order, so the reports are monotonic).
-/// `lead_symbols` are prepended to the first slice's symbol stream — the
-/// filter records of a filtered member, which must be read before any
-/// output (their positions are member-relative).
+/// `filter_records` carries the member's filter records in buffer coordinates;
+/// each chunk or slice emits the records that start inside it (see
+/// [`slice_records`] and [`EncodeSpec::filter_records`]).
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)] // data, spec, seed, threads, progress, cancel
 pub(crate) fn encode_chunked_mt_with_progress(
@@ -444,19 +505,32 @@ pub(crate) fn encode_chunked_mt_with_progress(
         chunk_size,
         is_final,
         variant,
-        lead: lead_symbols,
+        filter_records: records,
     } = spec;
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
-    // The row index's candidate depth is the MT tier's level dial (see
-    // [`MT_ROW_INDEX_DEPTH`]); the chain budget above is the fallback tier's.
-    let row_depth = std::env::var("RAR_RS_MT_DEPTH")
+    // Speed-first ladder: the walk parses every rung, and `RAR_RS_MT_DP=1`
+    // puts the priced DP back under `-m4`/`-m5` for anyone who wants our best
+    // ratio instead of our best time. The walk's speed dial is how far back it
+    // may look — measured on the kernel image, 8 MB costs 492 bytes over a full
+    // reach while 512 KB costs 1.27 pp — so the rungs widen with the level.
+    // `RAR_RS_MT_WALK` forces the walk even over the DP.
+    let force_walk = std::env::var("RAR_RS_MT_WALK").is_ok_and(|value| value != "0");
+    let dp_rung = priced_dp_requested() && level >= 4;
+    let walk_tier = force_walk || (level <= WALK_MAX_LEVEL && !dp_rung);
+    // How far back the walk's candidates may reach. **Full window by default**:
+    // capping it below `-md` silently drops matches the dictionary promises, and
+    // that is catastrophic rather than merely lossy on long-range redundancy
+    // (256 KiB reach: 3,070,349 B of the same markdown against 244,295 full).
+    // `RAR_RS_WALK_REACH` exists to measure that trade, not to ship it.
+    let walk_reach = std::env::var("RAR_RS_WALK_REACH")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(MT_ROW_INDEX_DEPTH[level]);
+        .filter(|&value| value >= 4096)
+        .unwrap_or(dict_size)
+        .min(dict_size);
     // MT parse is the low-step tier by design: workers price a bounded
     // candidate set from the shared row index instead of descending the BT4
     // tree at every position, which cuts the per-position step count well
@@ -495,7 +569,43 @@ pub(crate) fn encode_chunked_mt_with_progress(
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(128 * 1024);
         let floored = by_count.max(caller.min(floor));
-        let cs = caller.min(floored).max(1);
+        // Cap: a slice that spans megabytes makes every candidate probe a cold
+        // DRAM read inside the dictionary, so the parse slows per byte even
+        // though each worker still has work. Measured on a 202 MB member (three
+        // 67 MB chunks, 24 workers): 2.8 MB slices take 10.5 s of waves, while
+        // capping at 1 MiB ...
+        // Largest slice the parse wants: a slice that spans megabytes makes
+        // every candidate probe a cold read inside the dictionary window, so
+        // the cost per byte grows with the member even though each worker still
+        // has work queued. Measured with `-m3 -md32m -mt24` on DLL corpora
+        // (time / archive size), uncapped -> 512 KiB cap:
+        //
+        // | member | uncapped | capped |
+        // | --- | --- | --- |
+        // | 53 MB | 5,077 ms / 12,926,745 | 3,304 ms / 12,914,454 |
+        // | 202 MB | 21,714 ms / 54,473,456 | 17,597 ms / 54,428,923 |
+        // | 1,000 MB | 80.1 s / 286,406,261 | 62.0 s / 286,414,589 |
+        //
+        // 256 KiB was slower than 512 KiB on the 1 GB member (64.6 s) for the
+        // same size, and it starts to bite on 13.9 MB members (slices are
+        // ~580 KiB there), so 512 KiB is the cap. `-m0` floor for the 202 MB
+        // member is 345 ms, i.e. this is all parse. 
+        let cap = std::env::var("RAR_RS_MT_MAX_SLICE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(MT_MAX_SLICE);
+        // A filter record is emitted by the slice that owns its region start,
+        // and a reader resolves it modulo the window from the position it has
+        // produced — so under a small dictionary the slice has to fit inside
+        // the window (see [`EncodeSpec::filter_records`]). Unfiltered members
+        // keep the plain cap.
+        let window_cap = if records.is_empty() {
+            usize::MAX
+        } else {
+            (dict_size / 2).max(64 * 1024)
+        };
+        let cs = caller.min(floored).min(cap).min(window_cap).max(1);
         // Snap the slice count to a whole number of waves. `len / cs` usually
         // lands one past a multiple (13,917,568 / 289,949 = 48.0006 -> 49), and
         // that lone last slice costs a whole wave of wall time for 16 bytes of
@@ -523,12 +633,20 @@ pub(crate) fn encode_chunked_mt_with_progress(
         }
         None => match_finder::LongRange::new(dict_size),
     };
+    // The previous member's bytes enter the table here, and this member's wait for
+    // the next one: a standalone member never queries the table (`lr_q` is
+    // `None`), so indexing one member ahead skips the whole push for the last
+    // member of an archive — which is all of it when there is only one member.
+    // The leading bytes past the history bound are accounted for by count only.
+    let pending = std::mem::take(&mut seed.pending);
+    let pending_skipped = std::mem::take(&mut seed.pending_skipped);
     // Absolute stream position of `data[0]`. It is the *pushed* total, not
     // the retained history length: once the sampled window has slid, `hist`
     // starts at `hist_base() > 0` and the two differ by exactly that much —
     // using `hist_len()` here anchors every worker query short and silently
-    // drops long-range matches later in a chain.
-    let entry_len = lr_shared.total_pushed();
+    // drops long-range matches later in a chain. The pending bytes belong before
+    // `data`, so they count here even though the push is still to come.
+    let entry_len = lr_shared.total_pushed() + pending_skipped + pending.len();
     let seed_tail = std::mem::take(&mut seed.tail);
 
     // Slice boundaries: one fixed chunk per slice keeps the near-window
@@ -563,18 +681,69 @@ pub(crate) fn encode_chunked_mt_with_progress(
     // pair takes the longer of the two.
     let mt_clock = std::env::var_os("RAR_RS_MTTIME").is_some();
     let pool = crate::parallel::compression_pool();
+    // The row index is the member-wide candidate structure every worker queries.
+    // `RAR_RS_NOINDEX` drops it and falls back to the per-slice chain tier,
+    // which pays its lookbehind insert per slice instead of a whole-member
+    // build: the measurement that decides whether the build is worth its
+    // queries.
+    // The fast rungs take the official's shape for the candidate structure: a
+    // position-indexed table filled in one sequential pass per part, with no
+    // counting sort. On the kernel image at `-m3` that is 42 ms of prelude
+    // against the row index's 120 ms, and at a shallow candidate depth the
+    // chain's pointer chase does not show (78 ms of waves at depth 4 against 89).
+    // At depth 64 the chase loses badly (141 against 110), so the ratio rungs
+    // keep the sorted index. `RAR_RS_PREV4` forces it everywhere.
+    let use_prev4 = walk_tier && (super::parse::prev4_enabled() || level <= PREV4_MAX_LEVEL);
+    // The candidate depth is the MT tier's level dial: [`PREV4_DEPTH`] for the
+    // position-indexed rungs, whose chain is a pointer chase, and
+    // [`MT_ROW_INDEX_DEPTH`] for the sorted ones, whose bucket walk is
+    // contiguous. `RAR_RS_MT_DEPTH` overrides both.
+    let row_depth = std::env::var("RAR_RS_MT_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(if use_prev4 {
+            PREV4_DEPTH[level]
+        } else {
+            MT_ROW_INDEX_DEPTH[level]
+        });
+    let need_index = !no_index_enabled() && !use_prev4;
+    // The chain's first wave is built here; the rest is built one wave ahead in
+    // the loop below. A chain cannot be built in independent ranges — each
+    // range's head tables would start empty and a walk stops at that range's
+    // first occurrence of a prefix (measured on 9,251,209 B of markdown: exact
+    // 244,419 B, 2 ranges 393,459, 8 ranges 1,231,478) — so building all of it up
+    // front costs 48 ms of serial prelude on a 13.9 MB member. Extending it is
+    // one sequential pass over the new range, and wave `w` only ever reads
+    // `prev[..bounds[last]]`, so the ranges stay disjoint and that pass runs
+    // while the wave it feeds parses.
+    let first_wave_end = bounds[n_workers.min(n)];
     let lr_stage = std::time::Instant::now();
-    let ((), row_index) = pool.join(
-        || lr_shared.push(data),
-        || super::parse::RowIndex::build_with_threads(data, n_workers),
+    let ((), (row_index, mut chain_builder)) = pool.join(
+        || {
+            if pending_skipped > 0 {
+                lr_shared.skip(pending_skipped);
+            }
+            lr_shared.push(&pending);
+        },
+        || {
+            (
+                need_index.then(|| super::parse::RowIndex::build_with_threads(data, n_workers)),
+                use_prev4.then(|| {
+                    let mut builder = super::parse::Prev4Builder::new(data.len());
+                    builder.extend(data, first_wave_end);
+                    builder
+                }),
+            )
+        },
     );
     if mt_clock {
         eprintln!(
-            "MTTIME prelude={}ms (long_range + row_index together)",
+            "MTTIME prelude={}ms (long_range + chain prefix + row_index together)",
             lr_stage.elapsed().as_millis()
         );
     }
-    let row_index_ref = &row_index;
+    let row_index_ref = row_index.as_ref();
     let mt_waves = std::time::Instant::now();
     // Rayon's Scope::spawn returns nothing; each worker deposits its
     // packed bytes into its own slot and we collect them wave-by-wave in
@@ -601,6 +770,27 @@ pub(crate) fn encode_chunked_mt_with_progress(
             return Err(RarError::Cancelled);
         }
         let last = (first + n_workers).min(n);
+        let next_last = (last + n_workers).min(n);
+        // Split the chain: this wave reads `prev[..built]`, and one more task in
+        // the same scope fills `prev[built..next_end]`. The ranges are disjoint
+        // (the workers never look past their own position, which is below
+        // `built`), so the extension costs no wall time.
+        let mut extend_task: Option<(&mut [u32], &mut [u32], usize)> = None;
+        let chain_ref: Option<&[u32]> = match chain_builder.as_mut() {
+            Some(builder) => {
+                let built = builder.built;
+                if next_last > last {
+                    let to = bounds[next_last].min(data.len().saturating_sub(3));
+                    let (read_part, rest) = builder.prev.split_at_mut(built);
+                    let (write_part, _) = rest.split_at_mut(to - built);
+                    extend_task = Some((&mut builder.heads, write_part, built));
+                    Some(&*read_part)
+                } else {
+                    Some(&builder.prev[..built])
+                }
+            }
+            None => None,
+        };
         let wave = &mut worker_states[..last - first];
         let results = std::sync::Mutex::new(
             (0..last - first)
@@ -613,6 +803,9 @@ pub(crate) fn encode_chunked_mt_with_progress(
             let lr_ref = &lr_shared;
             let results_ref = &results;
             pool.scope(|scope| {
+                if let Some((heads, out, from)) = extend_task {
+                    scope.spawn(move |_| super::parse::prev4_extend(heads, data, out, from));
+                }
                 for (i, state) in wave.iter_mut().enumerate() {
                     let k = first + i;
                     let (s0, e0) = (bounds[k], bounds[k + 1]);
@@ -633,12 +826,16 @@ pub(crate) fn encode_chunked_mt_with_progress(
                                 chain_len,
                                 lazy_thresh,
                                 depth: row_depth,
-                                index: Some(row_index_ref),
+                                reach: walk_reach,
+                                walk_lazy: walk_lazy(),
+                                index: row_index_ref,
+                                prev4: chain_ref,
                                 is_last_block_of_member: is_final && k + 1 == n,
-                                lead_symbols: (k == 0).then_some(lead_symbols).flatten(),
+                                records,
                                 // Only the first slice sees chain history as its
                                 // lookbehind; later slices look into this window.
                                 force_seed_tail: k == 0 && !tail_ref.is_empty(),
+                                walk: walk_tier,
                             },
                             tail_ref,
                             state,
@@ -659,6 +856,12 @@ pub(crate) fn encode_chunked_mt_with_progress(
         {
             cb(bounds[last] as u64, data.len() as u64);
         }
+        if let Some(builder) = chain_builder.as_mut()
+            && next_last > last
+        {
+            // The extension task above has finished with the scope.
+            builder.built = bounds[next_last].min(data.len().saturating_sub(3));
+        }
         first = last;
     }
 
@@ -673,12 +876,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
         for (k, tokens) in collected.iter().enumerate() {
             let (mut symbols, _freqs) =
                 convert_tokens(tokens, data, bounds[k]..bounds[k + 1], &mut shared, variant);
-            if k == 0
-                && let Some(lead) = lead_symbols
-            {
-                let mut joined = lead.to_vec();
-                joined.append(&mut symbols);
-                symbols = joined;
+            let mut lead = slice_records(records, bounds[k], bounds[k + 1]);
+            if !lead.is_empty() {
+                lead.append(&mut symbols);
+                symbols = lead;
             }
             let mut bs = 0usize;
             while bs < symbols.len() {
@@ -714,6 +915,18 @@ pub(crate) fn encode_chunked_mt_with_progress(
     }
     seed.dist_cache = [0u32; DIST_CACHE_SIZE];
     seed.last_length = 0;
+    // Hold this member's bytes for the member that may follow instead of indexing
+    // them now (see the pending push above). Only the last `max_hist` bytes can
+    // ever be candidates, so anything older is remembered as a count.
+    let hold = match_finder::LONG_RANGE_MAX.min(dict_size.max(match_finder::LONG_RANGE_STEP));
+    if data.len() > hold {
+        seed.pending_skipped = data.len() - hold;
+        seed.pending = data[data.len() - hold..].to_vec();
+    } else {
+        seed.pending_skipped = 0;
+        seed.pending.clear();
+        seed.pending.extend_from_slice(data);
+    }
     seed.long_range = Some(lr_shared);
     // Worker slices are independent frames, so the sequential path's
     // persistent tree must not survive a window the MT path consumed: its
@@ -745,15 +958,27 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 /// the MT tier's speed/ratio dial, the job the chain budget did for the old
 /// greedy tier, and what makes `-m` mean something under `-mt` again.
 ///
-/// Measured at `-mt8`, dict 32m, real CLI (level 0 is store, unused):
+/// Measured at `-mt24`, dict 32m, real CLI on a 13.9 MB kernel image and a
+/// 5.9 MB source tree (`level 0 is store, unused`). Sizes are exact; times
+/// are ranges because this machine drifts ±25% between runs — taken from
+/// interleaved repeats, never from one pass:
 ///
-/// | level | depth | 12.5 MiB DLL        | 4.88 MiB source tree |
-/// | ----- | ----- | ------------------- | -------------------- |
-/// | 1     | 16    | 2106 ms / 5,949,729 | 739 ms / 973,459     |
-/// | 2     | 32    | 1787 ms / 5,897,174 | 897 ms / 951,894     |
-/// | 3     | 64    | 2013 ms / 5,858,387 | 2167 ms / 935,472    |
-/// | 4     | 128   | 2306 ms / 5,830,234 | 1992 ms / 923,202    |
-/// | 5     | 256   | 2791 ms / 5,809,527 | 1891 ms / 914,457    |
+/// | level | depth | 13.9 MB kernel  | 5.9 MB sources |
+/// | ----- | ----- | --------------- | -------------- |
+/// | 1     | 16    | 530-545 / 5,969,224 | 300-310 / 1,167,853 |
+/// | 2     | 24    | 520-650 / 5,936,057 | 230-245 / 1,151,079 |
+/// | 3     | 64    | 575-595 / 5,878,519 | 270-280 / 1,119,405 |
+/// | 4     | 128   | 635-675 / 5,850,530 | 305-315 / 1,103,730 |
+/// | 5     | 384   | 765-925 / 5,820,788 | 435-445 / 1,087,081 |
+///
+/// The rungs are spaced so each one buys a similar slice of ratio rather than
+/// doubling the dial: on the kernel the steps are 0.55%, 0.96%, 0.47% and
+/// 0.51%. The old ladder (16/32/64/128/256) spent its budget backwards — its
+/// steps were 0.88%, 0.64%, 0.48% and 0.35%, so the top rung was starved
+/// while the bottom two overlapped. Depth is a weak cost dial (48x the depth
+/// moves the kernel by about 1.5x in time) but a real ratio dial (3.7% of
+/// size over the same range), which is why the rungs are chosen by how much
+/// size each step buys.
 ///
 /// The packed column is monotone in depth on both corpora; the **time is not**,
 /// which is worth remembering when tuning: a deeper walk finds the long match
@@ -767,7 +992,80 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 /// the cheap rung (+2.3% on the source tree, still 3.6x faster than sequential).
 /// MT-only, like the row-index parse whose level dial it is.
 #[cfg(feature = "parallel")]
-const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 256];
+const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 384];
+
+/// Highest level that takes the position-indexed candidate table instead of the
+/// sorted row index (see [`PREV4_DEPTH`]).
+#[cfg(feature = "parallel")]
+const PREV4_MAX_LEVEL: usize = 3;
+
+/// Candidate depth for the position-indexed rungs. Their chain is a pointer
+/// chase, so cost climbs quickly with depth — best of five at `-m1` on the
+/// kernel image: depth 1 198 ms / 48.21%, 2 **183** / 47.14%, 3 206 / 46.64%,
+/// 4 220 / 46.32%, 6 224 / 45.94%, 8 255 / 45.71%, 16 281 / 45.25%. Depth 1 is
+/// *slower* than 2 because the main source usually finds nothing and the
+/// short-match fallback then runs for every position. The ladder keeps the
+/// cheapest point that still improves on the rung below.
+#[cfg(feature = "parallel")]
+const PREV4_DEPTH: [usize; 6] = [0, 2, 4, 8, 0, 0];
+
+/// Highest level the walk parses. Every rung: the walk is what lets each level
+/// match the official's time for that level (measured at `-md32m -mt24`,
+/// 249/261/269/321/359 ms against the official's 138/195/239/377/388 ms), and
+/// the priced DP costs 1.6-1.8x that for 1.5-2.2 pp of ratio.
+#[cfg(feature = "parallel")]
+const WALK_MAX_LEVEL: usize = 5;
+
+/// The walk's one-step lazy lookahead for every rung: a match shorter than this
+/// makes the walk also price the match that starts one byte later, and take the
+/// literal if that one is longer.
+///
+/// This is the cheapest ratio we have found. On the kernel image (`-md32m -mt24`)
+/// the curve is (internal time in ms, packed size) at `-m3` / `-m5`:
+/// 8 -> 157/6,361,369 and 236/6,070,109; 16 -> 165/6,347,890 and 249/6,049,159;
+/// 32 -> 162/6,346,001 and 250/6,046,079; 64 -> 169/6,345,598 and 259/6,045,537;
+/// 128 -> 167/6,345,539 and 249/6,045,396. So 32 is the knee and 64 is within
+/// 400-700 B of the plateau; both are worth the few ms because these rungs are
+/// already at or under the official's time for the level. `RAR_RS_WALK_LAZY`
+/// overrides it.
+#[cfg(feature = "parallel")]
+const WALK_LAZY_MAX: u32 = 64;
+
+#[cfg(feature = "parallel")]
+fn walk_lazy() -> u32 {
+    static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    OVERRIDE
+        .get_or_init(|| {
+            std::env::var("RAR_RS_WALK_LAZY")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .unwrap_or(WALK_LAZY_MAX)
+}
+
+/// `RAR_RS_MT_DP=1` puts the priced DP back under `-m4`/`-m5`: our best ratio
+/// (41.29% at `-m5` against the walk's 43.62%) for 1.7-2.1x the wall time.
+///
+/// The environment is read once per process, which a test cannot vary; the
+/// seam below forces it instead (same shape as the other test switches).
+#[cfg(feature = "parallel")]
+fn priced_dp_requested() -> bool {
+    #[cfg(test)]
+    if DP_TIER_FORCED.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_MT_DP").is_ok_and(|value| value != "0"))
+}
+
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) static DP_TIER_FORCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) fn set_dp_tier(enabled: bool) {
+    DP_TIER_FORCED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Whether row-index slices also consult the shared sampled long-range table.
 ///
@@ -827,13 +1125,30 @@ fn slice_two_phase() -> bool {
     std::env::var("RAR_RS_MT_TWO_PHASE").is_ok_and(|value| value != "0")
 }
 
+/// Drop the member-wide row index and use the per-slice chain tier instead
+/// (`RAR_RS_NOINDEX`, off by default). The prelude's build is ~100 ms of a
+/// fast member's wall time, but it is also what makes every worker's query
+/// cheap; this switch measures both sides of that trade.
 #[cfg(feature = "parallel")]
+fn no_index_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_NOINDEX").is_ok_and(|value| value != "0"))
+}
+
+#[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)] // the slice, its search dials and the defer slot
 fn mt_slice_symbols_row_index(
     state: &mut EncoderState,
     slice: MtSlice<'_>,
     index: &super::parse::RowIndex,
     // Candidates compared per position; the MT tier's level dial.
     depth: usize,
+    // How far back the walk's candidates may reach (see [`WALK_REACH`]).
+    reach: usize,
+    // Lazy lookahead for the walk (see [`walk_lazy_max`]).
+    lazy: u32,
+    // Take the `-m1` walk instead of the priced DP.
+    walk: bool,
     defer: Option<&mut Vec<(u32, u32)>>,
 ) -> Vec<Symbol> {
     let MtSlice {
@@ -860,7 +1175,100 @@ fn mt_slice_symbols_row_index(
     };
     let mut dist_cache = state.dist_cache;
     let mut last_length = state.last_length;
-    let symbols = super::parse::windowed_priced_parse(
+    // The reach cap is the walk's dial; the priced DP keeps the whole window,
+    // since its ratio is what the top rungs are for.
+    let symbols = if walk {
+        super::parse::windowed_walk_parse(
+            data,
+            s0..e0,
+            &mut dist_cache,
+            &mut last_length,
+            super::parse::MatchLimits {
+                max_match,
+                window: dict_size,
+                variant,
+            },
+            lazy,
+            |pos, _cache, runs| {
+                index.collect(data, pos, reach.min(pos), max_match, depth, runs);
+                // A solid chain reaches back into earlier members, and those
+                // bytes are not in `data`: the sampled table is the only source
+                // that can see them (the same probe `windowed_priced_parse`
+                // makes). Standalone members pass `lr_q = None`.
+                if let Some((long_range, near_reach, anchor)) = lr_q
+                    && pos + 4 <= e0
+                {
+                    let chunk_off = pos - s0;
+                    if let Some((long_distance, long_length)) = long_range.find_from(
+                        &data[s0..e0],
+                        chunk_off,
+                        anchor,
+                        near_reach + chunk_off + 1,
+                        max_match,
+                    ) {
+                        runs.push((long_length as u32, long_distance));
+                    }
+                }
+            },
+        )
+    } else {
+        super::parse::windowed_priced_parse(
+            data,
+            s0..e0,
+            &mut dist_cache,
+            &mut last_length,
+            super::parse::MatchLimits {
+                max_match,
+                window: dict_size,
+                variant,
+            },
+            lr_q,
+            defer,
+            |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
+        )
+    };
+    state.dist_cache = dist_cache;
+    state.last_length = last_length;
+    symbols
+}
+
+/// The walk over the position-indexed four-byte chain (`RAR_RS_PREV4`).
+///
+/// Same parser and same candidate contract as
+/// [`mt_slice_symbols_row_index`], but the candidates come from
+/// [`super::parse::prev4_collect`] instead of the counting-sorted row index, so
+/// the member-wide prelude is a linear pass instead of a bucket sort.
+#[cfg(feature = "parallel")]
+fn mt_slice_symbols_prev4(
+    state: &mut EncoderState,
+    slice: MtSlice<'_>,
+    chain: &[u32],
+    depth: usize,
+    reach: usize,
+    lazy: u32,
+) -> Vec<Symbol> {
+    let MtSlice {
+        data,
+        s0,
+        e0,
+        entry_len,
+        lr_shared,
+        max_match,
+        dict_size,
+        long_range,
+        variant,
+    } = slice;
+    // A solid chain reaches back into earlier members, and those bytes are not
+    // in `data`: only the sampled table can see them (the same probe
+    // `mt_slice_symbols_row_index` makes).
+    let lr_q = if long_range && (entry_len > 0 || LONG_RANGE_INSIDE_MEMBER) {
+        Some((lr_shared, s0, entry_len + s0))
+    } else {
+        None
+    };
+    let mut dist_cache = state.dist_cache;
+    let mut last_length = state.last_length;
+    let symbols = super::parse::windowed_walk_parse(
         data,
         s0..e0,
         &mut dist_cache,
@@ -870,13 +1278,53 @@ fn mt_slice_symbols_row_index(
             window: dict_size,
             variant,
         },
-        lr_q,
-        defer,
-        |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
+        lazy,
+        |pos, _cache, runs| {
+            super::parse::prev4_collect(chain, data, pos, reach.min(pos), max_match, depth, runs);
+            if let Some((long_range, near_reach, anchor)) = lr_q
+                && pos + 4 <= e0
+            {
+                let chunk_off = pos - s0;
+                if let Some((long_distance, long_length)) = long_range.find_from(
+                    &data[s0..e0],
+                    chunk_off,
+                    anchor,
+                    near_reach + chunk_off + 1,
+                    max_match,
+                ) {
+                    runs.push((long_length as u32, long_distance));
+                }
+            }
+        },
     );
     state.dist_cache = dist_cache;
     state.last_length = last_length;
     symbols
+}
+
+/// Filter records owned by one slice `[from, to)`, as deltas from the slice
+/// start — the position the reader has produced when it decodes the slice's
+/// first symbol.
+///
+/// Splitting this way keeps every record within one slice of the bytes it
+/// transforms, which the reader requires: it resolves `BlockStart` modulo the
+/// window from the current produced position, so front-loading the member's
+/// records at offset zero only works while the dictionary covers the member.
+#[cfg(feature = "parallel")]
+fn slice_records(records: &[FilterSpec], from: usize, to: usize) -> Vec<Symbol> {
+    records
+        .iter()
+        .filter(|f| {
+            let start = f.block_start as usize;
+            start >= from && start < to
+        })
+        .map(|f| Symbol::Filter {
+            block_start: (f.block_start as usize).saturating_sub(from) as u32,
+            block_length: f.block_length,
+            filter_type: f.filter_type,
+            channels: f.channels,
+        })
+        .collect()
 }
 
 /// Encode one worker slice `[s0, e0)` of [`encode_chunked_mt`].
@@ -896,6 +1344,7 @@ fn encode_mt_slice(
     let MtSlice {
         data,
         s0,
+        e0,
         dict_size,
         variant,
         ..
@@ -904,10 +1353,14 @@ fn encode_mt_slice(
         chain_len,
         lazy_thresh,
         depth,
+        reach,
+        walk_lazy,
         index,
+        prev4,
         is_last_block_of_member,
-        lead_symbols,
+        records,
         force_seed_tail,
+        walk,
     } = *job;
     // Near-window context: the closest bytes before this slice, seeded
     // with the entry tail when the slice starts at the buffer head.
@@ -952,7 +1405,7 @@ fn encode_mt_slice(
     // the tail has no repeated windows anyway (no match into it would be
     // found), so the parse inserts the slice itself and queries the shared
     // long-range table instead.
-    let seed_tail = if force_seed_tail {
+    let seed_tail = if force_seed_tail || std::env::var("RAR_RS_FORCE_SEED").is_ok() {
         true
     } else {
         !mt_tail_is_incompressible(&state.tail)
@@ -977,22 +1430,44 @@ fn encode_mt_slice(
     // distance-choosing pass needs.
     let two_phase = slice_two_phase();
     let mut tokens: Vec<(u32, u32)> = Vec::new();
-    let mut symbols = match (index, two_phase) {
-        (Some(index), true) => {
-            mt_slice_symbols_row_index(state, slice, index, depth, Some(&mut tokens))
+    let mut symbols = match (index, prev4, two_phase) {
+        (Some(index), _, true) => mt_slice_symbols_row_index(
+            state,
+            slice,
+            index,
+            depth,
+            reach,
+            walk_lazy,
+            walk,
+            Some(&mut tokens),
+        ),
+        (Some(index), _, false) => mt_slice_symbols_row_index(
+            state, slice, index, depth, reach, walk_lazy, walk, None,
+        ),
+        (None, Some(prev4), false) => {
+            mt_slice_symbols_prev4(state, slice, prev4, depth, reach, walk_lazy)
         }
-        (Some(index), false) => mt_slice_symbols_row_index(state, slice, index, depth, None),
-        (None, _) => mt_slice_symbols_low_step(state, slice, chain_len, lazy_thresh, seed_tail),
+        (None, _, _) => mt_slice_symbols_low_step(
+            state,
+            slice,
+            chain_len,
+            lazy_thresh,
+            seed_tail,
+            depth,
+            walk,
+            walk_lazy,
+        ),
     };
     if two_phase {
-        // The lead symbols belong to the member, not the slice: phase 2 emits
-        // them ahead of slice 0's stream (where they were prepended before).
+        // The records belong to the member, not the slice: phase 2 emits each
+        // slice's own records ahead of that slice's stream, where they now
+        // land at the position the reader has produced.
         return SliceOut::Tokens(tokens);
     }
-    if let Some(lead) = lead_symbols {
-        let mut joined = lead.to_vec();
-        joined.append(&mut symbols);
-        symbols = joined;
+    let mut lead = slice_records(records, s0, e0);
+    if !lead.is_empty() {
+        lead.append(&mut symbols);
+        symbols = lead;
     }
 
     let mut out = Vec::new();
@@ -1019,12 +1494,16 @@ fn encode_mt_slice(
 /// (already an accepted, documented divergence); the sequential path never
 /// reaches here.
 #[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)] // the slice plus the chain tier's four dials
 fn mt_slice_symbols_low_step(
     state: &mut EncoderState,
     slice: MtSlice<'_>,
     chain_len: usize,
     lazy_thresh: usize,
     seed_tail: bool,
+    depth: usize,
+    walk: bool,
+    walk_lazy: u32,
 ) -> Vec<Symbol> {
     let MtSlice {
         data,
@@ -1035,7 +1514,7 @@ fn mt_slice_symbols_low_step(
         max_match,
         dict_size,
         long_range,
-        variant: _,
+        variant,
     } = slice;
     let tail_ctx = &state.tail;
     let tl = tail_ctx.len();
@@ -1050,6 +1529,10 @@ fn mt_slice_symbols_low_step(
     // level setting.
     const MT_LOW_STEP_CHAIN: usize = 16;
     let chain = chain_len.min(MT_LOW_STEP_CHAIN);
+    // The walk wants the same frontier of candidates the row index hands it,
+    // so it walks the chain to the level's depth rather than to the greedy
+    // tier's hard-capped budget.
+    let chain = if walk { depth.max(4) } else { chain };
     let parts = state.chain_parts.take();
     let mut finder = match parts {
         Some((head, prev)) => {
@@ -1063,6 +1546,35 @@ fn mt_slice_symbols_low_step(
         }
     }
 
+    if walk {
+        let mut dist_cache = [0u32; DIST_CACHE_SIZE];
+        let mut last_length = 0u32;
+        let mut inserted = tl;
+        let symbols = {
+            let finder_ref = &mut finder;
+            super::parse::windowed_walk_parse(
+                &combined,
+                tl..combined.len(),
+                &mut dist_cache,
+                &mut last_length,
+                super::parse::MatchLimits {
+                    max_match,
+                    window: dict_size,
+                    variant,
+                },
+                walk_lazy,
+                |pos, _cache, runs| {
+                    while inserted < pos {
+                        finder_ref.insert(inserted);
+                        inserted += 1;
+                    }
+                    finder_ref.collect_candidates(pos, dict_size.min(pos), max_match, depth, runs);
+                },
+            )
+        };
+        state.chain_parts = Some(finder.into_parts());
+        return symbols;
+    }
     // Long-range candidates only beyond what the near chain covers.
     let lr_q = if long_range {
         Some((lr_shared, tl + (e0 - s0), entry_len + s0))
