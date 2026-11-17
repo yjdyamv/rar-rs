@@ -1994,7 +1994,9 @@ where
     let mut tokens: Vec<(u32, u32)> = Vec::new();
     let mut runs: Vec<(u32, u32)> = Vec::new();
     let mut short: Vec<(u32, u32)> = Vec::new();
-    let mut next_short: Vec<(u32, u32)> = Vec::new();
+    // The match parked for one position (see the loop below): length, distance
+    // and the position it starts at.
+    let mut pending: Option<(u32, u32, usize)> = None;
     // The near 2-/3-byte sources, seeded from the lookbehind window so a slice
     // starts with the same history the sequential encoder would have.
     let short_enabled = short_sources_enabled();
@@ -2032,45 +2034,52 @@ where
             &mut runs,
             &short,
         );
-        let mut chosen = best;
-        // One-step lazy: a match starting one byte later that reaches strictly
-        // further is worth the literal, because it covers the skipped byte too.
-        if best.0 >= 2 && best.0 < lazy_thresh && pos + 1 < span.end {
-            if let Some(heads) = heads.as_mut() {
-                while inserted < pos + 1 {
-                    heads.insert(combined, inserted);
-                    inserted += 1;
-                }
-                heads.candidates(combined, pos + 1, &mut next_short);
-            } else {
-                next_short.clear();
+        // The official parks a match for one position instead of committing it:
+        // `FUN_140044794` writes it into a pending slot and only emits it once the
+        // *next* position fails to beat it. That deferral is worth 1.68 pp — the
+        // sequential parser's ablation puts its interleaved form at 48.71% with
+        // it disabled and 47.03% with it, on the kernel image at `-m3` — and the
+        // walk had the same one-position lookahead but threw the match away.
+        if let Some((held_len, held_dist, held_at)) = pending {
+            // Replace the parked match when the new one is longer, or when it is
+            // just as long and at least four times nearer. Measured against the
+            // walk without parking (kernel image, `-md32m -mt24`): -18,007 /
+            // -17,517 / -16,642 B at `-m1`/`-m3`/`-m5` (-0.13 pp) and neutral on
+            // the source and markdown corpora. The stricter rule (two bytes
+            // longer or four times the distance) gains 0.16 pp on the kernel but
+            // gives back 5 KB on markdown, `FUN_1400478e0`'s "keeps growing" test
+            // loses on both, and "strictly longer only" reproduces the old walk
+            // byte for byte, which is how this port was checked.
+            let displace = best.0 >= 2
+                && (best.0 > held_len
+                    || (best.0 >= held_len && (best.1 as u64) * 4 < held_dist as u64));
+            if displace {
+                // Give up the parked match for the single byte it was holding and
+                // park this one in its place.
+                tokens.push((0, u32::from(combined[held_at])));
+                pending = Some((best.0, best.1, pos));
+                pos += 1;
+                continue;
             }
-            let next = walk_best(
-                &mut emit,
-                combined,
-                &decide.reps,
-                pos + 1,
-                limits.window.min(pos + 1),
-                limits.max_match.min(span.end - pos - 1),
-                limits.variant,
-                &mut runs,
-                &next_short,
-            );
-            // One-step lazy: a match one byte later that reaches strictly further
-            // is worth the literal, because it covers the skipped byte too. The
-            // official's judge (`FUN_14004600c`) is *narrower* than this and is
-            // paired with a deferred-match mechanism we do not have in the walk;
-            // transplanting the rule alone measured worse (kernel image `-m3`
-            // 6,345,598 -> 6,427,665 B), so the walk keeps this form. The
-            // sequential parser's `lazy2` is the faithful port.
-            if next.0 > best.0 {
-                chosen = (0, 0);
-            }
+            // Commit the parked match; the bytes it covers are never searched.
+            tokens.push((held_len, held_dist));
+            decide.remember(held_len, held_dist);
+            pending = None;
+            pos = held_at + held_len as usize;
+            continue;
         }
-        if chosen.0 >= 2 {
-            tokens.push(chosen);
-            decide.remember(chosen.0, chosen.1);
-            pos += chosen.0 as usize;
+        if best.0 >= 2 {
+            // Short matches are parked so the next position can displace them;
+            // a long one is committed at once, because at that length the next
+            // position almost never beats it and the probe is pure cost.
+            if pend_rule() && best.0 < lazy_thresh && pos + 1 < span.end {
+                pending = Some((best.0, best.1, pos));
+                pos += 1;
+                continue;
+            }
+            tokens.push(best);
+            decide.remember(best.0, best.1);
+            pos += best.0 as usize;
         } else {
             // A literal token, not a skipped byte: `convert_tokens` walks the
             // block by the tokens it is given, so an omitted literal would
@@ -2079,10 +2088,22 @@ where
             pos += 1;
         }
     }
+    // A match still parked at the end covers the member's last bytes.
+    if let Some((held_len, held_dist, _)) = pending {
+        tokens.push((held_len, held_dist));
+    }
     let (symbols, _) = convert_tokens(&tokens, combined, span, &mut encode_state, limits.variant);
     *dist_cache = encode_state.reps;
     *last_length = encode_state.last_length;
     symbols
+}
+
+/// Whether the walk parks a match for one position so the next one can displace
+/// it (`RAR_RS_WALK_PEND=0` restores the old commit-immediately form for A/B).
+#[cfg(feature = "parallel")]
+fn pend_rule() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_WALK_PEND").map_or(true, |value| value != "0"))
 }
 
 /// The walk's decision at one position: the candidate it would commit to.
