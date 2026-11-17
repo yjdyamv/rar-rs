@@ -179,6 +179,19 @@ pub(crate) struct Rar29Decoder {
     last_filter: usize,
     history: History,
     last_block_end: Option<LzBlockEnd>,
+    /// Token histogram, reported by `validate_member_filters` under
+    /// `RAR_RS_MTTIME`. Comparing these between our own archive and WinRAR's
+    /// says where a size difference comes from: more literals and shorter
+    /// matches mean worse matching, matching counts with a worse ratio mean
+    /// worse length/offset modelling. Cumulative, so it is per member only for
+    /// single-member archives.
+    stat_literals: u64,
+    stat_last_len: u64,
+    stat_repeat_offset: u64,
+    stat_short: u64,
+    stat_fresh: u64,
+    stat_filters: u64,
+    stat_matched: u64,
 }
 
 impl Default for Rar29Decoder {
@@ -201,6 +214,13 @@ impl Rar29Decoder {
             last_length: 0,
             last_low_offset: 0,
             low_offset_repeats: 0,
+            stat_literals: 0,
+            stat_last_len: 0,
+            stat_repeat_offset: 0,
+            stat_short: 0,
+            stat_fresh: 0,
+            stat_filters: 0,
+            stat_matched: 0,
             in_lz_block: false,
             block_mode: BlockMode::Lz,
             ppmd: Box::new(PpmdDecoder::new()),
@@ -417,7 +437,10 @@ impl Rar29Decoder {
         while self.history.current_pos() < output_size {
             let symbol = self.main.decode(&mut self.bits)?;
             match symbol {
-                0..=255 => self.history.push(symbol as u8),
+                0..=255 => {
+                    self.stat_literals += 1;
+                    self.history.push(symbol as u8);
+                }
                 256 => {
                     self.read_end_of_block()?;
                     return Ok(());
@@ -425,10 +448,13 @@ impl Rar29Decoder {
                 257 => {
                     // VM filter record (LZ stream): read + parse, then keep
                     // decoding; the filter applies later to decoded output.
+                    self.stat_filters += 1;
                     self.read_vm_code()?;
                 }
                 258 => {
+                    self.stat_last_len += 1;
                     if self.last_length != 0 {
+                        self.stat_matched += self.last_length as u64;
                         self.history
                             .copy_match(self.last_length, self.last_offset, output_size)?;
                     }
@@ -447,6 +473,8 @@ impl Rar29Decoder {
                     self.rotate_old_offset(index);
                     self.last_offset = offset;
                     self.last_length = length;
+                    self.stat_repeat_offset += 1;
+                    self.stat_matched += length as u64;
                     self.history.copy_match(length, offset, output_size)?;
                 }
                 263..=270 => {
@@ -458,6 +486,8 @@ impl Rar29Decoder {
                     self.push_old_offset(offset);
                     self.last_offset = offset;
                     self.last_length = 2;
+                    self.stat_short += 1;
+                    self.stat_matched += 2;
                     self.history.copy_match(2, offset, output_size)?;
                 }
                 271..=298 => {
@@ -476,6 +506,8 @@ impl Rar29Decoder {
                     self.push_old_offset(offset);
                     self.last_offset = offset;
                     self.last_length = length;
+                    self.stat_fresh += 1;
+                    self.stat_matched += length as u64;
                     self.history.copy_match(length, offset, output_size)?;
                 }
                 _ => return Err(E::Bad("invalid main symbol")),
@@ -765,6 +797,34 @@ impl Rar29Decoder {
     /// belong to an earlier solid-chain member and are not this member's
     /// concern.
     fn validate_member_filters(&self, member_start: usize, member_end: usize) -> Res<()> {
+        if std::env::var_os("RAR_RS_MTTIME").is_some() {
+            let matches = self.stat_last_len
+                + self.stat_repeat_offset
+                + self.stat_short
+                + self.stat_fresh;
+            eprintln!(
+                "MTTIME rar29 tokens literals={} last_len={} repeat_off={} short={} fresh={} filters={} matched={} out={} matches={} avg_len={:.2} literal_share={:.3}",
+                self.stat_literals,
+                self.stat_last_len,
+                self.stat_repeat_offset,
+                self.stat_short,
+                self.stat_fresh,
+                self.stat_filters,
+                self.stat_matched,
+                member_end.saturating_sub(member_start),
+                matches,
+                if matches == 0 {
+                    0.0
+                } else {
+                    self.stat_matched as f64 / matches as f64
+                },
+                if member_end == member_start {
+                    0.0
+                } else {
+                    self.stat_literals as f64 / member_end.saturating_sub(member_start) as f64
+                },
+            );
+        }
         if std::env::var_os("RAR_RS_VMFILTER").is_some() {
             let mine: Vec<&VmFilter> = self
                 .filters
