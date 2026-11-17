@@ -41,7 +41,11 @@ const MAX_HISTORY: usize = 4 * 1024 * 1024;
 // ── Encoder tuning constants ──────────────────────────────────────────────
 
 const MAX_ENCODER_MATCH_OFFSET: usize = 1024 * 1024;
-const MAX_ENCODER_MATCH_LENGTH: usize = 258;
+/// The format's longest match. A repeat-offset match adds 2 to its length slot
+/// and a fresh one adds 3, and the last slot covers 224..=255, so 257 is the
+/// ceiling either way; 258 leaves `slot_for` with an extra value that does not
+/// fit its 5 bits and silently truncates the length.
+const MAX_ENCODER_MATCH_LENGTH: usize = 257;
 const MAX_MATCH_CANDIDATES: usize = 256;
 
 /// Default LZ block size for table splitting.
@@ -252,12 +256,16 @@ impl EncoderMatchState {
         if offset == self.last_offset && length == self.last_length && self.last_length != 0 {
             return Ok(EncodedMatch::LastLengthRepeat);
         }
+        // A repeat-offset match carries its length through the same slot table
+        // as a fresh one, but offset by two, so the longest match has no slot:
+        // 224 + 31 + 2 = 257 < 258. Falling through to the fresh form keeps the
+        // match encodable instead of failing the whole member.
         if let Some(index) = self
             .old_offsets
             .iter()
             .position(|&old_offset| old_offset == offset && old_offset != 0)
+            && let Ok((length_slot, length_extra)) = length_slot_for_repeat_match(length)
         {
-            let (length_slot, length_extra) = length_slot_for_repeat_match(length)?;
             return Ok(EncodedMatch::RepeatOffset {
                 index,
                 length_slot,
@@ -2630,11 +2638,11 @@ mod tests {
     fn packed_bytes_are_stable_across_refactors() {
         let data = golden_corpus();
         for (level, len, hash) in [
-            (1u8, 12475usize, 0x5669_7ea4_5890_fcf8u64),
-            (2, 12471, 0xb838_bfeb_bf3e_36dc),
-            (3, 12471, 0xb838_bfeb_bf3e_36dc),
-            (4, 12473, 0xc4c3_eb5e_084d_a77a),
-            (5, 12473, 0xc4c3_eb5e_084d_a77a),
+            (1u8, 12476usize, 0x81a9_437b_0c0e_956bu64),
+            (2, 12472, 0x4d88_c697_8344_13f9),
+            (3, 12472, 0x4d88_c697_8344_13f9),
+            (4, 12474, 0xc8ab_2abc_8435_91d1),
+            (5, 12474, 0xc8ab_2abc_8435_91d1),
         ] {
             let mut encoder = Unpack29Encoder::with_options(options_for_level(level));
             let packed = encoder.encode_member(&data).expect("encode");
