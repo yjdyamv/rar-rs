@@ -143,13 +143,17 @@ pub(super) fn encode_with_filter_policy(
             // candidate channels and costs 44-58 ms of a member's wall time, but
             // measured it buys only 0.63 pp on a kernel image and nothing at all
             // on Rust sources or markdown — the x86 filter wins nearly every
-            // block anyway. The fast rungs (`-m1`..`-m3`) emit one whole-member
-            // E8E9 record instead; `-m4`/`-m5` keep the scan. The user pinned
-            // `-m3` at the fastest point, so speed wins here;
-            // `RAR_RS_FILTER_SCAN=1` buys the 0.63 pp back for ~30 ms.
+            // block anyway. `-m1`/`-m2` emit one whole-member E8E9 record instead.
+            // `-m3` keeps the scan: the fast path applies E8E9 unconditionally, so
+            // it cannot pick delta at all, and that is not a small loss on
+            // delta-friendly data — a 64 KiB ramp packs 35,611 bytes unfiltered
+            // and 22,594 bytes with the scan's choice, against 35,618 with E8E9
+            // (the `cli_mc_filter_policy_controls_filters` case). The kernel,
+            // source and markdown corpora never show it, which is why the gap went
+            // unnoticed. `RAR_RS_FILTER_SCAN=0/1` overrides either way.
             let scan = match std::env::var("RAR_RS_FILTER_SCAN") {
                 Ok(value) => value != "0",
-                Err(_) => method >= 4,
+                Err(_) => method >= 3,
             };
             let specs = if scan {
                 // Trial encodes run at the cheapest method on measured grounds:
@@ -173,6 +177,12 @@ pub(super) fn encode_with_filter_policy(
                     trial_method,
                 )
             } else {
+                // `-m1`/`-m2` keep the whole-member E8E9 record: on the kernel image
+                // it packs 6,532,686 bytes where the probe-based x86 path manages
+                // 6,880,657, and the cheap delta probe misses delta wins that the
+                // scan catches (a 64 KiB ramp packs 42,161 bytes here, 22,594 with
+                // the scan's delta). Both are speed rungs, and `-m3` upwards keeps
+                // the scan, which is the rung the delta case actually needs.
                 vec![lzss_huff::FilterSpec::new(
                     lzss_huff::FILTER_E8E9,
                     0,
