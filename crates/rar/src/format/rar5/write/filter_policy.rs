@@ -12,55 +12,6 @@ use crate::error::RarResult;
 use crate::options::{FilterMode, FilterOptions};
 use crate::version::ArchiveVersion;
 
-/// The `-mc` filter records for one member, without encoding it.
-///
-/// The buffered member path and the solid path differ only in *how* they
-/// encode the transformed bytes (a fresh member versus a continued chain), so
-/// they share the decision: same per-64 KiB-block geometry, same
-/// [`lzss_huff::best_combined_specs`] cover estimate, same margins.
-///
-/// `None` means "this policy has no per-block record form": forced modes and
-/// the delta/x86 single-transform policies keep their own pickers, and
-/// `RAR_RS_FILTER_COMBINED=0` restores them for experiments.
-pub(super) fn combined_filter_specs(
-    data: &[u8],
-    method: u8,
-    dsl: u8,
-    variant: ArchiveVersion,
-    policy: FilterOptions,
-) -> Option<Vec<lzss_huff::FilterSpec>> {
-    if policy.delta != FilterMode::Auto || policy.x86 != FilterMode::Auto {
-        return None;
-    }
-    let combined = std::env::var("RAR_RS_FILTER_COMBINED")
-        .map(|value| value != "0")
-        .unwrap_or(true);
-    if !combined {
-        return None;
-    }
-    // Trial encodes run at the cheapest method on measured grounds: on
-    // ntoskrnl m3 an m1 trial packed 5,789,172 bytes while a method-3 trial
-    // managed 5,850,197 (at m3 "plain" wins more often, so the trial
-    // over-picks no-filter), and a full-method trial also costs a second full
-    // compression (~1.2 s here). The trial is only a ranking signal, and the
-    // cheap one ranks better; `RAR_RS_TRIAL_METHOD` overrides it.
-    let trial_method = std::env::var("RAR_RS_TRIAL_METHOD")
-        .ok()
-        .and_then(|value| value.parse::<u8>().ok())
-        .filter(|&value| (1..=5).contains(&value))
-        .unwrap_or(1);
-    let specs = lzss_huff::best_combined_specs(
-        data,
-        method,
-        dsl,
-        variant,
-        None,
-        lzss_huff::FILTER_E8E9,
-        trial_method,
-    );
-    (!specs.is_empty()).then_some(specs)
-}
-
 /// Encode one whole member under the `-mc` policy.
 ///
 /// Forced modes run regardless of gain (the caller still compares the
