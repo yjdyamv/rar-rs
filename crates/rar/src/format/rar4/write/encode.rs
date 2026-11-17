@@ -341,7 +341,18 @@ pub(super) fn best_rar29_member(
     }
     let options = options_for_level(level);
     let method = crate::format::rar4::RAR4_METHOD_STORE + level;
-    let candidates = rar29_filter_candidates(data, policy);
+    // Measured against WinRAR 6.23 on a 13.9 MB kernel image: its `-m1` archive
+    // is byte-for-byte the same size with and without `-mc-` (7,385,258), so it
+    // applies no filter at the speed rungs and only turns them on at `-m3`
+    // (5,926,395 auto against 6,381,616 with `-mc-`). The trial encodes are the
+    // bulk of the work here — one full pass over the member per candidate — so
+    // the fast rungs skip them, which is also why our `-m1` ratio was better
+    // than WinRAR's: we were filtering where it does not.
+    let candidates = if level <= 2 {
+        Vec::new()
+    } else {
+        rar29_filter_candidates(data, policy)
+    };
     if std::env::var_os("RAR_RS_MTTIME").is_some() {
         eprintln!("MTTIME rar29 candidates={}", candidates.len());
     }
