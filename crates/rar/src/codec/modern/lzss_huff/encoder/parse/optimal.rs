@@ -1758,6 +1758,43 @@ fn walk_near_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("RAR_RS_WALK_NEAR").is_ok_and(|value| value != "0"))
 }
 
+/// Whether the walk chooses its candidate by estimated bit *saving* instead of
+/// by length (`RAR_RS_WALK_PRICED`, **off by default: measured worse**).
+///
+/// The histograms say the ratio gap is short and near matches — on the kernel
+/// image the official emits 60k more two-byte and 61k more three-byte matches
+/// and 154k more inside 4 KB, against 140k fewer literals — and our walk only
+/// reaches for a short match when nothing longer exists. So the idea was to let
+/// them compete on what they save.
+///
+/// It does not work with a slot-cost proxy: `-m3` goes 6,217,902 (44.68%) to
+/// 6,291,522 (45.21%). The slot index is not a code length, and a 2-byte match
+/// that "saves" 8 bits by the proxy also costs the four bytes of match it
+/// displaces. This is the same shape as the one-step-back experiment in
+/// `non-dp-plan.md`: a greedy needs a real entropy model to price against, and
+/// the priced DP — which has one — is the rung we keep for ratio.
+#[cfg(feature = "parallel")]
+fn walk_priced_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_WALK_PRICED").is_ok_and(|value| value != "0"))
+}
+
+/// Rough bit cost of one match from its slots alone — the walk carries no
+/// entropy model to price with. `8 * length` for the literals it replaces minus
+/// this is the saving the match has to justify.
+#[cfg(feature = "parallel")]
+fn estimated_match_bits(length: u32, distance: u32, variant: ArchiveVersion, cached: bool) -> u32 {
+    let length_slot = encode_length_slot(length);
+    let length_bits = length_slot as u32 + slot_extra_bits(length_slot);
+    let distance_bits = if cached {
+        2
+    } else {
+        let (slot, _, extra) = encode_distance_slot(distance, variant);
+        slot as u32 + extra as u32
+    };
+    length_bits + distance_bits
+}
+
 /// Nearest-previous-position heads that give the walk its 2- and 3-byte
 /// candidates.
 ///
@@ -1891,6 +1928,7 @@ where
             pos,
             limits.window.min(pos),
             limits.max_match.min(span.end - pos),
+            limits.variant,
             &mut runs,
             &short,
         );
@@ -1914,6 +1952,7 @@ where
                 pos + 1,
                 limits.window.min(pos + 1),
                 limits.max_match.min(span.end - pos - 1),
+                limits.variant,
                 &mut runs,
                 &next_short,
             );
@@ -1952,6 +1991,7 @@ fn walk_best<F>(
     pos: usize,
     max_distance: usize,
     max_length: usize,
+    variant: ArchiveVersion,
     runs: &mut Vec<(u32, u32)>,
     short: &[(u32, u32)],
 ) -> (u32, u32)
@@ -1988,6 +2028,28 @@ where
     }
     if longest.0 < 2 {
         return (0, 0);
+    }
+    if walk_priced_enabled() {
+        let mut best = (0u32, 0u32);
+        let mut best_saving = i64::MIN;
+        for &(length, distance) in short.iter().chain(runs.iter()) {
+            let length = length.min(max_length as u32);
+            if length < 2 || !encodable(length, distance) {
+                continue;
+            }
+            let cached = reps.contains(&distance);
+            let cost = i64::from(estimated_match_bits(length, distance, variant, cached));
+            let saving = 8 * i64::from(length) - cost;
+            if saving > best_saving || (saving == best_saving && length > best.0) {
+                best_saving = saving;
+                best = (length, distance);
+            }
+        }
+        if best.0 >= 2 {
+            // The comparison already weighed the rep cache, so the post-hoc rep
+            // pass below would only second-guess it.
+            return best;
+        }
     }
     // Prefer the nearest candidate that reaches nearly as far: a shorter
     // distance costs fewer bits, so a slightly shorter match can be cheaper.
