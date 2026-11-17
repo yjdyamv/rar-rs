@@ -227,18 +227,22 @@ impl RarArchive {
             return Ok(Vec::new());
         }
         // Exact count wins; the percent variant is converted at close time.
+        // The count is taken as given, even above the data-volume count: WinRAR
+        // writes `-rv9` over a four-volume set as nine `.rev` files, and the
+        // caller asked for nine. The builder still bounds it by the format's
+        // volume limits.
         let rec_count = if let Some(count) = self.recovery_volumes_count {
-            (count as usize).min(nd)
+            count as usize
         } else if let Some(percent) = self.recovery_volumes_percent {
             crate::recovery::rev50::plan_recovery_volume_count(nd, percent as u64)?
         } else if let Some((rec, data)) = self.write_ctx().output.recovery_ratio {
-            // A deferred multi-volume append carries the set's old ratio:
-            // scale it to the new data-volume count (full protection stays
-            // full; a partial set keeps its proportion).
+            // A deferred multi-volume append carries the set's old ratio: scale
+            // it to the new data-volume count (full protection stays full; a
+            // partial set keeps its proportion).
             if data == 0 {
                 0
             } else {
-                ((rec as usize) * nd).div_ceil(data as usize).min(nd)
+                ((rec as usize) * nd).div_ceil(data as usize)
             }
         } else {
             return Ok(Vec::new());

@@ -393,13 +393,16 @@ fn quick_open_and_recovery_records_share_the_volume_tail() {
 }
 
 #[test]
-fn recovery_volume_count_is_capped_at_data_volumes() {
+fn recovery_volume_count_follows_the_request() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("vol.part1.rar");
     let data = b"volume recovery payload ".repeat(4000); // ~100 KiB
     {
-        // Ask for 10 .rev files; the archive only splits into 3
-        // volumes, so exactly 3 .rev files must be produced.
+        // Ask for 10 .rev files over an archive that only splits into 3
+        // volumes. WinRAR writes ten of them and so do we: the caller asked for
+        // ten, and `.rev` volumes beyond the data-volume count are what a
+        // request past the end of the set means. The count used to be capped at
+        // the data-volume count here.
         let mut ar = RarArchive::create_with_options(
             &base,
             crate::options::CreateOptions {
@@ -429,8 +432,8 @@ fn recovery_volume_count_is_capped_at_data_volumes() {
     assert_eq!(volumes.len(), 3, "expected 3 data volumes");
     assert_eq!(
         revs.len(),
-        3,
-        "recovery volume count must be capped at data volumes"
+        10,
+        "the requested recovery volume count must be written as asked"
     );
     std::fs::remove_dir_all(dir.path()).ok();
 }
