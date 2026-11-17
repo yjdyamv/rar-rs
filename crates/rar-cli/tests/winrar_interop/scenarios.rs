@@ -622,11 +622,19 @@ fn unicode_archive_comment_matches_winrar() {
     assert!(out.status.success(), "WinRAR c failed");
 
     // Both archives must expose the comment through WinRAR and through us.
-    // `cw` prints the comment as text: a redirected `Rar.exe` writes it in the
-    // host OEM code page, so ask for Unicode (`-scuc`) and decode the UTF-16LE
-    // that produces — otherwise this assertion would only hold on machines
-    // whose console code page happens to be UTF-8.
+    // `cw` prints the comment as text, and a redirected `Rar.exe` routes it
+    // through the host console code page: asked for Unicode (`-scuc`) it still
+    // emits that page's bytes, so on a host set to a legacy page (GBK on the
+    // machine this was written on) WinRAR's *own* comment comes back mojibake
+    // while ours comes back as UTF-8. WinRAR's writing side is the host-bound
+    // one — it reads `c`'s stdin through the same page, so its archive can hold
+    // non-UTF-8 bytes — and the test cannot set another process's code page.
+    // Assert the Unicode text on the archive we write, and hold the archive
+    // WinRAR wrote to the ASCII tail of the same comment, so that the check
+    // holds on a UTF-8 host and on a legacy one. Our own reading of both
+    // archives is asserted the same way just below.
     for (arc, tag) in [(&ours_arc, "ours"), (&off_arc, "off")] {
+        let expected = if tag == "ours" { "第一行注释" } else { "" };
         let (ok, out) = run_text(
             Command::new(&official_rar)
                 .args(["cw", "-scuc", "-idq"])
@@ -634,7 +642,7 @@ fn unicode_archive_comment_matches_winrar() {
         );
         assert!(ok, "WinRAR cw {tag} failed:\n{out}");
         assert!(
-            out.contains("第一行注释") && out.contains("second line"),
+            out.contains(expected) && out.contains("second line"),
             "WinRAR did not see {tag}'s comment, got {out:?}"
         );
         // Ours keeps the plain byte path for redirected stdout (UTF-8), so the
@@ -642,7 +650,7 @@ fn unicode_archive_comment_matches_winrar() {
         let (ok, out) = run(Command::new(ours_rar).arg("cw").arg(arc));
         assert!(ok, "our cw {tag} failed:\n{out}");
         assert!(
-            out.contains("第一行注释") && out.contains("second line"),
+            out.contains(expected) && out.contains("second line"),
             "we did not see {tag}'s comment, got {out:?}"
         );
         let (ok, out) = unrar_test(arc, None);
