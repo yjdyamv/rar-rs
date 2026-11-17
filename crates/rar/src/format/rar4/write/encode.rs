@@ -457,19 +457,44 @@ pub(super) fn best_rar29_member(
     // threads either way).
     let mut results: Vec<Option<Vec<u8>>> =
         (0..candidates.len() + 1 + usize::from(with_ppmd)).map(|_| None).collect();
+    let clock = std::env::var_os("RAR_RS_MTTIME").is_some();
+    let started = std::time::Instant::now();
     let plain = Unpack29Encoder::with_options(options).encode_member(data)?;
+    if clock {
+        eprintln!(
+            "MTTIME rar29 candidate=plain {}ms size={}",
+            started.elapsed().as_millis(),
+            plain.len()
+        );
+    }
     results[0] = Some(plain);
     for (index, records) in candidates.iter().enumerate() {
+        let started = std::time::Instant::now();
         if let Ok(packed) = Unpack29Encoder::with_options(options)
             .encode_member_with_filter_records(data, records)
         {
+            if clock {
+                eprintln!(
+                    "MTTIME rar29 candidate=filter{index} {}ms size={}",
+                    started.elapsed().as_millis(),
+                    packed.len()
+                );
+            }
             results[index + 1] = Some(packed);
         }
     }
-    if with_ppmd
-        && let Ok(packed) = Unpack29Encoder::with_options(options).encode_ppmd_member(data)
-    {
-        results[candidates.len() + 1] = Some(packed);
+    if with_ppmd {
+        let started = std::time::Instant::now();
+        if let Ok(packed) = Unpack29Encoder::with_options(options).encode_ppmd_member(data) {
+            if clock {
+                eprintln!(
+                    "MTTIME rar29 candidate=ppmd {}ms size={}",
+                    started.elapsed().as_millis(),
+                    packed.len()
+                );
+            }
+            results[candidates.len() + 1] = Some(packed);
+        }
     }
     let mut best_len = usize::MAX;
     let mut best: Option<Vec<u8>> = None;
