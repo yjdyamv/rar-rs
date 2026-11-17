@@ -497,8 +497,13 @@ struct State {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Successor {
     None,
-    Raw(usize),
-    Context(usize),
+    /// A position in `text`, or a `contexts` index — both well inside `u32`
+    /// (the dictionary bounds the text at a few tens of MiB). Held at 4 bytes
+    /// rather than `usize` because the model is walked at random: 1.6 M states
+    /// at 24 bytes each is a ~40 MB working set, and at 12 bytes it is half
+    /// that. The reference packs the same fields into 2 bytes.
+    Raw(u32),
+    Context(u32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1080,8 +1085,8 @@ impl PpmdDecoder {
         if let Successor::Context(context) = successor
             && self.order_fall == 0
         {
-            self.max_context = context;
-            self.min_context = context;
+            self.max_context = context as usize;
+            self.min_context = context as usize;
             return Ok(());
         }
         self.update_model()
@@ -1124,7 +1129,7 @@ impl PpmdDecoder {
             };
             self.max_context = context;
             self.min_context = context;
-            self.state_mut(self.found_state)?.successor = Successor::Context(context);
+            self.state_mut(self.found_state)?.successor = Successor::Context(context as u32);
             return Ok(());
         }
 
@@ -1134,7 +1139,7 @@ impl PpmdDecoder {
         // coder by one extra symbol before resetting — which left the
         // post-restart state out of sync.
         self.text.push(found_symbol);
-        let max_successor = Successor::Raw(self.text.len());
+        let max_successor = Successor::Raw(self.text.len() as u32);
         if !self.suballoc.text_has_room(self.text.len()) {
             self.init_model(self.max_order);
             return Ok(());
@@ -1146,7 +1151,7 @@ impl PpmdDecoder {
                     self.init_model(self.max_order);
                     return Ok(());
                 };
-                min_successor = Successor::Context(context);
+                min_successor = Successor::Context(context as u32);
             }
             self.order_fall -= 1;
             if self.order_fall == 0 && self.max_context != self.min_context {
@@ -1154,13 +1159,13 @@ impl PpmdDecoder {
             }
         } else {
             self.state_mut(self.found_state)?.successor = max_successor;
-            min_successor = Successor::Context(self.min_context);
+            min_successor = Successor::Context(self.min_context as u32);
         }
 
         let mc = self.min_context;
         let mut c = self.max_context;
         self.min_context = match min_successor {
-            Successor::Context(context) => context,
+            Successor::Context(context) => context as usize,
             _ => self.min_context,
         };
         self.max_context = self.min_context;
@@ -1236,7 +1241,7 @@ impl PpmdDecoder {
     fn create_successors(&mut self) -> Option<usize> {
         let up_branch = match self.state(self.found_state).ok()?.successor {
             Successor::Raw(pos) => pos,
-            Successor::Context(context) if self.order_fall == 0 => return Some(context),
+            Successor::Context(context) if self.order_fall == 0 => return Some(context as usize),
             _ => return None,
         };
         let mut c = self.min_context;
@@ -1254,7 +1259,7 @@ impl PpmdDecoder {
             let successor = self.contexts[c].states[index].successor;
             if successor != Successor::Raw(up_branch) {
                 if let Successor::Context(context) = successor {
-                    c = context;
+                    c = context as usize;
                     if ps.is_empty() {
                         return Some(c);
                     }
@@ -1268,7 +1273,7 @@ impl PpmdDecoder {
             return Some(c);
         }
 
-        let new_sym = *self.text.get(up_branch)?;
+        let new_sym = *self.text.get(up_branch as usize)?;
         let up_successor = Successor::Raw(up_branch + 1);
         let new_freq = if self.contexts[c].states.len() == 1 {
             self.contexts[c].states[0].freq
@@ -1298,7 +1303,7 @@ impl PpmdDecoder {
                 header_offset: NULL_OFFSET,
                 array_offset: NULL_OFFSET,
             })?;
-            self.state_mut(state_ref).ok()?.successor = Successor::Context(context);
+            self.state_mut(state_ref).ok()?.successor = Successor::Context(context as u32);
             c = context;
         }
         Some(c)
