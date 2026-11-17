@@ -507,6 +507,17 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     // 8 + align16(head_size) when the block was stored header-encrypted).
     let data_offset = block.header_end;
 
+    let dict_bits = ((block.flags >> 5) & 7) as u8;
+    if std::env::var_os("RAR_RS_MTTIME").is_some() {
+        eprintln!(
+            "MTTIME rar4 header name={name} method=0x{method:02x} dict_bits={dict_bits} dict_bytes={}",
+            if dict_bits >= 7 {
+                0
+            } else {
+                (64u64 * 1024) << dict_bits
+            }
+        );
+    }
     let fh = FileHeader {
         name,
         unpacked_size: unp_size,
@@ -522,7 +533,7 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         comp_solid: block.flags & FHD_SOLID != 0,
         // Window-bits field (bits 5–7 of the flags word): `log2(window/64 KiB)`,
         // with 7 marking a directory block.
-        comp_dict_size: ((block.flags >> 5) & 7) as u8,
+        comp_dict_size: dict_bits,
         host_os: host_os_u64,
         flags: block.flags as u64,
         file_flags: MODEL_FILE_FLAG_CRC32,
