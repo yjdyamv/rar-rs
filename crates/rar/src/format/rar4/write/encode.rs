@@ -341,34 +341,62 @@ pub(super) fn best_rar29_member(
     }
     let options = options_for_level(level);
     let method = crate::format::rar4::RAR4_METHOD_STORE + level;
-    let lz = Unpack29Encoder::with_options(options).encode_member(data)?;
-    let mut best_len = lz.len();
-    let mut best: (Vec<u8>, u8) = (lz, method);
-
-    // Filters under the -mc policy: every candidate is measured with its own
-    // throwaway encoder (no chain state).
-    for (kind, ranges) in rar29_filter_candidates(data, policy) {
-        let Ok(candidate) = Unpack29Encoder::with_options(options)
-            .encode_member_with_filter_ranges(data, kind, &ranges)
-        else {
-            continue;
-        };
-        if candidate.len() < best_len {
-            best_len = candidate.len();
-            best = (candidate, method);
+    let candidates = rar29_filter_candidates(data, policy);
+    let with_ppmd = level >= 4 && !data.is_empty();
+    // Plain, then the filters in order, then PPMd: a tie keeps the earlier
+    // candidate. Each one runs on its own throwaway encoder, so they are
+    // independent and go to the pool together — the serial loop paid one full
+    // pass per candidate (measured: 4.6 s of a 5.7 s `-ma4 -m1` run).
+    let slots = candidates.len() + 1 + usize::from(with_ppmd);
+    let results = std::sync::Mutex::new(vec![None::<Vec<u8>>; slots]);
+    let plain_error = std::sync::Mutex::new(None::<crate::error::RarError>);
+    {
+        let results = &results;
+        let plain_error = &plain_error;
+        let candidates = &candidates;
+        crate::parallel::compression_pool().scope(|scope| {
+            scope.spawn(move |_| match Unpack29Encoder::with_options(options).encode_member(data) {
+                Ok(packed) => results.lock().unwrap()[0] = Some(packed),
+                Err(error) => *plain_error.lock().unwrap() = Some(error),
+            });
+            for (index, (kind, ranges)) in candidates.iter().enumerate() {
+                let slot = index + 1;
+                let kind = *kind;
+                scope.spawn(move |_| {
+                    if let Ok(packed) = Unpack29Encoder::with_options(options)
+                        .encode_member_with_filter_ranges(data, kind, ranges)
+                    {
+                        results.lock().unwrap()[slot] = Some(packed);
+                    }
+                });
+            }
+            if with_ppmd {
+                let slot = candidates.len() + 1;
+                scope.spawn(move |_| {
+                    if let Ok(packed) =
+                        Unpack29Encoder::with_options(options).encode_ppmd_member(data)
+                    {
+                        results.lock().unwrap()[slot] = Some(packed);
+                    }
+                });
+            }
+        });
+    }
+    if let Some(error) = plain_error.into_inner().unwrap() {
+        return Err(error);
+    }
+    let mut best_len = usize::MAX;
+    let mut best: Option<Vec<u8>> = None;
+    for slot in results.into_inner().unwrap() {
+        if let Some(packed) = slot
+            && packed.len() < best_len
+        {
+            best_len = packed.len();
+            best = Some(packed);
         }
     }
-    if level >= 4
-        && !data.is_empty()
-        && let Ok(ppmd) = Unpack29Encoder::with_options(options).encode_ppmd_member(data)
-        && ppmd.len() < best_len
-    {
-        best_len = ppmd.len();
-        best = (ppmd, method);
-    }
-    if best_len < data.len() {
-        Ok(Some(best))
-    } else {
-        Ok(None)
+    match best {
+        Some(packed) if best_len < data.len() => Ok(Some((packed, method))),
+        _ => Ok(None),
     }
 }

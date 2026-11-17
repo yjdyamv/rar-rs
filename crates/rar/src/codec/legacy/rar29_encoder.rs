@@ -2160,7 +2160,14 @@ impl Unpack29Encoder {
             let pool = crate::parallel::compression_pool();
             pool.scope(|scope| {
                 scope.spawn(move |_| {
+                    let started = std::time::Instant::now();
                     let analysed = this.best_lz_candidate(input, &[]);
+                    if std::env::var_os("RAR_RS_MTTIME").is_some() {
+                        eprintln!(
+                            "MTTIME rar29 candidate plain {}ms",
+                            started.elapsed().as_millis()
+                        );
+                    }
                     if let Ok(candidate) = &analysed {
                         live_best.fetch_min(
                             candidate.packed.len(),
@@ -2178,7 +2185,15 @@ impl Unpack29Encoder {
                     }
                     let slot = index + 1;
                     scope.spawn(move |_| {
+                        let started = std::time::Instant::now();
                         let analysed = this.filtered_lz_candidate(input, *kind, ranges);
+                        if std::env::var_os("RAR_RS_MTTIME").is_some() {
+                            eprintln!(
+                                "MTTIME rar29 candidate filter{} {}ms",
+                                index,
+                                started.elapsed().as_millis()
+                            );
+                        }
                         if let Ok(candidate) = &analysed {
                             live_best.fetch_min(
                                 candidate.packed.len(),
@@ -2193,7 +2208,11 @@ impl Unpack29Encoder {
                     });
                 }
                 scope.spawn(move |_| {
+                    let started = std::time::Instant::now();
                     let trial = this.ppmd_trial(input, saved_for_trial, None, Some(live_best));
+                    if std::env::var_os("RAR_RS_MTTIME").is_some() {
+                        eprintln!("MTTIME rar29 ppmd {}ms", started.elapsed().as_millis());
+                    }
                     *ppmd_result.lock().unwrap() = Some(trial);
                 });
             });
