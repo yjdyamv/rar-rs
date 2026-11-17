@@ -66,8 +66,64 @@ pub fn repair_archive(input: &[u8]) -> RarResult<Vec<u8>> {
 /// larger than RAM can be repaired. Returns `true` when damage was
 /// found and repaired, `false` when the archive was already intact.
 /// `dst` must not alias `src`.
+///
+/// [`repair_archive_path_report`] is the same run with the record's own state
+/// reported too, for callers that must tell a healthy archive from one whose
+/// members are fine but whose protection is gone.
 pub fn repair_archive_path(src: &std::path::Path, dst: &std::path::Path) -> RarResult<bool> {
-    repair_archive_path_with(src, dst, None, None)
+    Ok(repair_archive_path_report(src, dst)? == RepairOutcome::Repaired)
+}
+
+/// What a `rar r` run found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairOutcome {
+    /// Nothing needed repairing: the data is intact and any recovery record the
+    /// archive carries is whole.
+    Intact,
+    /// Damage was found and the repaired archive was written to `dst`.
+    Repaired,
+    /// The members are intact but the recovery record itself is damaged (a
+    /// truncated archive usually takes the record's tail with it), so the
+    /// archive kept its data and lost its protection. `rar r` reports this and
+    /// exits 3, as WinRAR does, rather than calling the archive healthy.
+    RecordDamaged,
+}
+
+/// [`repair_archive_path`] with the record's state reported: `RecordDamaged`
+/// means the archive's own bytes are fine but its recovery record is not.
+pub fn repair_archive_path_report(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> RarResult<RepairOutcome> {
+    repair_archive_path_with_report(src, dst, None, None)
+}
+
+/// [`repair_archive_path_report`] with a cancellation flag and progress
+/// reporting.
+pub fn repair_archive_path_with_report(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> RarResult<RepairOutcome> {
+    let mut input = std::fs::File::open(src).map_err(RarError::Io)?;
+    // Stage into a temp sibling and rename on success, so a failed
+    // repair never leaves a partial file at `dst`.
+    let (mut staged, mut output) = crate::fs::atomic::StagedFile::create(dst)?;
+    let (repaired, record_truncated) =
+        rar50::repair_inline_recovery_archive_path(&mut input, &mut output, cancel, progress)
+            .map_err(RarError::from)?;
+    if !repaired {
+        // Intact archive: `dst` stays untouched (like `rar r`'s "All OK").
+        return Ok(if record_truncated {
+            RepairOutcome::RecordDamaged
+        } else {
+            RepairOutcome::Intact
+        });
+    }
+    drop(output);
+    staged.commit()?;
+    Ok(RepairOutcome::Repaired)
 }
 
 /// [`repair_archive_path`] with a cancellation flag and progress
@@ -82,20 +138,7 @@ pub fn repair_archive_path_with(
     cancel: Option<&std::sync::atomic::AtomicBool>,
     progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> RarResult<bool> {
-    let mut input = std::fs::File::open(src).map_err(RarError::Io)?;
-    // Stage into a temp sibling and rename on success, so a failed
-    // repair never leaves a partial file at `dst`.
-    let (mut staged, mut output) = crate::fs::atomic::StagedFile::create(dst)?;
-    let repaired =
-        rar50::repair_inline_recovery_archive_path(&mut input, &mut output, cancel, progress)
-            .map_err(RarError::from)?;
-    if !repaired {
-        // Intact archive: `dst` stays untouched (like `rar r`'s "All OK").
-        return Ok(false);
-    }
-    drop(output);
-    staged.commit()?;
-    Ok(true)
+    Ok(repair_archive_path_with_report(src, dst, cancel, progress)? == RepairOutcome::Repaired)
 }
 
 /// Rebuild missing volumes of a multi-volume set from its `.rev` recovery

@@ -26,7 +26,7 @@ pub fn repair_inline_recovery_archive_path(
     dst: &mut impl io::Write,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
-) -> Result<bool> {
+) -> Result<(bool, bool)> {
     let file_size = src.seek(io::SeekFrom::End(0)).map_err(io_err)?;
     src.seek(io::SeekFrom::Start(0)).map_err(io_err)?;
     // Total work is read-once (scan) + write-once (copy), so the progress
@@ -38,9 +38,10 @@ pub fn repair_inline_recovery_archive_path(
             p(done, total);
         }
     };
-    let found = find_inline_recovery_chunks_in_file(src, file_size, cancel, &mut |pos, _| {
-        report(pos, total)
-    })?;
+    let (found, record_truncated) =
+        find_inline_recovery_chunks_in_file(src, file_size, cancel, &mut |pos, _| {
+            report(pos, total)
+        })?;
     let first = found.first().ok_or(Error::NoRecoveryRecord)?;
     let protected_size =
         usize::try_from(first.1.protected_size).map_err(|_| Error::PlanOverflow)?;
@@ -73,9 +74,11 @@ pub fn repair_inline_recovery_archive_path(
     };
 
     // Intact archive: nothing to write. `dst` is left untouched (like
-    // `rar r`'s "All OK" — no fixed.<name> is produced).
+    // `rar r`'s "All OK" — no fixed.<name> is produced). `record_truncated`
+    // still tells the caller the *record* lost bytes to an archive truncation,
+    // so the archive kept its data but lost its protection.
     if damaged.is_empty() {
-        return Ok(false);
+        return Ok((false, record_truncated));
     }
 
     // Copy the whole archive to dst, substituting the repaired bytes for
@@ -99,7 +102,7 @@ pub fn repair_inline_recovery_archive_path(
     }
     copy_range(src, dst, next as u64, file_size, cancel)?;
     report(total, total);
-    Ok(!damaged.is_empty())
+    Ok((!damaged.is_empty(), record_truncated))
 }
 
 /// Stream a byte range of `src` into `dst` in bounded blocks.
@@ -141,7 +144,7 @@ fn find_inline_recovery_chunks_in_file(
     file_size: u64,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     progress: &mut dyn FnMut(u64, u64),
-) -> Result<Vec<(u64, InlineRecoveryChunk, Vec<u8>)>> {
+) -> Result<(Vec<(u64, InlineRecoveryChunk, Vec<u8>)>, bool)> {
     const SCAN: usize = 64 * 1024;
     let mut found = Vec::new();
     // A `{RB}` marker that yields no usable chunk is either a *truncated*
@@ -225,7 +228,7 @@ fn find_inline_recovery_chunks_in_file(
     if found.is_empty() && saw_marker && !truncated {
         return Err(Error::BadRecoveryChunk);
     }
-    Ok(found)
+    Ok((found, truncated))
 }
 
 /// What a `{RB}` candidate offset turned out to hold.

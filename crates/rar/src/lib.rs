@@ -123,8 +123,9 @@ pub use recovery::rev50::{build_recovery_volumes_for_set, plan_recovery_volume_c
 // caller above both supplies it.
 pub use recovery::rev3::rev_name_belongs_to_set;
 pub use recovery::{
-    LegacyDamagedSector, LegacyRepair, rebuild_missing_volumes, rebuild_missing_volumes_with,
-    repair_archive, repair_archive_path, repair_archive_path_with, repair_legacy_archive_path,
-    repair_legacy_archive_path_with_password,
+    LegacyDamagedSector, LegacyRepair, RepairOutcome, rebuild_missing_volumes,
+    rebuild_missing_volumes_with, repair_archive, repair_archive_path,
+    repair_archive_path_report, repair_archive_path_with, repair_archive_path_with_report,
+    repair_legacy_archive_path, repair_legacy_archive_path_with_password,
 };
 pub use version::ArchiveVersion;

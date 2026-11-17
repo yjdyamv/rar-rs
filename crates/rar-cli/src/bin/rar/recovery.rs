@@ -161,7 +161,7 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
     // repaired archive is staged and renamed atomically by the library. A
     // legacy repair reports per sector (WinRAR's `Sector N (offsets ...)`
     // lines); the RAR5 record has no such report.
-    let repaired: rar_rs::RarResult<(bool, Vec<rar_rs::LegacyDamagedSector>)> =
+    let repaired: rar_rs::RarResult<(rar_rs::RepairOutcome, Vec<rar_rs::LegacyDamagedSector>)> =
         if is_rar4_file(std::path::Path::new(archive_path)) {
             // `-hp`: the recovery record's header is encrypted, so locating it
             // needs the archive password (the protected bytes are not).
@@ -170,16 +170,23 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
                 std::path::Path::new(&fixed_path),
                 password,
             )
-            .map(|report| (report.repaired, report.sectors))
+            .map(|report| {
+                let outcome = if report.repaired {
+                    rar_rs::RepairOutcome::Repaired
+                } else {
+                    rar_rs::RepairOutcome::Intact
+                };
+                (outcome, report.sectors)
+            })
         } else {
-            rar_rs::repair_archive_path(
+            rar_rs::repair_archive_path_report(
                 std::path::Path::new(archive_path),
                 std::path::Path::new(&fixed_path),
             )
-            .map(|repaired| (repaired, Vec::new()))
+            .map(|outcome| (outcome, Vec::new()))
         };
     match repaired {
-        Ok((true, sectors)) => {
+        Ok((rar_rs::RepairOutcome::Repaired, sectors)) => {
             report_sectors(&sectors);
             // The official tool refuses an obviously truncated archive with a
             // clear error; validate the repaired bytes with our own reader. A
@@ -198,14 +205,23 @@ pub(crate) fn cmd_repair(args: &ArchiveArgs) -> CliResult<()> {
             info!("Repaired {archive_path} -> {fixed_path}");
             Ok(())
         }
+        // The members are intact but the record that protects them is not: the
+        // archive kept its data and lost its protection. WinRAR reports this and
+        // exits 3 rather than calling the archive healthy, and so do we — an `r`
+        // that says "All OK" here would leave the user thinking the archive is
+        // still protected when it can no longer be repaired.
+        Ok((rar_rs::RepairOutcome::RecordDamaged, _)) => {
+            eprintln!("Recovery record is damaged; the archive can no longer be repaired");
+            Err(error::CliError::silent(error::EXIT_CRC))
+        }
         // Nothing rebuilt: either the archive is intact, or it is damaged
         // where the record cannot reach (WinRAR reports the sector and offers
         // a structural rebuild instead of calling the archive healthy).
-        Ok((false, sectors)) if sectors.is_empty() => {
+        Ok((rar_rs::RepairOutcome::Intact, sectors)) if sectors.is_empty() => {
             info!("All OK");
             Ok(())
         }
-        Ok((false, sectors)) => {
+        Ok((rar_rs::RepairOutcome::Intact, sectors)) => {
             report_sectors(&sectors);
             // WinRAR asks before rebuilding the structure, and rebuilds when it
             // cannot ask (`-idq`, no console). A declined or unreadable answer
