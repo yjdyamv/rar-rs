@@ -797,25 +797,31 @@ pub(super) fn collect_block_matches(
                     out: &mut scratch,
                 }),
             }
-            // The descent reports exact prefix lengths: it compares whole
-            // words and seals any node whose comparison ran into the end of
-            // the input, so a truncated limit can never make it adopt a
-            // subtree on a prefix it could not check. Nothing here re-reads
-            // the bytes the descent just compared — that used to be a full
-            // `match_length_at` pass over every report, paying for the same
-            // comparison twice to drop the bogus reports an unordered tree
-            // produced. The seal is what made that pass redundant; the debug
-            // check below keeps it honest without costing release builds.
-            #[cfg(debug_assertions)]
+            // The descent compares whole words and seals any node whose
+            // comparison ran into the end of the input, so a truncated limit can
+            // never make it adopt a subtree on a prefix it could not check. It
+            // still means to report exact prefix lengths, but a link that
+            // survives a frame slide can name a position whose bytes no longer
+            // agree, so each report is checked against the input here. This used
+            // to be a debug-only assertion, which meant release builds trusted a
+            // stale report: with a dictionary smaller than the member, the
+            // sliding frame produced one that held only five of its seven bytes
+            // (`split_filter_records_decode_across_staging_boundaries` in debug).
+            // The check costs one comparison per report, which is affordable on
+            // this path — the sequential parse, which the tree belongs to; the MT
+            // tiers use the row index and never come through here. Shrinking a
+            // report can only make it tie an earlier one, so a report is kept
+            // only when it still improves on the best so far, which preserves the
+            // ascending-length order the parse relies on.
+            let mut best = 0usize;
             for &(len, dist) in scratch.iter() {
                 let check = (len as usize).min(len_limit);
-                debug_assert_eq!(
-                    match_length_at(combined, pos, dist as usize, check),
-                    check,
-                    "tree reported a {len}-byte match at {pos} (distance {dist}) that does not hold"
-                );
+                let held = match_length_at(combined, pos, dist as usize, check);
+                if held > best {
+                    best = held;
+                    matches.runs.push((held as u32, dist));
+                }
             }
-            matches.runs.extend(scratch.iter().copied());
             // Measure the last report out to its real end: the tree
             // stops comparing at the limit, and a match reaching it
             // is what the parse commits to and steps over.
