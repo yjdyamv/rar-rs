@@ -789,16 +789,20 @@ impl PpmdDecoder {
             let summ_freq = self.contexts[min].summ_freq as u32;
             let mut start = 0u32;
             let mut found = None;
-            let mut touches = 0u64;
+            let width = self.contexts[min].states.len() as u64;
             for (index, state) in self.contexts[min].states.iter().enumerate() {
-                touches += 1;
                 if state.symbol == symbol {
                     found = Some((index, start, state.freq as u32));
                     break;
                 }
                 start += state.freq as u32;
             }
-            self.scanned += touches;
+            // Exact without a counter inside the loop: the scan stops at the
+            // match, so the break index is the visit count.
+            self.scanned += match found {
+                Some((index, _, _)) => index as u64 + 1,
+                None => width,
+            };
             if let Some((index, start, size)) = found {
                 output.encode(start, size, summ_freq);
                 self.found_state = StateRef {
@@ -878,9 +882,7 @@ impl PpmdDecoder {
             let freq_sum = hi_cnt + esc_freq;
             let mut start = 0u32;
             let mut found = None;
-            let mut touches = 0u64;
             for (index, state) in self.contexts[mc].states.iter().enumerate() {
-                touches += 1;
                 if !mask[state.symbol as usize] {
                     continue;
                 }
@@ -891,7 +893,10 @@ impl PpmdDecoder {
                 }
                 start += freq;
             }
-            self.scanned += touches;
+            self.scanned += match found {
+                Some((index, _, _)) => index as u64 + 1,
+                None => width,
+            };
             if let Some((index, start, freq)) = found {
                 output.encode(start, freq, freq_sum);
                 self.update_see(see_ref);
