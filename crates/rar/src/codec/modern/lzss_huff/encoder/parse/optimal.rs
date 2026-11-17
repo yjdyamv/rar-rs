@@ -1558,6 +1558,155 @@ type TokenFrequencies = (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>);
 /// Symbols plus their frequency vectors, as produced by [`convert_tokens`].
 type ConvertedTokens = (Vec<Symbol>, TokenFrequencies);
 
+/// The `-m1` tier's parse: a greedy walk with a one-step lazy lookahead over
+/// the shared row index.
+///
+/// The priced DP costs 1.9x the wall time of this walk for about 1.5% of ratio
+/// on a kernel image, which is the wrong trade on the fastest rung. Candidates
+/// come from the same row index, so the walk sees what the DP sees; it commits
+/// to the local choice instead of pricing every reachable position.
+#[cfg(feature = "parallel")]
+pub(crate) fn windowed_walk_parse<F>(
+    combined: &[u8],
+    span: std::ops::Range<usize>,
+    dist_cache: &mut [u32; DIST_CACHE_SIZE],
+    last_length: &mut u32,
+    limits: super::MatchLimits,
+    lazy_thresh: u32,
+    mut emit: F,
+) -> Vec<Symbol>
+where
+    F: FnMut(usize, &[u32; DIST_CACHE_SIZE], &mut Vec<(u32, u32)>),
+{
+    // Two states: the walk needs a live cache to rank candidates, and
+    // `convert_tokens` derives its own as it emits. Running them separately
+    // keeps the emitted cache transitions exactly the decoder's, instead of
+    // applying every remembered distance twice.
+    let mut decide = EncoderMatchState::new(*dist_cache, *last_length);
+    let mut encode_state = EncoderMatchState::new(*dist_cache, *last_length);
+    let mut tokens: Vec<(u32, u32)> = Vec::new();
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    let mut pos = span.start;
+    while pos < span.end {
+        let best = walk_best(
+            &mut emit,
+            combined,
+            &decide.reps,
+            pos,
+            limits.window.min(pos),
+            limits.max_match.min(span.end - pos),
+            &mut runs,
+        );
+        let mut chosen = best;
+        // One-step lazy: a match starting one byte later that reaches strictly
+        // further is worth the literal, because it covers the skipped byte too.
+        if best.0 >= 2 && best.0 < lazy_thresh && pos + 1 < span.end {
+            let next = walk_best(
+                &mut emit,
+                combined,
+                &decide.reps,
+                pos + 1,
+                limits.window.min(pos + 1),
+                limits.max_match.min(span.end - pos - 1),
+                &mut runs,
+            );
+            if next.0 > best.0 {
+                chosen = (0, 0);
+            }
+        }
+        if chosen.0 >= 2 {
+            tokens.push(chosen);
+            decide.remember(chosen.0, chosen.1);
+            pos += chosen.0 as usize;
+        } else {
+            // A literal token, not a skipped byte: `convert_tokens` walks the
+            // block by the tokens it is given, so an omitted literal would
+            // desynchronise every distance after it.
+            tokens.push((0, u32::from(combined[pos])));
+            pos += 1;
+        }
+    }
+    let (symbols, _) = convert_tokens(&tokens, combined, span, &mut encode_state, limits.variant);
+    *dist_cache = encode_state.reps;
+    *last_length = encode_state.last_length;
+    symbols
+}
+
+/// The walk's decision at one position: the candidate it would commit to.
+#[cfg(feature = "parallel")]
+fn walk_best<F>(
+    emit: &mut F,
+    combined: &[u8],
+    reps: &[u32; DIST_CACHE_SIZE],
+    pos: usize,
+    max_distance: usize,
+    max_length: usize,
+    runs: &mut Vec<(u32, u32)>,
+) -> (u32, u32)
+where
+    F: FnMut(usize, &[u32; DIST_CACHE_SIZE], &mut Vec<(u32, u32)>),
+{
+    if max_distance == 0 || max_length < 2 {
+        return (0, 0);
+    }
+    runs.clear();
+    emit(pos, reps, runs);
+    let encodable = |length: u32, distance: u32| {
+        reps.contains(&distance) || (length as usize) >= length_bonus(distance) as usize + 2
+    };
+    let mut longest = (0u32, 0u32);
+    for &(length, distance) in runs.iter() {
+        let length = length.min(max_length as u32);
+        if encodable(length, distance) && length > longest.0 {
+            longest = (length, distance);
+        }
+    }
+    if longest.0 < 2 {
+        return (0, 0);
+    }
+    // Prefer the nearest candidate that reaches nearly as far: a shorter
+    // distance costs fewer bits, so a slightly shorter match can be cheaper.
+    // The collector lists nearest first, so the first acceptable one wins.
+    let mut pick = longest;
+    for &(length, distance) in runs.iter() {
+        let length = length.min(max_length as u32);
+        if encodable(length, distance)
+            && (length * 4 >= longest.0 * 3 || length.saturating_add(3) >= longest.0)
+        {
+            pick = (length, distance);
+            break;
+        }
+    }
+    // A remembered distance costs fewer bits than a fresh one, so a `repeat`
+    // that reaches nearly as far is the better commit. The boundary rules come
+    // from the official encoder: shorter by one, two or three bytes is only
+    // worth it while the fresh distance is still cheap to encode.
+    for &repeat in reps.iter() {
+        if repeat == 0 || repeat as usize > max_distance {
+            continue;
+        }
+        let length = match_length_at(combined, pos, repeat as usize, max_length) as u32;
+        if length < 2 {
+            continue;
+        }
+        let near = pick.0.saturating_sub(3) <= length || pick.0 * 3 <= length * 4;
+        let boundary_ok = if length + 1 == pick.0 {
+            pick.1 > 0xff
+        } else if length + 2 == pick.0 {
+            pick.1 > 0x7ff
+        } else if length + 3 == pick.0 {
+            pick.1 > 0x7fff
+        } else {
+            true
+        };
+        if near && boundary_ok {
+            pick = (length, repeat);
+            break;
+        }
+    }
+    pick
+}
+
 /// Convert a token stream into symbols with a live cache walk, counting
 /// symbol frequencies at the same time (the block writer counts them the
 /// same way, so prices from these frequencies are exact). Returns the

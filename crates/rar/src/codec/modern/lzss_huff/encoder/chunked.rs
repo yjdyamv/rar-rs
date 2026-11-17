@@ -92,6 +92,9 @@ struct MtJob<'a> {
     /// assumes the near finder covered them — cross-member duplicates then
     /// silently stop compressing.
     force_seed_tail: bool,
+    /// Run the `-m1` walk instead of the priced DP. Same candidates, no
+    /// per-position pricing: the fastest rung trades ratio for wall time.
+    walk: bool,
 }
 
 /// One multi-threaded worker slice: the buffer, the half-open range inside it,
@@ -457,6 +460,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 0)
         .unwrap_or(MT_ROW_INDEX_DEPTH[level]);
+    // Level 1 is the fastest rung: it takes the walk over the same row index
+    // instead of pricing every reachable position. The walk needs its own lazy
+    // threshold because `LEVEL_PARAMS` zeroes it for the greedy chain tier.
+    let walk_tier = level == 1;
     // MT parse is the low-step tier by design: workers price a bounded
     // candidate set from the shared row index instead of descending the BT4
     // tree at every position, which cuts the per-position step count well
@@ -639,6 +646,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
                                 // Only the first slice sees chain history as its
                                 // lookbehind; later slices look into this window.
                                 force_seed_tail: k == 0 && !tail_ref.is_empty(),
+                                walk: walk_tier,
                             },
                             tail_ref,
                             state,
@@ -779,7 +787,15 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 /// the cheap rung (+2.3% on the source tree, still 3.6x faster than sequential).
 /// MT-only, like the row-index parse whose level dial it is.
 #[cfg(feature = "parallel")]
-const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 24, 64, 128, 384];
+const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 64, 24, 64, 128, 384];
+
+/// Lazy lookahead cap for the `-m1` walk. Matches shorter than this are worth
+/// one extra probe of the next position: a match starting one byte later that
+/// reaches further covers the skipped byte too. Measured on a kernel image the
+/// cap is not sensitive (8, 16 and 64 all give the same size), so it is set
+/// where the extra probe stops paying for itself.
+#[cfg(feature = "parallel")]
+const WALK_LAZY_MAX: u32 = 8;
 
 /// Whether row-index slices also consult the shared sampled long-range table.
 ///
@@ -846,6 +862,8 @@ fn mt_slice_symbols_row_index(
     index: &super::parse::RowIndex,
     // Candidates compared per position; the MT tier's level dial.
     depth: usize,
+    // Take the `-m1` walk instead of the priced DP.
+    walk: bool,
     defer: Option<&mut Vec<(u32, u32)>>,
 ) -> Vec<Symbol> {
     let MtSlice {
@@ -872,20 +890,36 @@ fn mt_slice_symbols_row_index(
     };
     let mut dist_cache = state.dist_cache;
     let mut last_length = state.last_length;
-    let symbols = super::parse::windowed_priced_parse(
-        data,
-        s0..e0,
-        &mut dist_cache,
-        &mut last_length,
-        super::parse::MatchLimits {
-            max_match,
-            window: dict_size,
-            variant,
-        },
-        lr_q,
-        defer,
-        |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
-    );
+    let symbols = if walk {
+        super::parse::windowed_walk_parse(
+            data,
+            s0..e0,
+            &mut dist_cache,
+            &mut last_length,
+            super::parse::MatchLimits {
+                max_match,
+                window: dict_size,
+                variant,
+            },
+            WALK_LAZY_MAX,
+            |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
+        )
+    } else {
+        super::parse::windowed_priced_parse(
+            data,
+            s0..e0,
+            &mut dist_cache,
+            &mut last_length,
+            super::parse::MatchLimits {
+                max_match,
+                window: dict_size,
+                variant,
+            },
+            lr_q,
+            defer,
+            |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
+        )
+    };
     state.dist_cache = dist_cache;
     state.last_length = last_length;
     symbols
@@ -920,6 +954,7 @@ fn encode_mt_slice(
         is_last_block_of_member,
         lead_symbols,
         force_seed_tail,
+        walk,
     } = *job;
     // Near-window context: the closest bytes before this slice, seeded
     // with the entry tail when the slice starts at the buffer head.
@@ -991,9 +1026,11 @@ fn encode_mt_slice(
     let mut tokens: Vec<(u32, u32)> = Vec::new();
     let mut symbols = match (index, two_phase) {
         (Some(index), true) => {
-            mt_slice_symbols_row_index(state, slice, index, depth, Some(&mut tokens))
+            mt_slice_symbols_row_index(state, slice, index, depth, walk, Some(&mut tokens))
         }
-        (Some(index), false) => mt_slice_symbols_row_index(state, slice, index, depth, None),
+        (Some(index), false) => {
+            mt_slice_symbols_row_index(state, slice, index, depth, walk, None)
+        }
         (None, _) => mt_slice_symbols_low_step(state, slice, chain_len, lazy_thresh, seed_tail),
     };
     if two_phase {

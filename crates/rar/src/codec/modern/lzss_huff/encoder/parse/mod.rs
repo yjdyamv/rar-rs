@@ -96,5 +96,6 @@ pub(crate) use optimal::{EncoderMatchState, convert_tokens};
 #[cfg(feature = "parallel")]
 pub(super) use optimal::{
     MT_DP_BLOCK_SIZE, RowIndex, find_matches_in_range, windowed_priced_parse,
+    windowed_walk_parse,
 };
 pub(super) use optimal::{find_matches_optimal, find_matches_with_tail};
