@@ -637,6 +637,12 @@ impl PpmdDecoder {
                 .reset(dictionary_mb.saturating_mul(1024 * 1024));
             self.init_model(max_order);
             self.allocated = true;
+            if std::env::var_os("RAR_RS_MTTIME").is_some() {
+                eprintln!(
+                    "MTTIME ppmd header order={max_order} dictionary_mb={dictionary_mb} esc_char={}",
+                    *esc_char
+                );
+            }
         } else if !self.allocated {
             return Err(Error::InvalidData("RAR PPMd block reuses missing model"));
         }
