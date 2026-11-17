@@ -528,23 +528,27 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let force_walk = std::env::var("RAR_RS_MT_WALK").is_ok_and(|value| value != "0");
     let dp_rung = priced_dp_requested() && level >= 4;
     let walk_tier = force_walk || (level <= WALK_MAX_LEVEL && !dp_rung);
-    // `-m1` is the preview rung: no member-wide index at all (its build is the
-    // whole per-member prelude), the walk over a per-slice chain with a short
-    // tail instead. Measured 208 ms / 51.22% against the indexed walk's
-    // 247 ms / 47.48% — 39 ms for 3.7 pp, which buys back 0.3x of the gap to
-    // the official's deliberately weak `-m1`.
-    let preview = level == 1 && !force_walk;
+    // `-m1` is the preview rung only when asked for (`RAR_RS_PREVIEW=1`): no
+    // member-wide index at all, the walk over a per-slice chain with a short
+    // tail. It is off by default because a short tail cannot see long-range
+    // redundancy — on 9.2 MB of markdown a 32 KiB tail packs 3,246,179 B where
+    // a full window packs 244,295 — so it is a gamble, not a rung.
+    let preview = level == 1 && !force_walk && preview_enabled();
     let near_cap = if preview {
         PREVIEW_TAIL
     } else {
         near_window_max()
     };
-    // How far back the walk's candidates may reach, capped to the dictionary.
+    // How far back the walk's candidates may reach. **Full window by default**:
+    // capping it below `-md` silently drops matches the dictionary promises, and
+    // that is catastrophic rather than merely lossy on long-range redundancy
+    // (256 KiB reach: 3,070,349 B of the same markdown against 244,295 full).
+    // `RAR_RS_WALK_REACH` exists to measure that trade, not to ship it.
     let walk_reach = std::env::var("RAR_RS_WALK_REACH")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value >= 4096)
-        .unwrap_or(WALK_REACH[level])
+        .unwrap_or(dict_size)
         .min(dict_size);
     // MT parse is the low-step tier by design: workers price a bounded
     // candidate set from the shared row index instead of descending the BT4
@@ -930,7 +934,7 @@ fn mt_tail_is_incompressible(tail: &[u8]) -> bool {
 /// the cheap rung (+2.3% on the source tree, still 3.6x faster than sequential).
 /// MT-only, like the row-index parse whose level dial it is.
 #[cfg(feature = "parallel")]
-const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 64, 24, 64, 128, 384];
+const MT_ROW_INDEX_DEPTH: [usize; 6] = [0, 16, 32, 64, 128, 384];
 
 /// Highest level the walk parses. Every rung: the walk is what lets each level
 /// match the official's time for that level (measured at `-md32m -mt24`,
@@ -995,22 +999,14 @@ pub(crate) fn set_dp_tier(enabled: bool) {
     DP_TIER_FORCED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// How far back the walk's candidates may reach, by level (bytes). This is the
-/// dial the fast rungs spend their budget on: measured at the no-scan rung on
-/// the kernel image, 512 KB packs 6,434,014 B in 252 ms, 2 MB 6,287,387 in
-/// 266 ms and 8 MB 6,217,902 in 283 ms. The user picked the fastest point
-/// (1.07x the official's `-m3`), so the ladder stays at the narrow end and the
-/// rungs below `-m3` are narrower still; `RAR_RS_WALK_REACH` can widen `-m3` to
-/// 8 MB for 1.55 pp at ~30 ms.
+/// Whether `-m1` takes the preview shape (`RAR_RS_PREVIEW=1`, off by default).
+/// It is a measurement knob: the short tail it needs is unsafe on data whose
+/// redundancy is long-range.
 #[cfg(feature = "parallel")]
-const WALK_REACH: [usize; 6] = [
-    0,
-    128 * 1024,
-    256 * 1024,
-    512 * 1024,
-    2 * 1024 * 1024,
-    8 * 1024 * 1024,
-];
+fn preview_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAR_RS_PREVIEW").is_ok_and(|value| value != "0"))
+}
 
 /// Lazy lookahead cap for the `-m1` walk. Matches shorter than this are worth
 /// one extra probe of the next position: a match starting one byte later that
