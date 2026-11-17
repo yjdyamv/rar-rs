@@ -13,6 +13,7 @@ use super::*;
 use std::sync::atomic::Ordering;
 
 use super::emit::{encode_block, encode_empty_block};
+use super::FilterSpec;
 #[cfg(feature = "parallel")]
 use super::parse::find_matches_in_range;
 #[cfg(feature = "parallel")]
@@ -83,9 +84,17 @@ pub(crate) struct EncodeSpec<'a> {
     pub is_final: bool,
     /// RAR5 (64-entry) or RAR7/v70 (80-entry) distance table.
     pub variant: ArchiveVersion,
-    /// Filter records of a filtered member, prepended to the first chunk's
-    /// symbol stream (or slice's, under `parallel`).
-    pub lead: Option<&'a [Symbol]>,
+    /// Filter records of a filtered member, in the coordinate system of the
+    /// data buffer (member-absolute for whole-member calls, window-relative for
+    /// the streaming writer).
+    ///
+    /// A record for a late region must not be front-loaded: RARLAB readers
+    /// resolve `BlockStart` modulo the dictionary from the position produced so
+    /// far (`Filter.BlockStart=(BlockStart+UnpPtr)%MaxWinSize`), so a record
+    /// late region of a member larger than the dictionary describes a
+    /// different area than intended — the archive decodes without a structural
+    /// error and fails its CRC instead.
+    pub filter_records: &'a [FilterSpec],
 }
 
 /// One multi-threaded wave's fixed parameters: everything every worker slice of
@@ -108,9 +117,9 @@ struct MtJob<'a> {
     index: Option<&'a super::parse::RowIndex>,
     /// This slice carries the member's last block.
     is_last_block_of_member: bool,
-    /// Filter records of a filtered member, prepended to the first slice's
-    /// symbol stream so they precede all output (member-relative positions).
-    lead_symbols: Option<&'a [Symbol]>,
+    /// Filter records of this member, as absolute offsets: every slice emits
+    /// the records that start inside it (see [`slice_records`]).
+    records: &'a [FilterSpec],
     /// Seed the lookbehind even when its sampled windows look random. The
     /// incompressibility probe only measures whether the tail repeats *inside
     /// itself*, which says nothing about how the slice relates to bytes from an
@@ -216,18 +225,17 @@ pub fn encode_chunked_raw(
             chunk_size,
             is_final,
             variant,
-            lead: None,
+            filter_records: &[],
         },
         state,
         progress,
     )
 }
 
-/// Sequential variant of [`encode_chunked_raw`] that prepends `lead`
-/// symbols (filter records of a filtered member) to the first chunk's
-/// symbol stream, so the records are read before any block output. Used by
-/// the streaming writer for per-window delta filter records while keeping
-/// the persistent encoder state across chunks/windows.
+/// Sequential variant of [`encode_chunked_raw`] that carries the filter
+/// records of a streaming window. Used by the streaming writer, which hands
+/// over window-relative records while the persistent encoder state carries on
+/// across chunks and windows.
 pub(crate) fn encode_chunked_raw_with_lead(
     data: &[u8],
     spec: EncodeSpec<'_>,
@@ -253,7 +261,7 @@ fn encode_chunked_raw_inner(
         chunk_size,
         is_final,
         variant,
-        lead,
+        filter_records: records,
     } = spec;
     if data.is_empty() {
         return Ok(encode_empty_block(variant));
@@ -291,6 +299,9 @@ fn encode_chunked_raw_inner(
 
     let mut output = Vec::new();
     let mut chunk_start = 0usize;
+    // Cursor into `records`: they are sorted by `block_start`, so one pass
+    // over the chunks hands each record to the chunk that owns its region.
+    let mut spec_idx = 0usize;
     let mut next_report = 0u64;
 
     while chunk_start < data.len() {
@@ -333,14 +344,23 @@ fn encode_chunked_raw_inner(
             super::profile::add(super::profile::GREEDY, greedy_started);
             greedy
         };
-        // Filter records of a filtered member lead the first chunk's symbol
-        // stream (read before any output, member-relative positions).
-        if chunk_start == 0
-            && let Some(lead) = lead
-        {
-            let mut joined = lead.to_vec();
-            joined.append(&mut symbols);
-            symbols = joined;
+        // Filter records are emitted by the chunk that owns each region's
+        // start, as a delta from the chunk start (see
+        // [`EncodeSpec::filter_records`]).
+        let mut lead: Vec<Symbol> = Vec::new();
+        while spec_idx < records.len() && (records[spec_idx].block_start as usize) < chunk_end {
+            let f = &records[spec_idx];
+            lead.push(Symbol::Filter {
+                block_start: (f.block_start as usize).saturating_sub(chunk_start) as u32,
+                block_length: f.block_length,
+                filter_type: f.filter_type,
+                channels: f.channels,
+            });
+            spec_idx += 1;
+        }
+        if !lead.is_empty() {
+            lead.append(&mut symbols);
+            symbols = lead;
         }
 
         let emit_started = std::time::Instant::now();
@@ -431,7 +451,7 @@ pub fn encode_chunked_mt(
             chunk_size,
             is_final,
             variant,
-            lead: None,
+            filter_records: &[],
         },
         seed,
         threads,
@@ -456,9 +476,9 @@ pub fn encode_chunked_mt(
 /// the long-range history absorbs the whole window, and the repeat-distance
 /// cache resets. `progress` reports the input bytes covered once each wave
 /// of slices completes (waves run in order, so the reports are monotonic).
-/// `lead_symbols` are prepended to the first slice's symbol stream — the
-/// filter records of a filtered member, which must be read before any
-/// output (their positions are member-relative).
+/// `filter_records` carries the member's filter records in buffer coordinates;
+/// each chunk or slice emits the records that start inside it (see
+/// [`slice_records`] and [`EncodeSpec::filter_records`]).
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)] // data, spec, seed, threads, progress, cancel
 pub(crate) fn encode_chunked_mt_with_progress(
@@ -475,7 +495,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
         chunk_size,
         is_final,
         variant,
-        lead: lead_symbols,
+        filter_records: records,
     } = spec;
     let level = (method as usize).clamp(1, 5);
     let (chain_len, lazy_thresh, max_match) = LEVEL_PARAMS[level];
@@ -556,7 +576,17 @@ pub(crate) fn encode_chunked_mt_with_progress(
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|&value| value > 0)
             .unwrap_or(MT_MAX_SLICE);
-        let cs = caller.min(floored).min(cap).max(1);
+        // A filter record is emitted by the slice that owns its region start,
+        // and a reader resolves it modulo the window from the position it has
+        // produced — so under a small dictionary the slice has to fit inside
+        // the window (see [`EncodeSpec::filter_records`]). Unfiltered members
+        // keep the plain cap.
+        let window_cap = if records.is_empty() {
+            usize::MAX
+        } else {
+            (dict_size / 2).max(64 * 1024)
+        };
+        let cs = caller.min(floored).min(cap).min(window_cap).max(1);
         // Snap the slice count to a whole number of waves. `len / cs` usually
         // lands one past a multiple (13,917,568 / 289,949 = 48.0006 -> 49), and
         // that lone last slice costs a whole wave of wall time for 16 bytes of
@@ -696,7 +726,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
                                 depth: row_depth,
                                 index: Some(row_index_ref),
                                 is_last_block_of_member: is_final && k + 1 == n,
-                                lead_symbols: (k == 0).then_some(lead_symbols).flatten(),
+                                records,
                                 // Only the first slice sees chain history as its
                                 // lookbehind; later slices look into this window.
                                 force_seed_tail: k == 0 && !tail_ref.is_empty(),
@@ -735,12 +765,10 @@ pub(crate) fn encode_chunked_mt_with_progress(
         for (k, tokens) in collected.iter().enumerate() {
             let (mut symbols, _freqs) =
                 convert_tokens(tokens, data, bounds[k]..bounds[k + 1], &mut shared, variant);
-            if k == 0
-                && let Some(lead) = lead_symbols
-            {
-                let mut joined = lead.to_vec();
-                joined.append(&mut symbols);
-                symbols = joined;
+            let mut lead = slice_records(records, bounds[k], bounds[k + 1]);
+            if !lead.is_empty() {
+                lead.append(&mut symbols);
+                symbols = lead;
             }
             let mut bs = 0usize;
             while bs < symbols.len() {
@@ -979,6 +1007,31 @@ fn mt_slice_symbols_row_index(
     symbols
 }
 
+/// Filter records owned by one slice `[from, to)`, as deltas from the slice
+/// start — the position the reader has produced when it decodes the slice's
+/// first symbol.
+///
+/// Splitting this way keeps every record within one slice of the bytes it
+/// transforms, which the reader requires: it resolves `BlockStart` modulo the
+/// window from the current produced position, so front-loading the member's
+/// records at offset zero only works while the dictionary covers the member.
+#[cfg(feature = "parallel")]
+fn slice_records(records: &[FilterSpec], from: usize, to: usize) -> Vec<Symbol> {
+    records
+        .iter()
+        .filter(|f| {
+            let start = f.block_start as usize;
+            start >= from && start < to
+        })
+        .map(|f| Symbol::Filter {
+            block_start: (f.block_start as usize).saturating_sub(from) as u32,
+            block_length: f.block_length,
+            filter_type: f.filter_type,
+            channels: f.channels,
+        })
+        .collect()
+}
+
 /// Encode one worker slice `[s0, e0)` of [`encode_chunked_mt`].
 ///
 /// Each worker runs the MT low-step parse (hash-chain greedy+lazy over the
@@ -996,6 +1049,7 @@ fn encode_mt_slice(
     let MtSlice {
         data,
         s0,
+        e0,
         dict_size,
         variant,
         ..
@@ -1006,7 +1060,7 @@ fn encode_mt_slice(
         depth,
         index,
         is_last_block_of_member,
-        lead_symbols,
+        records,
         force_seed_tail,
         walk,
     } = *job;
@@ -1088,14 +1142,15 @@ fn encode_mt_slice(
         (None, _) => mt_slice_symbols_low_step(state, slice, chain_len, lazy_thresh, seed_tail),
     };
     if two_phase {
-        // The lead symbols belong to the member, not the slice: phase 2 emits
-        // them ahead of slice 0's stream (where they were prepended before).
+        // The records belong to the member, not the slice: phase 2 emits each
+        // slice's own records ahead of that slice's stream, where they now
+        // land at the position the reader has produced.
         return SliceOut::Tokens(tokens);
     }
-    if let Some(lead) = lead_symbols {
-        let mut joined = lead.to_vec();
-        joined.append(&mut symbols);
-        symbols = joined;
+    let mut lead = slice_records(records, s0, e0);
+    if !lead.is_empty() {
+        lead.append(&mut symbols);
+        symbols = lead;
     }
 
     let mut out = Vec::new();

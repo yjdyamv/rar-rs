@@ -38,7 +38,7 @@ pub(crate) use encode::{
     FILTER_PROBE_LEN, FilterProbe, filter_transform_wins, member_filter_probes,
 };
 pub(crate) use encoder::{
-    Symbol, best_combined_specs, delta_stream_window, forced_combined_specs,
+    best_combined_specs, delta_stream_window, forced_combined_specs,
     forced_combined_stream_window, merge_ranges, x86_stream_window,
 };
 // The shared match finder (`codec::common`) reports descent steps into the

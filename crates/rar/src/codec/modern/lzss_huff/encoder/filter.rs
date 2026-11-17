@@ -179,22 +179,38 @@ pub fn encode_with_filters_into(
     let dict_size = 128 * 1024 * (1usize << dict_size_log as u32);
     let long_range = level >= 2;
 
-    let mut filter_symbols: Vec<Symbol> = specs
-        .iter()
-        .map(|f| Symbol::Filter {
-            block_start: f.block_start,
-            block_length: f.block_length,
-            filter_type: f.filter_type,
-            channels: f.channels,
-        })
-        .collect();
     let mut output = Vec::new();
     let mut chunk_start = 0usize;
-    let mut first_chunk = true;
+    // Records are handed to the chunk that owns each region's start, as a
+    // delta from the chunk start: the reader resolves `BlockStart` modulo the
+    // window from the position it has produced, so a record must stay within
+    // one dictionary window of the data it describes. Front-loading the whole
+    // member only worked while the dictionary covered the whole member.
+    //
+    // That is also why the chunk shrinks under a small dictionary: the chunk is
+    // the granularity a record can be emitted at, so it has to fit inside the
+    // window. Unfiltered members keep the plain chunk bound.
+    let chunk_cap = if specs.is_empty() {
+        DEFAULT_CHUNK_SIZE
+    } else {
+        DEFAULT_CHUNK_SIZE.min((dict_size / 2).max(64 * 1024))
+    };
+    let mut spec_idx = 0usize;
     while chunk_start < transformed.len() {
-        let chunk_end = (chunk_start + DEFAULT_CHUNK_SIZE).min(transformed.len());
+        let chunk_end = (chunk_start + chunk_cap).min(transformed.len());
         let chunk = &transformed[chunk_start..chunk_end];
         let is_final = chunk_end >= transformed.len();
+        let mut lead: Vec<Symbol> = Vec::new();
+        while spec_idx < specs.len() && (specs[spec_idx].block_start as usize) < chunk_end {
+            let f = &specs[spec_idx];
+            lead.push(Symbol::Filter {
+                block_start: (f.block_start as usize).saturating_sub(chunk_start) as u32,
+                block_length: f.block_length,
+                filter_type: f.filter_type,
+                channels: f.channels,
+            });
+            spec_idx += 1;
+        }
         // Levels 2-5 use the optimal parse, like the unfiltered path.
         let mut symbols = if level >= 2 {
             find_matches_optimal(
@@ -225,14 +241,11 @@ pub fn encode_with_filters_into(
                 long_range,
             )
         };
-        // The filter records lead the first chunk's symbol stream so they
-        // are read before any output is produced (write_pos = the member
-        // start), keeping the recorded positions member-relative.
-        if first_chunk {
-            let mut filters = std::mem::take(&mut filter_symbols);
-            filters.append(&mut symbols);
-            symbols = filters;
-            first_chunk = false;
+        // The records lead their chunk's symbol stream, so they are read at
+        // the position that makes their delta correct.
+        if !lead.is_empty() {
+            lead.append(&mut symbols);
+            symbols = lead;
         }
 
         let emit_started = std::time::Instant::now();
@@ -312,15 +325,6 @@ pub fn encode_with_filters_continue(
         }
     }
     let transformed = forward_transform(data, &specs);
-    let lead: Vec<Symbol> = specs
-        .iter()
-        .map(|f| Symbol::Filter {
-            block_start: f.block_start,
-            block_length: f.block_length,
-            filter_type: f.filter_type,
-            channels: f.channels,
-        })
-        .collect();
     encode_chunked_mt_with_progress(
         &transformed,
         EncodeSpec {
@@ -329,7 +333,7 @@ pub fn encode_with_filters_continue(
             chunk_size: DEFAULT_CHUNK_SIZE,
             is_final: true,
             variant,
-            lead: Some(&lead),
+            filter_records: &specs,
         },
         state,
         threads,
@@ -439,11 +443,21 @@ pub(crate) fn solid_filter_specs(
 /// and multi-threaded filtered encoders.
 fn forward_transform(data: &[u8], specs: &[FilterSpec]) -> Vec<u8> {
     let mut transformed = data.to_vec();
+    let dump = std::env::var("RAR_RS_DUMP_SPECS").is_ok();
     for f in specs {
         let start = f.block_start as usize;
         let end = (start + f.block_length as usize).min(transformed.len());
         if start >= end {
             continue;
+        }
+        if dump {
+            eprintln!(
+                "SPEC type={} start={} len={} end={}",
+                f.filter_type,
+                start,
+                end - start,
+                end
+            );
         }
         let t = apply_filter_encode(
             f.filter_type,
@@ -521,15 +535,6 @@ pub fn encode_with_filters_mt(
         }
     }
     let transformed = forward_transform(data, &specs);
-    let lead: Vec<Symbol> = specs
-        .iter()
-        .map(|f| Symbol::Filter {
-            block_start: f.block_start,
-            block_length: f.block_length,
-            filter_type: f.filter_type,
-            channels: f.channels,
-        })
-        .collect();
     let mut state = EncoderState::default();
     encode_chunked_mt_with_progress(
         &transformed,
@@ -539,7 +544,7 @@ pub fn encode_with_filters_mt(
             chunk_size: DEFAULT_CHUNK_SIZE,
             is_final: true,
             variant,
-            lead: Some(&lead),
+            filter_records: &specs,
         },
         &mut state,
         threads,

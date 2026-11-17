@@ -242,9 +242,16 @@ fn filtered_member_roundtrips_with_multiple_regions() {
 /// The emitted-block policy has one owner: a filtered member must split into
 /// the same emitted blocks as the plain one. The filter here is a no-op (E8
 /// on data without 0xE8/0xE9), so the symbol streams are identical apart from
-/// the leading filter records, which the splitter ignores. Before the shared
+/// the filter records, which the splitter ignores. Before the shared
 /// `EMITTED_BLOCK_SIZE` the sequential filtered path capped blocks at 128 KiB
 /// and split this member ~40 ways instead of 2.
+///
+/// The dictionary is 16 MiB here on purpose: under a window smaller than the
+/// encoder chunk, a filtered member *must* cut shorter chunks so each filter
+/// record stays within one window of the data it describes
+/// (`filter_records_are_emitted_next_to_their_region` covers that case) —
+/// with a window this size the record placement costs the plain policy
+/// nothing, which is what this test pins.
 #[test]
 fn filtered_and_plain_pipelines_share_the_emitted_block_policy() {
     let data = vec![0x11u8; 5 * 1024 * 1024];
@@ -260,10 +267,10 @@ fn filtered_and_plain_pipelines_share_the_emitted_block_policy() {
         })
         .collect();
 
-    let plain = crate::codec::encode_raw(&data, 3, 3, ArchiveVersion::V50);
-    let filtered = encode_with_filters(&data, 3, 3, &specs, ArchiveVersion::V50).unwrap();
+    let plain = crate::codec::encode_raw(&data, 3, 7, ArchiveVersion::V50);
+    let filtered = encode_with_filters(&data, 3, 7, &specs, ArchiveVersion::V50).unwrap();
     let blocks = |packed: &[u8]| {
-        analyze_stream(packed, data.len() as u64, 3, ArchiveVersion::V50)
+        analyze_stream(packed, data.len() as u64, 7, ArchiveVersion::V50)
             .unwrap()
             .blocks
             .len()
@@ -588,4 +595,60 @@ fn row_index_collects_improving_runs_only() {
     let mut near_only = Vec::new();
     index.collect(&data, at, 32, 273, 32, &mut near_only);
     assert!(near_only.is_empty(), "{near_only:?}");
+}
+
+/// Under a dictionary smaller than the encoder chunk, a filtered member must
+/// cut shorter chunks: a filter record is emitted by the chunk that owns its
+/// region's start, and a reader resolves the record modulo the window from the
+/// position it has produced. Front-loading every record at offset 0 (what this
+/// encoder used to do) leaves records for late regions more than a window
+/// away from their data, so a RARLAB reader applies the transform somewhere
+/// else — the member decodes without a structural error and fails its CRC.
+///
+/// Pinned here because it is invisible to a self round trip: our decoder
+/// resolves the same way the encoder wrote, so only a foreign reader (or this
+/// layout assertion) can see the difference.
+#[test]
+fn filtered_chunks_fit_inside_a_small_dictionary() {
+    let data = vec![0x11u8; 3 * 1024 * 1024];
+    let specs = vec![FilterSpec::new(FILTER_E8, 0, 0, data.len() as u32)];
+    let dict_log = 3u8; // 1 MiB window, a quarter of the encoder chunk
+    let window = (128 * 1024usize) << dict_log;
+
+    let filtered = encode_with_filters(&data, 3, dict_log, &specs, ArchiveVersion::V50).unwrap();
+    let plain = crate::codec::encode_raw(&data, 3, dict_log, ArchiveVersion::V50);
+    let blocks = |packed: &[u8]| {
+        analyze_stream(packed, data.len() as u64, dict_log, ArchiveVersion::V50)
+            .unwrap()
+            .blocks
+            .len()
+    };
+
+    let chunk = crate::codec::modern::lzss_huff::encoder::DEFAULT_CHUNK_SIZE
+        .min((window / 2).max(64 * 1024));
+    assert_eq!(
+        blocks(&filtered),
+        data.len().div_ceil(chunk),
+        "a filtered member cuts chunks that fit inside the window"
+    );
+    assert!(
+        blocks(&filtered) > blocks(&plain),
+        "the plain member keeps the wider chunk bound"
+    );
+    assert_eq!(blocks(&plain), 1, "3 MiB runs in one plain chunk");
+
+    // Either way the member must still decode to the original bytes.
+    let mut out = Vec::new();
+    let written = decode_to_writer(
+        &filtered,
+        data.len() as u64,
+        DecodeOptions {
+            dict_size_log: dict_log,
+            ..Default::default()
+        },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(written as usize, data.len());
+    assert_eq!(out, data);
 }

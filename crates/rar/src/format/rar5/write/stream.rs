@@ -562,17 +562,20 @@ pub(super) fn add_file_streaming(
             if work.is_empty() {
                 return Ok(());
             }
-            let lead: Option<Vec<lzss_huff::Symbol>> = filter_specs.map(|specs| {
-                specs
-                    .iter()
-                    .map(|f| lzss_huff::Symbol::Filter {
-                        block_start: f.block_start - window_start as u32,
-                        block_length: f.block_length,
-                        filter_type: f.filter_type,
-                        channels: f.channels,
-                    })
-                    .collect()
-            });
+            // Filter records travel as window-relative offsets: the reader
+            // resolves them modulo the window from the position it has produced,
+            // which for this window is `window_start`.
+            let window_records: Vec<lzss_huff::FilterSpec> = filter_specs
+                .map(|specs| {
+                    specs
+                        .iter()
+                        .map(|f| lzss_huff::FilterSpec {
+                            block_start: f.block_start - window_start as u32,
+                            ..*f
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             #[cfg(not(feature = "parallel"))]
             let _ = threads;
             #[cfg(feature = "parallel")]
@@ -591,7 +594,7 @@ pub(super) fn add_file_streaming(
                         chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
                         is_final,
                         variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                        lead: lead.as_deref(),
+                        filter_records: &window_records,
                     },
                     state.get_or_insert_with(Default::default),
                     threads,
@@ -609,10 +612,21 @@ pub(super) fn add_file_streaming(
                     return Err(RarError::Cancelled);
                 }
                 let end = (offset + crate::codec::DEFAULT_CHUNK_SIZE).min(work.len());
-                // The filter records lead only the first chunk's symbol
-                // stream (read before any output; the decoder holds them
-                // pending until each region is produced).
-                let compressed = if offset == 0 && lead.is_some() {
+                // Records land in the chunk that owns each region's start, as a
+                // delta from that chunk's first produced byte (the reader holds
+                // them pending until the region arrives).
+                let chunk_records: Vec<lzss_huff::FilterSpec> = window_records
+                    .iter()
+                    .filter(|f| {
+                        let start = f.block_start as usize;
+                        start >= offset && start < end
+                    })
+                    .map(|f| lzss_huff::FilterSpec {
+                        block_start: (f.block_start as usize - offset) as u32,
+                        ..*f
+                    })
+                    .collect();
+                let compressed = if !chunk_records.is_empty() {
                     lzss_huff::encode_chunked_raw_with_lead(
                         &work[offset..end],
                         lzss_huff::EncodeSpec {
@@ -621,7 +635,7 @@ pub(super) fn add_file_streaming(
                             chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
                             is_final: is_final && end >= work.len(),
                             variant: crate::version::ArchiveVersion::from_v70(dict_bytes.is_some()),
-                            lead: lead.as_deref(),
+                            filter_records: &chunk_records,
                         },
                         state.as_mut(),
                         None,
