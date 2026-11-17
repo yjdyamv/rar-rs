@@ -406,6 +406,10 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 - [`compression-perf/`](docs/issues/compression-perf/) —
   04（窗口级不可压缩跳过）、 09（DLL 解析速度）、15（价格驱动解析），均对应上面
   「性能」段的清单项。
+- [`recovery/`](docs/issues/recovery/) —
+  [无恢复记录时的重建应原样搬块](docs/issues/recovery/verbatim-rebuild.md)：现在
+  是解压后 STORE，官方是搬块，所以体积、时间戳、属性都丢。设计已定、所需 API 已
+  核实，未开工。
 
 ## 一致拒绝（别"修"）
 
