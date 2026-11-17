@@ -2,6 +2,7 @@
 
 use std::io::{self, Read};
 
+use super::gf16::Gf16;
 use super::gf16::{encode_parity_shards_with_progress, make_encoder_matrix};
 use super::plan::{
     InlineRecoveryPlan, crc64_rar_state, crc64_xz, plan_inline_recovery, shard_block_range,
@@ -226,6 +227,18 @@ fn assemble_recovery_data(
     Ok(out)
 }
 
+/// `col * x` for every 16-bit symbol `x`, split into one table per byte: since
+/// multiplication is linear over XOR, `col * x == low[x & 0xff] ^ high[x >> 8]`.
+fn mul_tables(gf: &Gf16, col: u16) -> ([u16; 256], [u16; 256]) {
+    let mut low = [0u16; 256];
+    let mut high = [0u16; 256];
+    for x in 0..256usize {
+        low[x] = gf.mul(col, x as u16);
+        high[x] = gf.mul(col, (x as u16) << 8);
+    }
+    (low, high)
+}
+
 /// Read up to `buf.len()` bytes from `reader`, returning the count actually read
 /// (0 on a clean EOF). Like `read_exact` but tolerant of a short/empty tail so
 /// callers can pad the remainder with zeros instead of erroring.
@@ -301,15 +314,33 @@ pub(crate) fn build_structural_inline_recovery_data_streaming<R: Read>(
             let end = start.saturating_add(block_len).min(got);
             states[s] = crc64_rar_state(&buf[start..end]);
         }
-        for (j, row) in matrix.iter().enumerate() {
-            let col = row[s];
+        // The coefficient is fixed for the whole row, and multiplication is linear
+        // over XOR, so `col * symbol` splits into one table per byte of the
+        // symbol: `low[lo] ^ high[hi]`. The log/antilog pair that used to do this
+        // is 256 KiB and 512 KiB, so every symbol paid a cache miss; these two
+        // tables are 1 KiB and stay in L1. Rows are independent, which is what
+        // makes the shard's work splittable across the pool — the shard buffer is
+        // read-only, and each row is written by exactly one worker, so the output
+        // does not depend on the schedule.
+        let apply = |j: usize, parity: &mut [u8]| {
+            let (low, high) = mul_tables(gf, matrix[j][s]);
             for word_offset in (0..group_count).step_by(2) {
-                let data_symbol = u16::from_le_bytes([buf[word_offset], buf[word_offset + 1]]);
-                let symbol = gf.mul(col, data_symbol);
-                let bytes = symbol.to_le_bytes();
-                parity[j][word_offset] ^= bytes[0];
-                parity[j][word_offset + 1] ^= bytes[1];
+                let symbol = low[buf[word_offset] as usize] ^ high[buf[word_offset + 1] as usize];
+                parity[word_offset] ^= symbol as u8;
+                parity[word_offset + 1] ^= (symbol >> 8) as u8;
             }
+        };
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            parity
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(j, parity)| apply(j, parity));
+        }
+        #[cfg(not(feature = "parallel"))]
+        for (j, parity) in parity.iter_mut().enumerate() {
+            apply(j, parity);
         }
     }
 
