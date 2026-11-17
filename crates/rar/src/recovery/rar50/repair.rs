@@ -446,6 +446,9 @@ fn find_inline_recovery_chunks(input: &[u8]) -> Result<Vec<FoundInlineRecoveryCh
     // Distinguish "this archive carries no recovery record" from "a `{RB}`
     // marker is there but does not parse": the first is `NoRecoveryRecord`
     // (reported by the callers through `.first()`), the second is corruption.
+    // A *truncated* record is neither — the streaming path, which reads the
+    // chunk header's declared size before parsing, recognises that case and
+    // reports it as "no usable record" instead (see `stream.rs`).
     let mut saw_marker = false;
     while let Some(relative) = find_recovery_marker(&input[offset..]) {
         let start = offset + relative;

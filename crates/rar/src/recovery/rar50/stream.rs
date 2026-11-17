@@ -144,10 +144,13 @@ fn find_inline_recovery_chunks_in_file(
 ) -> Result<Vec<(u64, InlineRecoveryChunk, Vec<u8>)>> {
     const SCAN: usize = 64 * 1024;
     let mut found = Vec::new();
-    // `{RB}` seen but never parsed is corruption; no marker at all means the
-    // archive simply has no recovery record (the caller reports
-    // `NoRecoveryRecord`).
+    // A `{RB}` marker that yields no usable chunk is either a *truncated*
+    // record — its header is there but the bytes it declares run past the end of
+    // the file — or a corrupt one. The first is "nothing to repair with" and
+    // falls through to the rebuild path (WinRAR repairs such an archive too);
+    // the second stays corruption.
     let mut saw_marker = false;
+    let mut truncated = false;
     let mut skip_until = 0u64;
     let mut tail = [0u8; 3];
     let mut tail_len = 0usize;
@@ -191,13 +194,16 @@ fn find_inline_recovery_chunks_in_file(
                 };
                 if b1 == b'R' && b2 == b'B' && b3 == b'}' {
                     saw_marker = true;
-                    if let Some((abs, chunk, raw)) = try_parse_chunk_at(src, file_size, candidate)?
-                    {
-                        // Skip past this chunk's bytes (header + the parity it
-                        // carries, which is one 64 KiB block of a shard for all
-                        // but small archives).
-                        skip_until = abs.saturating_add(chunk.chunk_len());
-                        found.push((abs, chunk, raw));
+                    match try_parse_chunk_at(src, file_size, candidate)? {
+                        ChunkProbe::Parsed(abs, chunk, raw) => {
+                            // Skip past this chunk's bytes (header + the parity it
+                            // carries, which is one 64 KiB block of a shard for all
+                            // but small archives).
+                            skip_until = abs.saturating_add(chunk.chunk_len());
+                            found.push((abs, chunk, raw));
+                        }
+                        ChunkProbe::Truncated => truncated = true,
+                        ChunkProbe::Invalid => {}
                     }
                 }
                 // `try_parse_chunk_at` seeks the stream to probe a
@@ -216,39 +222,50 @@ fn find_inline_recovery_chunks_in_file(
         pos += n as u64;
         progress(pos, file_size);
     }
-    if found.is_empty() && saw_marker {
+    if found.is_empty() && saw_marker && !truncated {
         return Err(Error::BadRecoveryChunk);
     }
     Ok(found)
 }
 
-/// Attempt to parse a `{RB}` chunk at absolute offset `abs`; `None` for
-/// any structural/CRC violation.
+/// What a `{RB}` candidate offset turned out to hold.
+enum ChunkProbe {
+    /// A complete, valid recovery chunk.
+    Parsed(u64, InlineRecoveryChunk, Vec<u8>),
+    /// The chunk header is there but the bytes it declares run past the end of
+    /// the file: a truncated archive took the record's tail with it.
+    Truncated,
+    /// Not a usable chunk: no marker, or fields that do not validate.
+    Invalid,
+}
+
 fn try_parse_chunk_at(
     src: &mut File,
     file_size: u64,
     abs: u64,
-) -> Result<Option<(u64, InlineRecoveryChunk, Vec<u8>)>> {
+) -> Result<ChunkProbe> {
     if abs + 0x48 > file_size {
-        return Ok(None);
+        return Ok(ChunkProbe::Invalid);
     }
     src.seek(io::SeekFrom::Start(abs)).map_err(io_err)?;
     let mut hdr = vec![0u8; 0x48];
     src.read_exact(&mut hdr).map_err(io_err)?;
     if &hdr[..4] != b"{RB}" {
-        return Ok(None);
+        return Ok(ChunkProbe::Invalid);
     }
     let total_size = u32::from_le_bytes(hdr[0x0c..0x10].try_into().unwrap()) as u64;
     let header_size = u32::from_le_bytes(hdr[0x10..0x14].try_into().unwrap()) as u64;
-    if header_size < 0x48 || total_size < header_size || abs.saturating_add(total_size) > file_size
-    {
-        return Ok(None);
+    if header_size < 0x48 || total_size < header_size {
+        return Ok(ChunkProbe::Invalid);
+    }
+    if abs.saturating_add(total_size) > file_size {
+        return Ok(ChunkProbe::Truncated);
     }
     src.seek(io::SeekFrom::Start(abs)).map_err(io_err)?;
     let mut raw = vec![0u8; total_size as usize];
     src.read_exact(&mut raw).map_err(io_err)?;
     match parse_inline_recovery_chunk(&raw) {
-        Ok(chunk) => Ok(Some((abs, chunk, raw))),
-        Err(_) => Ok(None),
+        Ok(chunk) => Ok(ChunkProbe::Parsed(abs, chunk, raw)),
+        Err(_) => Ok(ChunkProbe::Invalid),
     }
 }
