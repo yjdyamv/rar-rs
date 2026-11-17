@@ -611,6 +611,59 @@ impl<'a> MatchFinder<'a> {
         self.head[h] = pos as i32;
     }
 
+    /// Insert `pos` and report the candidates there the way
+    /// `RowIndex::collect` does: one `(length, distance)` run per chain link
+    /// that beats the best length so far, nearest first, at most `depth` links
+    /// compared.
+    ///
+    /// [`find_match`](Self::find_match) only ever hands back the single best
+    /// match, which is enough for the greedy tiers but not for a walk that
+    /// trades a shorter near match against a longer far one. This is that same
+    /// chain walk with the frontier kept, and it is what lets a per-slice
+    /// chain stand in for the member-wide row index.
+    pub fn collect_candidates(
+        &mut self,
+        pos: usize,
+        max_distance: usize,
+        max_length: usize,
+        depth: usize,
+        out: &mut Vec<(u32, u32)>,
+    ) {
+        out.clear();
+        if pos + 3 >= self.size {
+            return;
+        }
+        let h = self.hash4(pos);
+        let mut candidate = self.head[h];
+        self.prev[pos & self.prev_mask] = candidate;
+        self.head[h] = pos as i32;
+
+        let data = self.data;
+        let limit = max_length.min(self.size - pos);
+        let reach = max_distance.min(self.window);
+        let mut best_length = 0usize;
+        let mut steps = depth;
+        while candidate >= 0 && steps > 0 {
+            let cand = candidate as usize;
+            let distance = pos - cand;
+            if distance == 0 || distance > reach {
+                break;
+            }
+            candidate = self.prev[cand & self.prev_mask];
+            steps -= 1;
+            if best_length == 0 || data[cand + best_length] == data[pos + best_length] {
+                let length = match_length(data, cand, pos, 0, limit);
+                if length >= 4 && length > best_length {
+                    out.push((length as u32, distance as u32));
+                    best_length = length;
+                    if length == limit {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /// Find the best match at `pos`. Returns (distance, length) or (0, 0).
     pub fn find_match(&mut self, pos: usize) -> (usize, usize) {
         if pos + self.min_match > self.size {

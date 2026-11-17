@@ -666,10 +666,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
     let lr_stage = std::time::Instant::now();
     let ((), row_index) = pool.join(
         || lr_shared.push(data),
-        || {
-            need_index
-                .then(|| super::parse::RowIndex::build_with_threads(data, n_workers))
-        },
+        || need_index.then(|| super::parse::RowIndex::build_with_threads(data, n_workers)),
     );
     if mt_clock {
         eprintln!(
@@ -1137,7 +1134,7 @@ fn encode_mt_slice(
     // the tail has no repeated windows anyway (no match into it would be
     // found), so the parse inserts the slice itself and queries the shared
     // long-range table instead.
-    let seed_tail = if force_seed_tail {
+    let seed_tail = if force_seed_tail || std::env::var("RAR_RS_FORCE_SEED").is_ok() {
         true
     } else {
         !mt_tail_is_incompressible(&state.tail)
@@ -1169,7 +1166,15 @@ fn encode_mt_slice(
         (Some(index), false) => {
             mt_slice_symbols_row_index(state, slice, index, depth, walk, None)
         }
-        (None, _) => mt_slice_symbols_low_step(state, slice, chain_len, lazy_thresh, seed_tail),
+        (None, _) => mt_slice_symbols_low_step(
+            state,
+            slice,
+            chain_len,
+            lazy_thresh,
+            seed_tail,
+            depth,
+            walk,
+        ),
     };
     if two_phase {
         // The records belong to the member, not the slice: phase 2 emits each
@@ -1213,6 +1218,8 @@ fn mt_slice_symbols_low_step(
     chain_len: usize,
     lazy_thresh: usize,
     seed_tail: bool,
+    depth: usize,
+    walk: bool,
 ) -> Vec<Symbol> {
     let MtSlice {
         data,
@@ -1223,7 +1230,7 @@ fn mt_slice_symbols_low_step(
         max_match,
         dict_size,
         long_range,
-        variant: _,
+        variant,
     } = slice;
     let tail_ctx = &state.tail;
     let tl = tail_ctx.len();
@@ -1238,6 +1245,10 @@ fn mt_slice_symbols_low_step(
     // level setting.
     const MT_LOW_STEP_CHAIN: usize = 16;
     let chain = chain_len.min(MT_LOW_STEP_CHAIN);
+    // The walk wants the same frontier of candidates the row index hands it,
+    // so it walks the chain to the level's depth rather than to the greedy
+    // tier's hard-capped budget.
+    let chain = if walk { depth.max(4) } else { chain };
     let parts = state.chain_parts.take();
     let mut finder = match parts {
         Some((head, prev)) => {
@@ -1249,6 +1260,36 @@ fn mt_slice_symbols_low_step(
         for pos in 0..tl {
             finder.insert(pos);
         }
+    }
+
+    if walk {
+        let mut dist_cache = [0u32; DIST_CACHE_SIZE];
+        let mut last_length = 0u32;
+        let mut inserted = tl;
+        let symbols = {
+            let finder_ref = &mut finder;
+            super::parse::windowed_walk_parse(
+                &combined,
+                tl..combined.len(),
+                &mut dist_cache,
+                &mut last_length,
+                super::parse::MatchLimits {
+                    max_match,
+                    window: dict_size,
+                    variant,
+                },
+                WALK_LAZY_MAX,
+                |pos, _cache, runs| {
+                    while inserted < pos {
+                        finder_ref.insert(inserted);
+                        inserted += 1;
+                    }
+                    finder_ref.collect_candidates(pos, dict_size.min(pos), max_match, depth, runs);
+                },
+            )
+        };
+        state.chain_parts = Some(finder.into_parts());
+        return symbols;
     }
 
     // Long-range candidates only beyond what the near chain covers.
