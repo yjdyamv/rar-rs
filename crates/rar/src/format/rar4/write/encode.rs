@@ -314,8 +314,10 @@ fn best_filter_candidate(
 /// Shared by the non-solid and solid paths so both search the same list in
 /// the same order; a tie keeps the earlier candidate because every comparison
 /// is a strict `<`. Auto mode keeps the scanner-gated search — text never
-/// produces x86 clusters or structured deltas — while forced modes run on the
-/// whole member.
+/// produces x86 clusters or structured deltas — while a forced mode runs on the
+/// whole member and *excludes the others*, the way WinRAR's `-mc` letters do.
+/// Before that exclusion `-mce+` still fell through to delta's auto branch and
+/// silently produced a delta member.
 fn rar29_filter_candidates(
     data: &[u8],
     policy: crate::options::FilterOptions,
@@ -324,47 +326,44 @@ fn rar29_filter_candidates(
     if data.is_empty() {
         return Vec::new();
     }
-    let mut candidates: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
+    let whole = || std::iter::once(0..data.len()).collect::<Vec<_>>();
     if policy.x86 == FilterMode::Forced {
-        candidates.push((
-            Rar29FilterKind::E8E9,
-            std::iter::once(0..data.len()).collect(),
-        ));
-    } else if policy.x86 == FilterMode::Auto {
-        let e8e9 = crate::codec::common::filters::auto_x86_filter_ranges(data, true);
-        if !e8e9.is_empty() {
-            candidates.push((Rar29FilterKind::E8E9, e8e9));
-        }
-        let e8 = crate::codec::common::filters::auto_x86_filter_ranges(data, false);
-        if !e8.is_empty() {
-            candidates.push((Rar29FilterKind::E8, e8));
-        }
+        return vec![(Rar29FilterKind::E8E9, whole())];
     }
     if policy.delta == FilterMode::Forced {
         let channels = policy.delta_channels.unwrap_or_else(|| {
             crate::codec::common::filters::auto_delta_filter_channels(data).unwrap_or(1)
         });
-        candidates.push((
+        return vec![(
             Rar29FilterKind::Delta {
                 channels: channels as usize,
             },
-            std::iter::once(0..data.len()).collect(),
-        ));
-    } else if policy.delta == FilterMode::Auto
+            whole(),
+        )];
+    }
+    let mut candidates: Vec<(Rar29FilterKind, Vec<std::ops::Range<usize>>)> = Vec::new();
+    if policy.x86 == FilterMode::Auto {
+        // The whole member, not the scanner's clusters: on a 13.9 MB kernel
+        // image at -m3 the scanner's ranges gained 169 KB over no filter while
+        // one whole-member E8E9 record gained 379 KB (6,664,846 against
+        // 6,874,775), and WinRAR's own gain on the same file is 455 KB. The
+        // probe in `best_filter_candidate` decides whether the member wants a
+        // filter at all, so data that cannot carry E8E9 (text, random) still
+        // ends up unfiltered.
+        candidates.push((Rar29FilterKind::E8E9, whole()));
+    }
+    if policy.delta == FilterMode::Auto
         && let Some(channels) = crate::codec::common::filters::auto_delta_filter_channels(data)
     {
         candidates.push((
             Rar29FilterKind::Delta {
                 channels: channels as usize,
             },
-            std::iter::once(0..data.len()).collect(),
+            whole(),
         ));
     }
     if let Some(channels) = crate::codec::common::filters::auto_audio_filter_channels(data) {
-        candidates.push((
-            Rar29FilterKind::Audio { channels },
-            std::iter::once(0..data.len()).collect(),
-        ));
+        candidates.push((Rar29FilterKind::Audio { channels }, whole()));
     }
     candidates
 }
