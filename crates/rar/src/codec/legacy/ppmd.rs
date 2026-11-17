@@ -472,6 +472,16 @@ pub struct PpmdDecoder {
     allocated: bool,
     max_contexts: usize,
     suballoc: Suballocator,
+    /// Counting probes, reported by `finish_keeping_model` under
+    /// `RAR_RS_MTTIME`. They separate algorithmic work (how many states get
+    /// examined per symbol) from the cost of the memory those states live in,
+    /// which is what decides whether the model wants a flatter layout or a
+    /// smaller one. Plain adds: a few cycles against a ~1600-cycle symbol.
+    probes: u64,
+    escapes: u64,
+    scanned: u64,
+    summed: u64,
+    swept: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -582,6 +592,11 @@ impl PpmdDecoder {
             allocated: false,
             max_contexts: MIN_MODEL_CONTEXTS,
             suballoc: Suballocator::default(),
+            probes: 0,
+            escapes: 0,
+            scanned: 0,
+            summed: 0,
+            swept: 0,
         }
     }
 
@@ -767,19 +782,23 @@ impl PpmdDecoder {
     /// code stream. Model updates (`update1_0`/`update1`/`update2`/
     /// `update_bin`/`update_see`/`add_see_summ`) are shared with decoding.
     fn encode_symbol(&mut self, symbol: u8, output: &mut RangeEncoder) -> Result<()> {
+        self.probes += 1;
         let mut mask = [true; 256];
         let min = self.min_context;
         if self.contexts[min].states.len() != 1 {
             let summ_freq = self.contexts[min].summ_freq as u32;
             let mut start = 0u32;
             let mut found = None;
+            let mut touches = 0u64;
             for (index, state) in self.contexts[min].states.iter().enumerate() {
+                touches += 1;
                 if state.symbol == symbol {
                     found = Some((index, start, state.freq as u32));
                     break;
                 }
                 start += state.freq as u32;
             }
+            self.scanned += touches;
             if let Some((index, start, size)) = found {
                 output.encode(start, size, summ_freq);
                 self.found_state = StateRef {
@@ -801,6 +820,8 @@ impl PpmdDecoder {
             self.prev_success = 0;
             output.encode(start, summ_freq - start, summ_freq);
             self.hi_bits_flag = hi_bits_flag(self.state(self.found_state)?.symbol, 3);
+            let width = self.contexts[min].states.len() as u64;
+            self.swept += width;
             for state in &self.contexts[min].states {
                 mask[state.symbol as usize] = false;
             }
@@ -829,6 +850,7 @@ impl PpmdDecoder {
         }
 
         loop {
+            self.escapes += 1;
             output.normalize();
             let mut mc = self.min_context;
             let num_masked = self.contexts[mc].states.len();
@@ -844,6 +866,8 @@ impl PpmdDecoder {
             }
             self.min_context = mc;
 
+            let width = self.contexts[mc].states.len() as u64;
+            self.summed += width;
             let hi_cnt = self.contexts[mc]
                 .states
                 .iter()
@@ -854,7 +878,9 @@ impl PpmdDecoder {
             let freq_sum = hi_cnt + esc_freq;
             let mut start = 0u32;
             let mut found = None;
+            let mut touches = 0u64;
             for (index, state) in self.contexts[mc].states.iter().enumerate() {
+                touches += 1;
                 if !mask[state.symbol as usize] {
                     continue;
                 }
@@ -865,6 +891,7 @@ impl PpmdDecoder {
                 }
                 start += freq;
             }
+            self.scanned += touches;
             if let Some((index, start, freq)) = found {
                 output.encode(start, freq, freq_sum);
                 self.update_see(see_ref);
@@ -875,6 +902,7 @@ impl PpmdDecoder {
             }
             output.encode(hi_cnt, freq_sum - hi_cnt, freq_sum);
             self.add_see_summ(see_ref, freq_sum);
+            self.swept += width;
             for state in &self.contexts[mc].states {
                 mask[state.symbol as usize] = false;
             }
@@ -1693,6 +1721,15 @@ impl PpmdEncoder {
                 states * std::mem::size_of::<State>(),
                 std::mem::size_of::<State>(),
                 std::mem::size_of::<Context>(),
+            );
+            eprintln!(
+                "MTTIME ppmd work probes={} escapes={} scanned={} summed={} swept={} touched={}",
+                self.model.probes,
+                self.model.escapes,
+                self.model.scanned,
+                self.model.summed,
+                self.model.swept,
+                self.model.scanned + self.model.summed + self.model.swept,
             );
         }
         Ok((self.range.finish(), self.model))
