@@ -859,13 +859,25 @@ fn encode_member_inner(
     previous_levels: &mut [u8; TABLE_COUNT],
     progress: Option<&mut dyn FnMut(usize) -> bool>,
 ) -> RarResult<Vec<u8>> {
+    let clock = std::env::var_os("RAR_RS_MTTIME").is_some();
+    let started = std::time::Instant::now();
     let analysis = analyze_block(input, history, initial_filters.len(), options, progress)?;
-    serialize_block(
+    let analyze_ms = started.elapsed().as_millis();
+    let encode_started = std::time::Instant::now();
+    let serialized = serialize_block(
         &analysis,
         initial_filters,
         more_blocks_follow,
         previous_levels,
-    )
+    );
+    if clock {
+        eprintln!(
+            "MTTIME rar29 block input={} analyze={analyze_ms}ms serialize={}ms",
+            input.len(),
+            encode_started.elapsed().as_millis()
+        );
+    }
+    serialized
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -898,7 +910,19 @@ fn encode_member_blocks(
 ) -> RarResult<Vec<u8>> {
     #[cfg(feature = "parallel")]
     if input.len() >= RAR29_PARALLEL_MEMBER_THRESHOLD {
+        if std::env::var_os("RAR_RS_MTTIME").is_some() {
+            eprintln!(
+                "MTTIME rar29 member input={} block={block_size} path=mt",
+                input.len()
+            );
+        }
         return encode_member_blocks_mt(input, history, options, block_size, levels, progress);
+    }
+    if std::env::var_os("RAR_RS_MTTIME").is_some() {
+        eprintln!(
+            "MTTIME rar29 member input={} block={block_size} path=serial",
+            input.len()
+        );
     }
     options.block_size = None;
     let mut out = Vec::new();
