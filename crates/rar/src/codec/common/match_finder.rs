@@ -632,6 +632,7 @@ impl<'a> MatchFinder<'a> {
     /// trades a shorter near match against a longer far one. This is that same
     /// chain walk with the frontier kept, and it is what lets a per-slice
     /// chain stand in for the member-wide row index.
+    #[cfg(feature = "parallel")]
     pub fn collect_candidates(
         &mut self,
         pos: usize,

@@ -1067,22 +1067,6 @@ pub(crate) fn set_dp_tier(enabled: bool) {
     DP_TIER_FORCED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Whether row-index slices also consult the shared sampled long-range table.
-///
-/// They do not *within one member*: `collect` limits its walk by
-/// `dict_size.min(pos)`, so the row index already reaches every byte of the
-/// dictionary window, and the sampled table only re-enumerates the same
-/// candidates more expensively. Measured on ntoskrnl (13.9 MB, -m3 -md32m) the
-/// table bought exactly zero bytes at both -mt1 and -mt24 while costing 0.7 s of
-/// the single-thread parse and 12% of the wall time.
-///
-/// It is still required in a solid chain, where the reach has to cross into the
-/// *previous members*: those bytes are not in `data` at all, so the row index
-/// cannot see them. `chunked::mt_slice_symbols_row_index` therefore keeps the
-/// table whenever the member continues a chain (`entry_len > 0`) and drops it
-/// for a standalone member, where it provably adds nothing.
-const LONG_RANGE_INSIDE_MEMBER: bool = false;
-
 /// How far one DP block spans in the MT row-index parse. The driver in
 /// `parse.rs` owns the number; this is the value it uses.
 ///
@@ -1166,7 +1150,7 @@ fn mt_slice_symbols_row_index(
     // in `data`: only the sampled table can see them. A standalone member needs
     // no table (the row index covers its whole window), which is worth ~12% of
     // the wall time on a 13.9 MB member.
-    let lr_q = if long_range && (entry_len > 0 || LONG_RANGE_INSIDE_MEMBER) {
+    let lr_q = if long_range && entry_len > 0 {
         // At `s0` the table owns `s0` bytes of history and one more per position
         // after that.
         Some((lr_shared, s0, entry_len + s0))
@@ -1261,7 +1245,7 @@ fn mt_slice_symbols_prev4(
     // A solid chain reaches back into earlier members, and those bytes are not
     // in `data`: only the sampled table can see them (the same probe
     // `mt_slice_symbols_row_index` makes).
-    let lr_q = if long_range && (entry_len > 0 || LONG_RANGE_INSIDE_MEMBER) {
+    let lr_q = if long_range && entry_len > 0 {
         Some((lr_shared, s0, entry_len + s0))
     } else {
         None
