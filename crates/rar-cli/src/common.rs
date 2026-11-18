@@ -498,6 +498,38 @@ pub struct MiscSwitches {
         overrides_with = "list_files"
     )]
     pub list_files: Option<String>,
+    /// Exclude mask (repeatable, like `-x<mask>`); global, as in WinRAR
+    #[arg(
+        global = true,
+        long = "exclude",
+        value_name = "MASK",
+        action = clap::ArgAction::Append
+    )]
+    pub exclude_masks: Vec<String>,
+    /// Include mask (repeatable, like `-n<mask>`); global, as in WinRAR
+    #[arg(
+        global = true,
+        long = "include",
+        value_name = "MASK",
+        action = clap::ArgAction::Append
+    )]
+    pub include_masks: Vec<String>,
+    /// Exclude masks read from a list file (repeatable, like `-x@listfile`)
+    #[arg(
+        global = true,
+        long = "exclude-list",
+        value_name = "FILE",
+        action = clap::ArgAction::Append
+    )]
+    pub exclude_list_files: Vec<String>,
+    /// Include masks read from a list file (repeatable, like `-n@listfile`)
+    #[arg(
+        global = true,
+        long = "include-list",
+        value_name = "FILE",
+        action = clap::ArgAction::Append
+    )]
+    pub include_list_files: Vec<String>,
     /// Allow potentially incompatible names (`-oni`; Windows-only)
     #[arg(global = true, long = "allow-names")]
     #[allow(dead_code)]

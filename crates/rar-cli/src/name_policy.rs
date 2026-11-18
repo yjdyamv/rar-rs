@@ -215,6 +215,19 @@ pub(crate) fn is_link_like(path: &Path) -> bool {
     false
 }
 
+/// Whether an archive member passes the extraction `-n` / `-x` masks.
+///
+/// WinRAR applies both to the member path as stored: a member is kept when it
+/// matches an include mask (or none were given) and matches no exclude mask.
+/// These switches were previously only consulted when collecting *input* files,
+/// so `x -x<mask>` extracted everything (verified against 7.23).
+pub fn member_matches(name: &str, include: &[String], exclude: &[String]) -> bool {
+    let rel = arg_to_name(name);
+    let included = include.is_empty() || include.iter().any(|mask| mask_match(mask, &rel));
+    let excluded = exclude.iter().any(|mask| mask_match(mask, &rel));
+    included && !excluded
+}
+
 /// Add a file or directory tree honoring the name/filter policy.
 #[allow(clippy::too_many_arguments)]
 fn add_with_policy(

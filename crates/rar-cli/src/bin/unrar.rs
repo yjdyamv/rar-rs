@@ -11,6 +11,9 @@ mod error;
 mod input;
 #[path = "../listfile.rs"]
 mod listfile;
+#[path = "../name_policy.rs"]
+#[allow(dead_code)] // only `member_matches` is reached from this binary
+mod name_policy;
 #[path = "../ops.rs"]
 mod ops;
 #[path = "../output.rs"]
@@ -444,6 +447,8 @@ fn cmd_extract(
     let limits = size_limits(args)?;
     let request = ops::ExtractRequest {
         names,
+        include_masks: misc.include_masks.clone(),
+        exclude_masks: misc.exclude_masks.clone(),
         dest,
         flat: args.flat,
         stdout: args.stdout,
@@ -500,6 +505,8 @@ fn cmd_extract_flat(
     let limits = size_limits(args)?;
     let request = ops::ExtractRequest {
         names,
+        include_masks: misc.include_masks.clone(),
+        exclude_masks: misc.exclude_masks.clone(),
         dest,
         flat: true,
         stdout: args.stdout,

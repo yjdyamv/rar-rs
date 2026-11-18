@@ -27,6 +27,16 @@ fn size_limits(args: &ExtractArgs) -> Result<ops::ExtractLimits, String> {
     .validate()
 }
 
+/// Inline `-n`/`-x` masks plus the ones read from their `@list` files, which
+/// WinRAR treats as one combined set.
+fn masks_with_files(inline: &[String], files: &[String]) -> CliResult<Vec<String>> {
+    let mut masks = inline.to_vec();
+    for file in files {
+        masks.extend(crate::filters::read_mask_file(file).map_err(error::CliError::from)?);
+    }
+    Ok(masks)
+}
+
 /// Extract with full paths (like `rar x`).
 pub(crate) fn cmd_extract(
     args: &ExtractArgs,
@@ -39,6 +49,8 @@ pub(crate) fn cmd_extract(
     let (names, dest) = resolve_target(args, misc)?;
     let request = ops::ExtractRequest {
         names,
+        include_masks: masks_with_files(&misc.include_masks, &misc.include_list_files)?,
+        exclude_masks: masks_with_files(&misc.exclude_masks, &misc.exclude_list_files)?,
         dest,
         stdout: args.stdout,
         threads: args.threads,
@@ -137,8 +149,12 @@ pub(crate) fn cmd_extract_flat(
     let limits = size_limits(args)?;
     let ts = crate::time::parse_ts_specs(&args.ts_specs)?;
     let (names, dest) = resolve_target(args, misc)?;
+    let include_masks = masks_with_files(&misc.include_masks, &misc.include_list_files)?;
+    let exclude_masks = masks_with_files(&misc.exclude_masks, &misc.exclude_list_files)?;
     let request = ops::ExtractRequest {
         names,
+        include_masks,
+        exclude_masks,
         dest,
         flat: true,
         stdout: args.stdout,

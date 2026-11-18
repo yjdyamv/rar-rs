@@ -561,18 +561,6 @@ pub(crate) struct CreateArgs {
     /// Prefix for stored names
     #[arg(long = "archive-path", value_name = "PATH")]
     pub(crate) path_prefix: Option<String>,
-    /// Exclude mask (repeatable)
-    #[arg(long = "exclude", value_name = "MASK", action = clap::ArgAction::Append)]
-    pub(crate) exclude_masks: Vec<String>,
-    /// Include mask (repeatable)
-    #[arg(long = "include", value_name = "MASK", action = clap::ArgAction::Append)]
-    pub(crate) include_masks: Vec<String>,
-    /// Exclude masks read from a list file (repeatable, like `-x@listfile`)
-    #[arg(long = "exclude-list", value_name = "FILE", action = clap::ArgAction::Append)]
-    pub(crate) exclude_list_files: Vec<String>,
-    /// Include masks read from a list file (repeatable, like `-n@listfile`)
-    #[arg(long = "include-list", value_name = "FILE", action = clap::ArgAction::Append)]
-    pub(crate) include_list_files: Vec<String>,
     /// Only process files modified after this date (like `-ta<date>`,
     /// YYYYMMDDHHMMSS, trailing parts optional)
     #[arg(long = "after", value_name = "DATE")]

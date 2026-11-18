@@ -881,6 +881,10 @@ pub enum VersionSelection {
 pub struct ExtractRequest {
     /// Members to extract (empty = every entry).
     pub names: Vec<String>,
+    /// `-n<mask>` / `-n@<list>` masks: keep only members matching one.
+    pub include_masks: Vec<String>,
+    /// `-x<mask>` / `-x@<list>` masks: drop members matching one.
+    pub exclude_masks: Vec<String>,
     /// Destination directory (unused by the stdout mode).
     pub dest: PathBuf,
     /// Flat extraction (basename only, like `e`).
@@ -1018,7 +1022,15 @@ pub fn extract(
             })));
         }
     }
-    let report = extract_members(rar, &request.dest, &request.names, options, request.version)?;
+    let report = extract_members(
+        rar,
+        &request.dest,
+        &request.names,
+        &request.include_masks,
+        &request.exclude_masks,
+        options,
+        request.version,
+    )?;
     Ok(Some(report))
 }
 
@@ -1053,6 +1065,8 @@ fn extract_members(
     rar: &mut ArchiveReader,
     dest: &Path,
     names: &[String],
+    include_masks: &[String],
+    exclude_masks: &[String],
     options: ExtractOptions,
     version: VersionSelection,
 ) -> CliResult<ExtractionReport> {
@@ -1100,6 +1114,28 @@ fn extract_members(
             ));
         }
         wanted
+    };
+
+    // `-n` / `-x` and their `@list` forms filter the *selected* members by the
+    // path as stored, which is what WinRAR does; before this every mask was
+    // ignored on extraction (verified against 7.23).
+    let wanted: Vec<EntryId> = if include_masks.is_empty() && exclude_masks.is_empty() {
+        wanted
+    } else {
+        let mut kept = Vec::with_capacity(wanted.len());
+        for id in wanted {
+            let Some(entry) = rar.entries().find(|entry| entry.id() == id) else {
+                continue;
+            };
+            if crate::name_policy::member_matches(
+                entry.metadata().name(),
+                include_masks,
+                exclude_masks,
+            ) {
+                kept.push(id);
+            }
+        }
+        kept
     };
 
     let report = rar

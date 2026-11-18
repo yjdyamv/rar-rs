@@ -279,12 +279,12 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // is created just before the first add. This also keeps `-oi3`/`-oi4`
     // (identical-file listings) from creating an archive at all.
 
-    let mut include_masks = args.include_masks.clone();
-    let mut exclude_masks = args.exclude_masks.clone();
-    for file in &args.include_list_files {
+    let mut include_masks = misc.include_masks.clone();
+    let mut exclude_masks = misc.exclude_masks.clone();
+    for file in &misc.include_list_files {
         include_masks.extend(read_mask_file(file)?);
     }
-    for file in &args.exclude_list_files {
+    for file in &misc.exclude_list_files {
         exclude_masks.extend(read_mask_file(file)?);
     }
     let policy = crate::name_policy::NamePolicy {
