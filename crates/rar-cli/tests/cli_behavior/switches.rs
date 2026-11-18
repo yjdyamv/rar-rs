@@ -2133,3 +2133,105 @@ fn cli_library_error_categories_reach_the_exit_code() {
         "c on a locked archive must be exit 4"
     );
 }
+
+// ── Coverage gaps: -op, -ag, @list files ───────────────────────────────────
+
+/// `-op<path>` overrides the extraction base and creates it when missing. The
+/// three switches below had no end-to-end test: `-op` had none at all, `-ag` was
+/// only covered as a unit test of its formatter, and `@list` files were reached
+/// through a single call site.
+#[test]
+fn cli_output_path_overrides_the_extraction_base() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"alpha").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"beta").unwrap();
+    let archive = dir.path().join("op.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .args(["a.txt", "b.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = dir.path().join("chosen");
+    assert!(!out.exists(), "the output directory must not exist yet");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-y", "-idq"])
+        .arg(format!("-op{}", out.display()))
+        .arg(&archive)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"alpha");
+    assert_eq!(std::fs::read(out.join("b.txt")).unwrap(), b"beta");
+    assert!(
+        !dir.path().join("a.txt.1").exists(),
+        "members must not also land in the working directory"
+    );
+}
+
+#[test]
+fn cli_auto_name_stamps_the_archive_name() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"alpha").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq", "-agYYYYMMDD", "stamped.rar", "a.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let created: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("stamped") && name.ends_with(".rar"))
+        .collect();
+    assert_eq!(created.len(), 1, "one stamped archive, got {created:?}");
+    let stamp = &created[0]["stamped".len()..created[0].len() - ".rar".len()];
+    assert_eq!(stamp.len(), 8, "YYYYMMDD stamp in {}", created[0]);
+    assert!(stamp.chars().all(|c| c.is_ascii_digit()), "{}", created[0]);
+}
+
+#[test]
+#[ignore = "x@ / n@ list files are honoured on create but ignored on extraction; \
+            WinRAR applies them (verified against 7.23)"]
+fn cli_list_file_expands_exclusions() {
+    let dir = make_temp_dir();
+    for name in ["keep.txt", "drop.txt", "other.log"] {
+        std::fs::write(dir.path().join(name), b"data").unwrap();
+    }
+    let archive = dir.path().join("list.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .args(["keep.txt", "drop.txt", "other.log"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // CRLF line endings and a blank line, which a list written on Windows (or
+    // hand-edited) will contain.
+    let excludes = dir.path().join("excl.txt");
+    std::fs::write(&excludes, "drop.txt\r\n\r\n*.log\r\n").unwrap();
+    let out = dir.path().join("excluded");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-y", "-idq"])
+        .arg(format!("-x@{}", excludes.display()))
+        .arg(format!("-op{}", out.display()))
+        .arg(&archive)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(out.join("keep.txt").exists(), "keep.txt must be extracted");
+    assert!(!out.join("drop.txt").exists(), "drop.txt excluded by name");
+    assert!(
+        !out.join("other.log").exists(),
+        "other.log excluded by mask"
+    );
+}
