@@ -2173,6 +2173,60 @@ fn cli_output_path_overrides_the_extraction_base() {
     );
 }
 
+/// Two halves of the same pipeline, `common::switches_after_command`.
+///
+/// `drop_undeclared` keeps root globals plus the options the *invoked*
+/// subcommand declares, and drops everything else. A declared option that
+/// stops surviving there disappears silently - no clap error, no output
+/// difference except the missing effect - which is what hid `x --exclude=…`
+/// for so long (it was only ever declared on `ExtractArgs`, and declaring it
+/// there did not reach the command). Both spellings of the command must
+/// therefore behave identically, and the leniency WinRAR shows toward
+/// switches it does not know must stay deliberate, not accidental.
+#[test]
+fn cli_alias_and_unknown_switches_resolve_like_winrar() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"alpha").unwrap();
+    let archive = dir.path().join("a.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // `--stdout` (like `-so`) is declared only on the extract subcommands.
+    for command in ["x", "extract"] {
+        let out = std::process::Command::new(RAR_CLI)
+            .args([command, "-y", "--stdout"])
+            .arg(&archive)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{command} --stdout failed");
+        assert!(
+            out.stdout.windows(5).any(|window| window == b"alpha"),
+            "{command} --stdout must print the member instead of writing it"
+        );
+    }
+
+    // `rar x -zzz a.rar` extracts and exits 0 in WinRAR 7.23; keep that.
+    for command in ["x", "extract"] {
+        let out = dir.path().join(format!("out-{command}"));
+        let status = std::process::Command::new(RAR_CLI)
+            .args([command, "-y", "-idq", "-zzz"])
+            .arg(format!("-op{}", out.display()))
+            .arg(&archive)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{command} -zzz must be ignored");
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"alpha");
+    }
+}
+
 #[test]
 fn cli_auto_name_stamps_the_archive_name() {
     let dir = make_temp_dir();
