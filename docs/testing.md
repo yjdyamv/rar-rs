@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-10-20 @ working tree; every timing number here is a
+> Last verified: 2026-11-18 @ working tree; every timing number here is a
 > host-specific snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing
@@ -62,6 +62,20 @@ itself. Everything under "Running" above (including the interop suites and the
 ignored codec matrix) is still yours to run before tagging a release. The Linux
 half in one command: `bash scripts/wsl/ci-linux.sh` (WSL2 — it _is_ the Linux
 test gate now).
+
+The **static** checks the same job runs — fmt, the host-path guard, the
+wasm-target `cargo check`, clippy over every `rar-rs` feature combination,
+rustdoc, the `cargo deny` gate and the hermetic JS test — are not part of
+`cargo test --workspace`. Run them (and the job's test targets) in one command:
+
+```sh
+scripts/ci-lint.sh              # static checks + the lint job's test targets
+scripts/ci-lint.sh --no-tests   # static checks only (fast)
+```
+
+It mirrors the `lint` job (`.github/workflows/CI.yml` is the source of truth)
+and runs on Linux, macOS and Windows Git Bash, skipping the `cargo deny` and
+node steps when those tools are absent.
 
 ## The other two platforms
 
