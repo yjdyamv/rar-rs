@@ -280,6 +280,7 @@ impl LongRange {
     /// derives the absolute offset of `hist[0]` as `total_pushed - hist.len()`,
     /// which only holds while the retained bytes are the most recent ones
     /// overall.
+    #[cfg(feature = "parallel")]
     pub(crate) fn skip(&mut self, len: usize) {
         self.total_pushed += len;
     }

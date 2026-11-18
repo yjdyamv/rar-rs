@@ -1174,6 +1174,7 @@ fn length_bonus(distance: u32) -> u32 {
 /// say the shipped one is too permissive at long range (on 9,251,209 B of
 /// markdown we encode 9k more matches beyond 4 KiB than the official does and end
 /// up 34 KiB larger).
+#[cfg(feature = "parallel")]
 fn len_bonus_tiers(distance: u32) -> u32 {
     match len_bonus_ladder() {
         1 => {
@@ -1198,6 +1199,7 @@ fn len_bonus_tiers(distance: u32) -> u32 {
 }
 
 /// Which [`len_bonus_tiers`] ladder to use (`RAR_RS_LEN_BONUS`, 0 = shipped).
+#[cfg(feature = "parallel")]
 fn len_bonus_ladder() -> u32 {
     static LADDER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *LADDER.get_or_init(|| {
