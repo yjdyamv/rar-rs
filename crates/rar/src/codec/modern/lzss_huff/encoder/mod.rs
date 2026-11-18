@@ -27,8 +27,11 @@ pub(crate) use chunked::EncodeSpec;
 #[cfg(feature = "parallel")]
 pub(crate) use chunked::encode_chunked_mt_with_progress;
 pub(crate) use chunked::encode_chunked_raw_with_lead;
+#[cfg(all(test, feature = "parallel"))]
+pub(crate) use chunked::set_dp_tier;
 pub use chunked::{
-    DEFAULT_CHUNK_SIZE, MT_MIN_MEMBER_SIZE, encode_chunked_mt, encode_chunked_raw, encode_raw, encode_with_progress_raw,
+    DEFAULT_CHUNK_SIZE, MT_MIN_MEMBER_SIZE, encode_chunked_mt, encode_chunked_raw, encode_raw,
+    encode_with_progress_raw,
 };
 pub use filter::{
     FILTER_PROBE_LEN, FilterProbe, MAX_FILTER_BLOCK_LENGTH, best_combined_specs,
@@ -42,8 +45,6 @@ pub(crate) use filter::{
 };
 #[cfg(test)]
 pub(crate) use parse::set_fast_path_enabled;
-#[cfg(all(test, feature = "parallel"))]
-pub(crate) use chunked::set_dp_tier;
 #[cfg(all(test, feature = "parallel"))]
 pub(crate) use parse::set_price_carry_enabled;
 

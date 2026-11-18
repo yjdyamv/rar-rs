@@ -139,6 +139,7 @@ fn io_err(e: io::Error) -> Error {
 /// Scan a file for valid `{RB}` recovery chunks, returning their
 /// absolute offsets, parsed chunks and exact raw bytes. Streaming with
 /// bounded reads; markers inside a validated chunk are skipped.
+#[allow(clippy::type_complexity)]
 fn find_inline_recovery_chunks_in_file(
     src: &mut File,
     file_size: u64,
@@ -242,11 +243,7 @@ enum ChunkProbe {
     Invalid,
 }
 
-fn try_parse_chunk_at(
-    src: &mut File,
-    file_size: u64,
-    abs: u64,
-) -> Result<ChunkProbe> {
+fn try_parse_chunk_at(src: &mut File, file_size: u64, abs: u64) -> Result<ChunkProbe> {
     if abs + 0x48 > file_size {
         return Ok(ChunkProbe::Invalid);
     }

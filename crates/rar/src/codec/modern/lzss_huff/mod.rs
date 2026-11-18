@@ -28,8 +28,7 @@ pub(crate) use encode::set_price_carry_enabled;
 pub(crate) use encode::solid_filter_specs;
 pub use encode::{
     DEFAULT_CHUNK_SIZE, EncodeOptions, EncoderState, FilterSpec, MAX_FILTER_BLOCK_LENGTH,
-    MT_MIN_MEMBER_SIZE, encode,
-    encode_chunked, encode_chunked_mt, encode_chunked_raw, encode_raw,
+    MT_MIN_MEMBER_SIZE, encode, encode_chunked, encode_chunked_mt, encode_chunked_raw, encode_raw,
     encode_with_auto_delta_filter, encode_with_auto_x86_filter, encode_with_filters,
     encode_with_filters_continue, encode_with_filters_mt, encode_with_progress_raw,
     pick_delta_channel,
@@ -40,8 +39,8 @@ pub(crate) use encode::{
 #[cfg(all(test, feature = "parallel"))]
 pub(crate) use encoder::set_dp_tier;
 pub(crate) use encoder::{
-    best_combined_specs, delta_stream_window, forced_combined_specs,
-    forced_combined_stream_window, merge_ranges, x86_stream_window,
+    best_combined_specs, delta_stream_window, forced_combined_specs, forced_combined_stream_window,
+    merge_ranges, x86_stream_window,
 };
 // The shared match finder (`codec::common`) reports descent steps into the
 // encoder's profile counters; it reads the same switch the phases do.

@@ -20,8 +20,8 @@ use crate::codec::common::bitstream::BitWriter;
 use crate::codec::common::huffman::EncodeTable;
 use crate::codec::common::match_finder::MatchFinder;
 use crate::codec::legacy::encode_core::{
-    self, LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, LevelAlphabet, LevelToken,
-    SHORT_BASES, SHORT_BITS, match_length_adjustment, push_old_offset,
+    self, LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, LevelAlphabet, LevelToken, SHORT_BASES,
+    SHORT_BITS, match_length_adjustment, push_old_offset,
 };
 use crate::codec::legacy::ppmd::PpmdEncoder;
 use crate::codec::lzss_huff::DIST_CACHE_SIZE;
@@ -539,13 +539,16 @@ fn encode_tokens_with_progress(
 // thread instead; the epoch in `MatchFinder::reuse` is what makes that safe
 // without a clear.
 #[cfg(feature = "parallel")]
+type FinderParts = (Vec<i32>, Vec<i32>, i32);
+
+#[cfg(feature = "parallel")]
 thread_local! {
-    static FINDER_PARTS: std::cell::RefCell<Option<(Vec<i32>, Vec<i32>, i32)>> =
+    static FINDER_PARTS: std::cell::RefCell<Option<FinderParts>> =
         const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(feature = "parallel")]
-fn finder_parts_take() -> Option<(Vec<i32>, Vec<i32>, i32)> {
+fn finder_parts_take() -> Option<FinderParts> {
     FINDER_PARTS.with(|parts| parts.borrow_mut().take())
 }
 
@@ -627,10 +630,7 @@ fn tokenize(
             // short form here would leave this state out of step with the
             // stream the parser goes on to choose against.
             let offset = pos - (pair_previous as usize - 1);
-            if matches!(
-                state.encode_match(2, offset)?,
-                EncodedMatch::Short { .. }
-            ) {
+            if matches!(state.encode_match(2, offset)?, EncodedMatch::Short { .. }) {
                 state.remember_short(offset);
             } else {
                 state.remember(2, offset);

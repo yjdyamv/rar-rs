@@ -798,10 +798,8 @@ impl Rar29Decoder {
     /// concern.
     fn validate_member_filters(&self, member_start: usize, member_end: usize) -> Res<()> {
         if std::env::var_os("RAR_RS_MTTIME").is_some() {
-            let matches = self.stat_last_len
-                + self.stat_repeat_offset
-                + self.stat_short
-                + self.stat_fresh;
+            let matches =
+                self.stat_last_len + self.stat_repeat_offset + self.stat_short + self.stat_fresh;
             eprintln!(
                 "MTTIME rar29 tokens literals={} last_len={} repeat_off={} short={} fresh={} filters={} matched={} out={} matches={} avg_len={:.2} literal_share={:.3}",
                 self.stat_literals,

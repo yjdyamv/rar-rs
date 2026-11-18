@@ -12,8 +12,8 @@ use super::*;
 #[cfg(feature = "parallel")]
 use std::sync::atomic::Ordering;
 
-use super::emit::{encode_block, encode_empty_block};
 use super::FilterSpec;
+use super::emit::{encode_block, encode_empty_block};
 #[cfg(feature = "parallel")]
 use super::parse::find_matches_in_range;
 #[cfg(feature = "parallel")]
@@ -589,7 +589,7 @@ pub(crate) fn encode_chunked_mt_with_progress(
         // 256 KiB was slower than 512 KiB on the 1 GB member (64.6 s) for the
         // same size, and it starts to bite on 13.9 MB members (slices are
         // ~580 KiB there), so 512 KiB is the cap. `-m0` floor for the 202 MB
-        // member is 345 ms, i.e. this is all parse. 
+        // member is 345 ms, i.e. this is all parse.
         let cap = std::env::var("RAR_RS_MT_MAX_SLICE")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
@@ -1208,7 +1208,9 @@ fn mt_slice_symbols_row_index(
             },
             lr_q,
             defer,
-            |pos, _cache, runs| index.collect(data, pos, dict_size.min(pos), max_match, depth, runs),
+            |pos, _cache, runs| {
+                index.collect(data, pos, dict_size.min(pos), max_match, depth, runs)
+            },
         )
     };
     state.dist_cache = dist_cache;
@@ -1425,9 +1427,9 @@ fn encode_mt_slice(
             walk,
             Some(&mut tokens),
         ),
-        (Some(index), _, false) => mt_slice_symbols_row_index(
-            state, slice, index, depth, reach, walk_lazy, walk, None,
-        ),
+        (Some(index), _, false) => {
+            mt_slice_symbols_row_index(state, slice, index, depth, reach, walk_lazy, walk, None)
+        }
         (None, Some(prev4), false) => {
             mt_slice_symbols_prev4(state, slice, prev4, depth, reach, walk_lazy)
         }
@@ -1520,14 +1522,7 @@ fn mt_slice_symbols_low_step(
     let parts = state.chain_parts.take();
     let mut finder = match parts {
         Some((head, prev, base)) => match_finder::MatchFinder::reuse(
-            &combined,
-            2,
-            max_match,
-            chain,
-            dict_size,
-            head,
-            prev,
-            base,
+            &combined, 2, max_match, chain, dict_size, head, prev, base,
         ),
         None => match_finder::MatchFinder::new(&combined, 2, max_match, chain, dict_size),
     };

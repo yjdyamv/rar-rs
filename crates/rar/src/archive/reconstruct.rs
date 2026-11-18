@@ -254,7 +254,8 @@ fn rebuild_verbatim(
     let (header, _, _) = build_main_header(flags, &extra, false, false, None, 8);
     {
         let mut out = std::fs::File::create(dst).map_err(crate::error::RarError::Io)?;
-        out.write_all(RAR5_SIGNATURE).map_err(crate::error::RarError::Io)?;
+        out.write_all(RAR5_SIGNATURE)
+            .map_err(crate::error::RarError::Io)?;
         out.write_all(&header).map_err(crate::error::RarError::Io)?;
         let mut buffer = vec![0u8; 1 << 20];
         for (start, end) in &kept {

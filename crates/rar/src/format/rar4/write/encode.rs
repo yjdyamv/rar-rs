@@ -332,7 +332,8 @@ fn best_filter_candidate(data: &[u8], candidates: Vec<FilterRecords>) -> Option<
     }
     // Strictly better than plain, or the filter does not earn its pass. A tie
     // keeps plain, matching the full-member comparison the trial used.
-    best.filter(|(size, _)| *size < plain).map(|(_, candidate)| candidate)
+    best.filter(|(size, _)| *size < plain)
+        .map(|(_, candidate)| candidate)
 }
 
 /// The standard-filter candidates the `-mc` policy allows for one member.
@@ -346,7 +347,10 @@ fn best_filter_candidate(data: &[u8], candidates: Vec<FilterRecords>) -> Option<
 /// silently produced a delta member.
 ///
 /// Each returned plan is a flat record list, so one plan can mix filters.
-fn rar29_filter_candidates(data: &[u8], policy: crate::options::FilterOptions) -> Vec<FilterRecords> {
+fn rar29_filter_candidates(
+    data: &[u8],
+    policy: crate::options::FilterOptions,
+) -> Vec<FilterRecords> {
     use crate::options::FilterMode;
     if data.is_empty() {
         return Vec::new();
@@ -455,8 +459,9 @@ pub(super) fn best_rar29_member(
     // wall time rather than saving it (measured: 5.0 s nested against 3.5 s
     // sequential on a 13.9 MB kernel image, with the process using ~15 of 24
     // threads either way).
-    let mut results: Vec<Option<Vec<u8>>> =
-        (0..candidates.len() + 1 + usize::from(with_ppmd)).map(|_| None).collect();
+    let mut results: Vec<Option<Vec<u8>>> = (0..candidates.len() + 1 + usize::from(with_ppmd))
+        .map(|_| None)
+        .collect();
     let clock = std::env::var_os("RAR_RS_MTTIME").is_some();
     let started = std::time::Instant::now();
     let plain = Unpack29Encoder::with_options(options).encode_member(data)?;
@@ -470,8 +475,8 @@ pub(super) fn best_rar29_member(
     results[0] = Some(plain);
     for (index, records) in candidates.iter().enumerate() {
         let started = std::time::Instant::now();
-        if let Ok(packed) = Unpack29Encoder::with_options(options)
-            .encode_member_with_filter_records(data, records)
+        if let Ok(packed) =
+            Unpack29Encoder::with_options(options).encode_member_with_filter_records(data, records)
         {
             if clock {
                 eprintln!(
