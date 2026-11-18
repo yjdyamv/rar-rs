@@ -152,3 +152,55 @@ pub fn encode_chunked(data: &[u8], opts: EncodeOptions<'_>) -> RarResult<Vec<u8>
         "unknown compression method: {method}"
     )))
 }
+
+#[cfg(test)]
+mod golden {
+    use super::*;
+
+    /// Deterministic, and varied enough to exercise literals, runs, short
+    /// offsets and long matches, so a change to the shared match finder shows up
+    /// here rather than silently inside an archive.
+    fn corpus() -> Vec<u8> {
+        let mut out = b"the quick brown fox jumps over the lazy dog. ".repeat(96);
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for i in 0..32 * 1024 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            out.push(match (i / 256) % 3 {
+                0 => (state >> 24) as u8,
+                1 => b'A',
+                _ => b"0123456789abcdef"[i % 16],
+            });
+        }
+        out
+    }
+
+    fn fnv(bytes: &[u8]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        hash
+    }
+
+    /// The RAR5 encoder's output per method. RAR4 and RAR2.0 each pin theirs;
+    /// this is the format whose encoder shares `MatchFinder` with them, so
+    /// without it a change to the finder could shift RAR5 output undetected.
+    #[test]
+    fn packed_bytes_are_stable_across_refactors() {
+        let data = corpus();
+        for (method, len, hash) in [
+            (1u8, 11495usize, 0x3ded_51b1_fe5d_20cfu64),
+            (2, 11226, 0xb1f0_2abc_e7a1_5016),
+            (3, 11226, 0xb1f0_2abc_e7a1_5016),
+            (4, 11199, 0x0a9a_87b9_1149_0ba0),
+            (5, 11199, 0x0a9a_87b9_1149_0ba0),
+        ] {
+            let packed = encode(&data, EncodeOptions::new(method, 0)).expect("encode");
+            assert_eq!(packed.len(), len, "method {method} packed length");
+            assert_eq!(fnv(&packed), hash, "method {method} packed bytes");
+        }
+    }
+}
