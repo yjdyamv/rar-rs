@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-11-18 @ working tree; every timing number here is a
+> Last verified: 2026-11-18 @ `73d84e4`; every timing number here is a
 > host-specific snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing

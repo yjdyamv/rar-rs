@@ -1,6 +1,6 @@
 # 架构与模块布局
 
-> 最后核对：2026-11-03 @ `fd8aedf`；实现细节以源码为准。
+> 最后核对：2026-11-18 @ `73d84e4`；实现细节以源码为准。
 
 库 crate `crates/rar`（crate 名 `rar-rs`）的模块地图与设计不变量。
 
@@ -38,7 +38,7 @@ version`，以及 `crates/rar-napi/package.json` 的
 
 改版本号还要刷新 `Cargo.lock` 与 `fuzz/Cargo.lock`（两个 CI 检查都带
 `--locked`）。四者一致由 `lint` job 的 "Workspace versions agree"
-步骤守住。**当前同为 `0.14.0`。**
+步骤守住。**当前同为 `0.15.0`。**
 
 ## 2 · 模块地图
 
