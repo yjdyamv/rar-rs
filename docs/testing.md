@@ -112,8 +112,9 @@ RUSTFLAGS="-D warnings" cargo check -p rar-rs --all-features \
   CI's `--workspace` jobs pass. The `wasm32-wasip1-threads` binding additionally
   needs the `EMNAPI_LINK_DIR` that `napi build` injects, so build it with
   `npm run build:wasi` (`--target wasm32-wasip1-threads --no-js`, then
-  `scripts/patch-wasi-loader.mjs` — it must stay the last step, since any later
-  native `napi build` regenerates the loader unpatched).
+  `scripts/patch-wasi-loader.mjs` — it must stay the last step: a later native
+  `napi build` regenerates the loader unpatched, and the `--no-js` WASI build
+  prunes the generated `binding.js` that `rar-rs.js` requires).
 
 ## Dependency gate
 

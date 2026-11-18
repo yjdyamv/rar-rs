@@ -205,6 +205,11 @@ fi
 
 if want 19; then
   step "19/20 binding: WASI loader patch + WASI-forced test"
+  # The WASI `--no-js` build (step 18) prunes the generated platform resolver
+  # `binding.js` (`rar-rs.js` requires it), and a native build re-emits the WASI
+  # loader unpatched. Restore the native binding, then re-apply the loader patch
+  # as the last step, or the forced-WASI run has nothing to load.
+  ( cd crates/rar-napi && run npx napi build --platform --release --js binding.js --dts binding.d.ts ) 2>&1 | tail -3
   ( cd crates/rar-napi && run node scripts/patch-wasi-loader.mjs ) 2>&1 | tail -2
   ( cd crates/rar-napi && NAPI_RS_FORCE_WASI=error run npm test ) 2>&1 \
     | grep -E '^ℹ (tests|pass|fail|skipped)'
