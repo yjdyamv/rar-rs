@@ -41,8 +41,9 @@ if (!process.env.SA_RAR5_WASM_WORKERS) {
 `
 
 const LOADER_PREOPEN_OLD = `  preopens: {
-    [__rootDir]: __rootDir,
-  }`
+    [__rootDir]: __hostRoot,
+    [__hostRoot]: __hostRoot,
+  },`
 const LOADER_PREOPEN_NEW = `  preopens: __wasiPathMap.wasiPreopens(__rootDir),`
 
 const LOADER_EXPORTS_CREATE_NEW = `const __wasiCreateArchive = __napiModule.exports.createArchive
@@ -254,10 +255,11 @@ module.exports.lockArchive = function __wasiLockArchiveWrapper(
   )
 }`
 
-const WORKER_PREOPEN_OLD = `      preopens: {
-        [__rootDir]: __rootDir,
-      },`
-const WORKER_PREOPEN_NEW = `      preopens: wasiPathMap.wasiPreopens(__rootDir),`
+const WORKER_PREOPEN_OLD = `        preopens: {
+          [__rootDir]: __hostRoot,
+          [__hostRoot]: __hostRoot,
+        },`
+const WORKER_PREOPEN_NEW = `        preopens: wasiPathMap.wasiPreopens(__rootDir),`
 
 /**
  * Wrapper source per export, keyed by export name.
@@ -354,7 +356,7 @@ function patchLoader(source) {
 
 function patchWorker(source) {
   if (source.includes(helperMarker)) return source
-  const importInsert = `import { parentPort, Worker } from "node:worker_threads";`
+  const importInsert = `import { parentPort, threadId, Worker, workerData } from 'node:worker_threads'`
   if (!source.includes(importInsert)) {
     throw new Error(
       'worker template changed: expected node:worker_threads import line',
