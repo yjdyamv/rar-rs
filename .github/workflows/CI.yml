@@ -114,6 +114,13 @@ jobs:
         # and every recipe that needs them — self-skip here; `lint-windows` runs
         # the full set.
         run: python3 scripts/fetch_winrar.py
+      - name: Verify WinRAR test builds
+        # The suites self-skip on a missing tool, and this job has no
+        # `SA_REQUIRE_WINRAR`, so a gap in the restored cache would quietly
+        # reduce coverage instead of failing. `--check` reports the releases
+        # this host has a build for (2.90/3.00 have no Linux tarball) and fails
+        # on any other that is absent.
+        run: python3 scripts/fetch_winrar.py --check
       - name: Cargo fmt (workspace + fuzz)
         # `fuzz/` is not a workspace member, so `cargo fmt --all` never covers
         # its targets.
@@ -307,11 +314,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/winrar
-          key: winrar-tools-${{ hashFiles('scripts/fetch_winrar.py') }}
+          # `-v2`: the previous entry restored without some releases even though
+          # the fetch below reported success, and the `SA_REQUIRE_WINRAR` run
+          # then hit the gap. A fresh key forces one clean fetch.
+          key: winrar-tools-v2-${{ hashFiles('scripts/fetch_winrar.py') }}
       - name: Fetch WinRAR test builds
         # The legacy suites build their archives with the official tool at run
         # time instead of shipping blobs, so they need the releases on disk.
         run: python scripts/fetch_winrar.py
+      - name: Verify WinRAR test builds
+        # `SA_REQUIRE_WINRAR=1` below turns a missing tool into a panic deep
+        # inside the corpus generator. Check the cache right after the fetch so
+        # a gap names the release instead.
+        run: python scripts/fetch_winrar.py --check
       - name: Clippy (workspace, all features and targets)
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
       - name: Cargo test (official-tool generated corpus)

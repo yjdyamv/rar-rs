@@ -346,8 +346,23 @@ def listing() -> None:
 
 
 def check(versions: list[str]) -> int:
+    """Verify the cache holds every release this host has a build for.
+
+    Versions rarlab never published for this host (2.90 and 3.00 have no Linux
+    tarball) are reported as skipped rather than missing, so the same command
+    gates both CI jobs. Returns the number of releases actually missing.
+    """
     missing = 0
     for version in versions:
+        if version not in TABLE:
+            print(f"{version}: unknown version", file=sys.stderr)
+            missing += 1
+            continue
+        windows_installer, linux_tarball = TABLE[version]
+        if (windows_installer if WINDOWS else linux_tarball) is None:
+            host = "Windows" if WINDOWS else "Linux"
+            print(f"{version}: no {host} build — skipped", file=sys.stderr)
+            continue
         if have_version(version):
             print(f"{version}: ok")
         else:
