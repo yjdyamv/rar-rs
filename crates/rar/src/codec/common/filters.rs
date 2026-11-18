@@ -259,8 +259,15 @@ fn e8_decode_in_place(data: &mut [u8], file_offset: u64, e8_only: bool) {
             let offset = file_offset.wrapping_add(cur_pos as u64) as u32 % X86_FILTER_FILE_SIZE;
             let addr = u32::from_le_bytes(data[cur_pos..cur_pos + 4].try_into().unwrap());
 
-            let new_addr = if addr < 0x0100_0000 {
-                Some(addr.wrapping_sub(offset))
+            // The official inverse guards this branch with `cand >= 0` on the
+            // signed view, which for `addr < X86_FILTER_FILE_SIZE` means the
+            // subtraction must not wrap: a stored value below `offset` is left
+            // untouched rather than wrapped to a huge address. Unreachable on
+            // well-formed input — the forward transform stores `orig + offset`
+            // here, which is never below `offset` — so this only aligns what we
+            // do with crafted streams (WINRAR's filter: `FUN_140042ce8`).
+            let new_addr = if addr < 0x0100_0000 && addr >= offset {
+                Some(addr - offset)
             } else if addr & 0x8000_0000 != 0 && addr.wrapping_add(offset) & 0x8000_0000 == 0 {
                 Some(addr.wrapping_add(0x0100_0000))
             } else {
