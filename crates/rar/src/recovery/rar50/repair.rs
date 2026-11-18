@@ -717,6 +717,24 @@ pub(super) fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecovery
     {
         return Err(Error::BadRecoveryChunk);
     }
+    // A shard cannot be much larger than the data it protects, and its parity is
+    // at most that data as well. Both fields are cross-checked against each
+    // other above, which a CRC-valid record with hostile geometry can satisfy
+    // while claiming a shard of many TiB; the shard buffers are sized from them,
+    // so without this bound the repair path aborts on the allocation instead of
+    // reporting a bad chunk. Found by the `recovery` fuzz target.
+    //
+    // The bound deliberately spans the whole shard rather than this one chunk: a
+    // shard is carried by `blocks_per_shard()` chunks, each holding only its own
+    // slice of the parity, so `group_count` can legitimately exceed a single
+    // chunk's payload.
+    if shard_size
+        > protected_size
+            .saturating_add(group_count)
+            .saturating_add(header_size)
+    {
+        return Err(Error::BadRecoveryChunk);
+    }
     // A shard's chunks are laid out as `group_count` parity bytes plus one
     // header per 64 KiB block, so the leftover after the parity must be a whole
     // number of headers. WinRAR emits exactly that; a chunk that claims
