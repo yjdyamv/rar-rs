@@ -50,7 +50,8 @@
 - **议题**（`docs/issues/<feature>/`，只留未关闭的）：判决留在议题文件里；议题**关闭时**把结论并进
   [`../PLAN.md`](../PLAN.md)（下一步 / 已知小差异）或
   [`PITFALLS.md`](PITFALLS.md)（长期规则）并删文件。
-  [`compression-perf/`](issues/compression-perf/)（未关闭：04、09、15）。
+  [`compression-perf/`](issues/compression-perf/)（未关闭：04、09、15）、
+  [`rar5-decode/`](issues/rar5-decode/)（未关闭：4 槽距离缓存的定位）。
 - **规格**：[`rar4-creation-spec.md`](rar4-creation-spec.md) — RAR4
   创建行为与格式。
 
