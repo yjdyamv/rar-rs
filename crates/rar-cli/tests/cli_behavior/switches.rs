@@ -2197,8 +2197,7 @@ fn cli_auto_name_stamps_the_archive_name() {
 }
 
 #[test]
-#[ignore = "x@ / n@ list files are honoured on create but ignored on extraction; \
-            WinRAR applies them (verified against 7.23)"]
+#[ignore = "x@ / n@ list files are ignored on extraction; the switches never reach ExtractArgs (unknown -switches are silently dropped). WinRAR applies them (verified against 7.23)"]
 fn cli_list_file_expands_exclusions() {
     let dir = make_temp_dir();
     for name in ["keep.txt", "drop.txt", "other.log"] {
