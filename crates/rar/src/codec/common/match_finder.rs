@@ -565,6 +565,7 @@ impl<'a> MatchFinder<'a> {
     /// `base` must be handed back through [`MatchFinder::into_parts`] with the
     /// arrays.
     #[cfg(feature = "parallel")]
+    #[allow(clippy::too_many_arguments)]
     pub fn reuse(
         data: &'a [u8],
         min_match: usize,
@@ -669,7 +670,7 @@ impl<'a> MatchFinder<'a> {
         let mut steps = depth;
         while candidate >= self.base && steps > 0 {
             let cand = (candidate - self.base) as usize;
-            let distance = pos - cand;
+            let distance = pos.saturating_sub(cand);
             if distance == 0 || distance > reach {
                 break;
             }
@@ -723,7 +724,11 @@ impl<'a> MatchFinder<'a> {
         let mut candidate = self.prev[pos & self.prev_mask];
         while candidate >= self.base && chain_count > 0 {
             let cand = (candidate - self.base) as usize;
-            let dist = pos - cand;
+            // A ring slot can alias a later position than `pos` once the ring is
+            // smaller than the window; release builds wrapped that subtraction
+            // into a distance past the window and broke out, while debug builds
+            // panicked on it. Saturating keeps both on the same "too far" path.
+            let dist = pos.saturating_sub(cand);
             if dist == 0 || dist > self.window {
                 break;
             }
