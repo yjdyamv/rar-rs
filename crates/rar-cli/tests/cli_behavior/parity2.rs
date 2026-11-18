@@ -138,6 +138,38 @@ fn cli_full_paths_ep2_ep3() {
 }
 
 #[test]
+fn cli_default_absolute_path_drops_the_drive() {
+    // An absolute argument with the default switches must store the path
+    // without its Windows drive (the official `rar a` does), not `C:/...`:
+    // such a name could never be extracted safely.
+    let dir = make_temp_dir();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("f.txt"), b"f").unwrap();
+
+    let archive = dir.path().join("abs.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg(src.join("f.txt"))
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let name = rar.entries().next().unwrap().name().to_string();
+    assert!(!name.starts_with('/'), "no leading separator: {name}");
+    assert!(name.ends_with("src/f.txt"), "keeps the path tail: {name}");
+    #[cfg(windows)]
+    {
+        let starts_with_drive = name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && name.as_bytes().get(1) == Some(&b':');
+        assert!(!starts_with_drive, "default must drop the drive: {name}");
+        assert!(!name.contains(":/"), "no drive colon in {name}");
+    }
+}
+
+#[test]
 fn cli_recurse_zero_does_not_descend_wildcards() {
     let dir = make_temp_dir();
     let src = dir.path().join("r0src");

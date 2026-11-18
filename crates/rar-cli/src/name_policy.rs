@@ -108,11 +108,24 @@ pub struct Collected {
 }
 
 /// Normalize a path argument into an archive name: relative paths stay as
-/// given, absolute paths drop the leading slash and leading `.`/`./`
-/// components are removed (like `rar`: `.\sel\root.txt` stores
-/// `sel/root.txt`). Interior components are preserved verbatim.
+/// given, absolute paths drop the leading slash — and, on Windows, the drive
+/// letter (`C:\dir\f` stores `dir/f`, matching the official `rar a`) — and
+/// leading `.`/`./` components are removed (like `rar`: `.\sel\root.txt`
+/// stores `sel/root.txt`). Interior components are preserved verbatim.
 pub fn arg_to_name(arg: &str) -> String {
     let normalized = arg.replace('\\', "/");
+    // The official tool drops the drive from an absolute Windows path in its
+    // default mode (the same form `-ep2` produces explicitly). Keeping `C:`
+    // made the default store the un-extractable `C:/...` name.
+    #[cfg(windows)]
+    let normalized = {
+        let bytes = normalized.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            normalized[2..].to_owned()
+        } else {
+            normalized
+        }
+    };
     let mut rest = normalized.as_str();
     loop {
         rest = rest.trim_start_matches('/');
@@ -522,6 +535,14 @@ mod tests {
         assert_eq!(arg_to_name("a/./b.txt"), "a/./b.txt");
         assert_eq!(arg_to_name("/abs/x.txt"), "abs/x.txt");
         assert_eq!(arg_to_name("sub/"), "sub");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn arg_to_name_drops_a_windows_drive() {
+        assert_eq!(arg_to_name("C:\\Users\\x\\f.txt"), "Users/x/f.txt");
+        assert_eq!(arg_to_name("C:/Users/x"), "Users/x");
+        assert_eq!(arg_to_name("D:\\dir\\"), "dir");
     }
 
     #[test]
