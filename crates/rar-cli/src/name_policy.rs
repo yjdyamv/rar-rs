@@ -211,21 +211,22 @@ pub fn collect(
 /// Whether `path` is a symbolic link or a Windows reparse point (junction),
 /// i.e. a link the `-ol` / `-ol-` switches can store or skip instead of
 /// following.
+///
+/// Windows marks both a symlink and a junction with the reparse-point
+/// attribute, so there the attribute decides; elsewhere only symlinks exist.
+#[cfg(windows)]
 pub(crate) fn is_link_like(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
-    if meta.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    false
+    meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_link_like(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// Whether an archive member passes the extraction `-n` / `-x` masks.
