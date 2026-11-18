@@ -51,7 +51,7 @@
   [`../PLAN.md`](../PLAN.md)（下一步 / 已知小差异）或
   [`PITFALLS.md`](PITFALLS.md)（长期规则）并删文件。
   [`compression-perf/`](issues/compression-perf/)（未关闭：04、09、15）、
-  [`rar5-decode/`](issues/rar5-decode/)（未关闭：4 槽距离缓存的定位）。
+  [`rar5-decode/`](issues/rar5-decode/)（未关闭：`FUN_14007ab9c` 的槽位解析）。
 - **规格**：[`rar4-creation-spec.md`](rar4-creation-spec.md) — RAR4
   创建行为与格式。
 
