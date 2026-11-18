@@ -877,7 +877,11 @@ pub enum VersionSelection {
 /// One extraction request: the four `x`/`e` arms of both binaries build this
 /// value and hand it to [`extract`], so the flag-to-options assembly for
 /// disk extraction has one owner.
-#[derive(Default)]
+// Deliberately not `Default`: every field is assembled from CLI switches, and
+// the one literal that ended in `..Default::default()` silently zeroed the
+// `-x`/`-n` masks when the extract request forgot to fill them (the switch
+// worked, the filter ran, and the masks were empty). Exhaustive literals turn
+// a forgotten field into a compile error at every construction site instead.
 pub struct ExtractRequest {
     /// Members to extract (empty = every entry).
     pub names: Vec<String>,
@@ -1272,25 +1276,57 @@ mod tests {
     };
     use rar_rs::ExtractOptions;
 
+    /// An exhaustive request. `ExtractRequest` has no `Default` on purpose, so
+    /// a new field makes every construction site - this one included - say
+    /// what it means instead of silently becoming empty.
+    fn request() -> ExtractRequest {
+        ExtractRequest {
+            names: Vec::new(),
+            include_masks: Vec::new(),
+            exclude_masks: Vec::new(),
+            dest: std::path::PathBuf::new(),
+            flat: false,
+            stdout: false,
+            threads: None,
+            max_dict_size: None,
+            max_unpacked_bytes: None,
+            max_total_unpacked_bytes: None,
+            mark_web: None,
+            overwrite: None,
+            assume_yes: false,
+            auto_rename: false,
+            freshen: false,
+            update: false,
+            keep_broken: false,
+            skip_links: false,
+            allow_unsafe_links: false,
+            set_creation_time: false,
+            set_access_time: false,
+            quiet_answers_yes: false,
+            version: VersionSelection::Current,
+            allow_names: false,
+        }
+    }
+
     /// `-ver` all keeps the version in the output name, `-verN` does not, and
     /// an explicit `name;N` selector keeps it like WinRAR.
     #[test]
     fn version_suffix_follows_the_policy_and_explicit_selectors() {
         let all = ExtractRequest {
             version: VersionSelection::All,
-            ..ExtractRequest::default()
+            ..request()
         };
         assert!(all.options().file_version_suffix);
 
         let only = ExtractRequest {
             version: VersionSelection::Only(2),
-            ..ExtractRequest::default()
+            ..request()
         };
         assert!(!only.options().file_version_suffix);
 
         let explicit = ExtractRequest {
             names: vec!["f.txt;2".to_string()],
-            ..ExtractRequest::default()
+            ..request()
         };
         assert!(explicit.options().file_version_suffix);
     }
@@ -1342,7 +1378,7 @@ mod tests {
     /// an explicit `-mdx` cap wins over the default.
     #[test]
     fn extraction_request_clears_the_read_size_caps() {
-        let options = ExtractRequest::default().options();
+        let options = request().options();
         assert_eq!(options.max_unpacked_bytes, None);
         assert_eq!(options.max_total_unpacked_bytes, None);
         assert_eq!(
@@ -1353,7 +1389,7 @@ mod tests {
         let raised = 8 * 1024 * 1024 * 1024;
         let request = ExtractRequest {
             max_dict_size: Some(raised),
-            ..ExtractRequest::default()
+            ..request()
         };
         assert_eq!(request.options().max_dict_size, Some(raised));
     }
