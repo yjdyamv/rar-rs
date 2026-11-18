@@ -34,7 +34,6 @@ impl DecodeTable {
     pub fn new(code_lengths: &[u8]) -> Self {
         let n = code_lengths.len();
 
-        // Count codes of each length
         let mut len_count = [0u32; MAX_CODE_LENGTH + 2];
         for &cl in code_lengths {
             let cl = cl as usize;
@@ -58,7 +57,6 @@ impl DecodeTable {
         }
         decode_len[MAX_CODE_LENGTH] = 1 << MAX_CODE_LENGTH;
 
-        // Fill decode_num
         let mut pos_tracker = decode_pos;
         for (sym, item) in code_lengths.iter().enumerate().take(n) {
             let cl = *item as usize;
@@ -68,7 +66,6 @@ impl DecodeTable {
             }
         }
 
-        // Build quick lookup table
         let mut quick = [0u32; QUICK_SIZE];
 
         let mut code: u32 = 0;
@@ -234,7 +231,6 @@ pub fn build_code_lengths_from_freqs(freqs: &[u32], max_length: usize) -> Vec<u8
     // nodes stores: (freq, node_id, children)
     let mut nodes: Vec<HuffNode> = Vec::new();
     let mut all_nodes: Vec<HuffNode> = Vec::new();
-    // Copy leaves into all_nodes
     for &(f, s, _) in &leaves {
         all_nodes.push((f, s, None));
     }
@@ -280,7 +276,6 @@ pub fn build_code_lengths_from_freqs(freqs: &[u32], max_length: usize) -> Vec<u8
         nodes.push((f1 + f2, counter, Some((id1, id2))));
     }
 
-    // Rebuild all_nodes with internal nodes appended
     for &(f, id, children) in &nodes {
         all_nodes.push((f, id, children));
     }

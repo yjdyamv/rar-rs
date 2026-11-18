@@ -322,7 +322,6 @@ pub(super) fn write_split_member(
         cx.check_cancel()?;
         let remaining_vol = volume_size.saturating_sub(cx.bytes_written());
 
-        // Build chunk flags
         let mut block_flags: u64 = 0;
         if !is_first {
             block_flags |= BLOCK_FLAG_DATA_CONTINUES;
@@ -411,7 +410,6 @@ pub(super) fn write_split_member(
 
         let is_last = offset + chunk_size >= total_packed;
 
-        // Set final flags
         if is_last {
             block_flags &= !BLOCK_FLAG_DATA_CONTINUE_TO;
         } else {
