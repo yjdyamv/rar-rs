@@ -21,7 +21,7 @@ use crate::codec::common::huffman::EncodeTable;
 use crate::codec::common::match_finder::MatchFinder;
 use crate::codec::legacy::encode_core::{
     self, LENGTH_BASES, LENGTH_BITS, LENGTH_COUNT, LevelAlphabet, LevelToken,
-    match_length_adjustment,
+    SHORT_BASES, SHORT_BITS, match_length_adjustment, push_old_offset,
 };
 use crate::codec::legacy::ppmd::PpmdEncoder;
 use crate::codec::lzss_huff::DIST_CACHE_SIZE;
@@ -46,6 +46,10 @@ const MAX_ENCODER_MATCH_OFFSET: usize = 1024 * 1024;
 /// ceiling either way; 258 leaves `slot_for` with an extra value that does not
 /// fit its 5 bits and silently truncates the length.
 const MAX_ENCODER_MATCH_LENGTH: usize = 257;
+
+/// The farthest offset the format's short-distance symbols reach:
+/// `SHORT_BASES[7] + 1 + (1 << SHORT_BITS[7]) - 1` = 192 + 1 + 63.
+const SHORT_MATCH_MAX_OFFSET: usize = 256;
 const MAX_MATCH_CANDIDATES: usize = 256;
 
 /// Default LZ block size for table splitting.
@@ -238,6 +242,13 @@ enum EncodedMatch {
         offset_slot: usize,
         offset_extra: usize,
     },
+    /// A two-byte match within 256 bytes, carried by the format's own eight
+    /// short-distance symbols (263..270) with the length implied. The decoder
+    /// reads these as `SHORT_BASES[index] + 1 + bits`, length 2.
+    Short {
+        index: usize,
+        extra: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,6 +286,15 @@ impl EncoderMatchState {
         let encoded_length = length
             .checked_sub(match_length_adjustment(offset))
             .ok_or_else(|| enc_err("adjusted match length underflows"))?;
+        // A two-byte match that is not already a cached offset has no other
+        // cheap form: the fresh-match slots start at length 3, so without this
+        // the parser can only spend two literals on it. WinRAR's `-m3` stream
+        // carries 112,261 of these where ours carries none.
+        if length == 2
+            && let Some((index, extra)) = short_offset_slot(offset)
+        {
+            return Ok(EncodedMatch::Short { index, extra });
+        }
         let (length_slot, length_extra) = length_slot_for_match(encoded_length)?;
         let (offset_slot, offset_extra) = offset_slot_for_match(offset)?;
         Ok(EncodedMatch::Fresh {
@@ -283,6 +303,16 @@ impl EncoderMatchState {
             offset_slot,
             offset_extra,
         })
+    }
+
+    /// The state update a short-distance match needs, which is not the one
+    /// `remember` performs: the decoder pushes the offset unconditionally for
+    /// symbol 263..270 (`push_old_offset`), where the repeat-offset form
+    /// (259..262) rotates an existing entry to the front instead.
+    fn remember_short(&mut self, offset: usize) {
+        push_old_offset(&mut self.old_offsets, offset);
+        self.last_offset = offset;
+        self.last_length = 2;
     }
 
     fn remember(&mut self, length: usize, offset: usize) {
@@ -324,6 +354,13 @@ fn offset_slot_for_match(offset: usize) -> RarResult<(usize, usize)> {
     encode_core::offset_slot_for(offset, &OFFSET_BASES, &OFFSET_BITS).map_err(enc_err)
 }
 
+/// The short-distance symbol and extra bits for `offset`, if the format's
+/// short table reaches it: offsets 1..=256, in eight slots carrying 2..6 bits.
+fn short_offset_slot(offset: usize) -> Option<(usize, usize)> {
+    let adjusted = offset.checked_sub(1)?;
+    encode_core::slot_for(&SHORT_BASES, &SHORT_BITS, adjusted)
+}
+
 fn estimated_match_cost(
     state: &EncoderMatchState,
     length: usize,
@@ -344,6 +381,7 @@ fn estimated_match_cost(
                 + usize::from(OFFSET_BITS[offset_slot])
                 + low_offset_cost)
         }
+        EncodedMatch::Short { index, .. } => Ok(8 + usize::from(SHORT_BITS[index])),
     }
 }
 
@@ -533,7 +571,27 @@ fn tokenize(
     let mut state = EncoderMatchState::default();
     let mut next_report = 0usize;
     let mut pending_match: Option<MatchCandidate> = None;
+    // Two-byte repeats within `SHORT_MATCH_MAX_OFFSET` have their own symbol
+    // (263..270, length implied). The shared finder hashes four bytes and is
+    // built with `min_match = 4`, so it can never report one - which is why our
+    // streams carry none while WinRAR's `-m3` stream carries 112,261. This
+    // table tracks the nearest position of each byte pair so the parser can.
+    // Seeding it from the window just before `start` keeps a block's parse
+    // identical whether the sequential path or a parallel worker ran it: both
+    // see the same `combined`.
+    let mut pair_seen = vec![0u32; 1 << 16];
+    for p in start.saturating_sub(SHORT_MATCH_MAX_OFFSET)..start {
+        let key = u16::from_le_bytes([combined[p], combined[p + 1]]);
+        pair_seen[key as usize] = p as u32 + 1;
+    }
     while pos < end {
+        // Take the previous occurrence of this pair before overwriting it.
+        let mut pair_previous = 0u32;
+        if pos + 1 < end {
+            let key = u16::from_le_bytes([combined[pos], combined[pos + 1]]);
+            pair_previous = pair_seen[key as usize];
+            pair_seen[key as usize] = pos as u32 + 1;
+        }
         let candidate = pending_match
             .take()
             .or_else(|| best_match(pos, end, finder, options, &state));
@@ -553,8 +611,23 @@ fn tokenize(
             // covered interior positions so future matches can reference them.
             for history_pos in (pos + 1)..(pos + length) {
                 finder.insert(history_pos);
+                if history_pos + 1 < end {
+                    let key =
+                        u16::from_le_bytes([combined[history_pos], combined[history_pos + 1]]);
+                    pair_seen[key as usize] = history_pos as u32 + 1;
+                }
             }
             pos += length;
+        } else if pair_previous != 0
+            && (1..=SHORT_MATCH_MAX_OFFSET).contains(&(pos - (pair_previous as usize - 1)))
+        {
+            // No LZ match here. Two literals cost more than one short-distance
+            // symbol plus its 2..6 extra bits, so spend the short form.
+            let offset = pos - (pair_previous as usize - 1);
+            tokens.push(EncodeToken::Match { length: 2, offset });
+            state.remember_short(offset);
+            finder.insert(pos + 1);
+            pos += 2;
         } else {
             tokens.push(EncodeToken::Literal(combined[pos]));
             pos += 1;
@@ -756,7 +829,8 @@ fn build_block_table_lengths(
                 main_frequencies[byte as usize] += 1;
             }
             EncodeToken::Match { length, offset } => {
-                match match_state.encode_match(length, offset)? {
+                let encoded = match_state.encode_match(length, offset)?;
+                match encoded {
                     EncodedMatch::LastLengthRepeat => {
                         main_frequencies[258] += 1;
                     }
@@ -778,8 +852,15 @@ fn build_block_table_lengths(
                             low_offset_frequencies[offset_extra & 0x0f] += 1;
                         }
                     }
+                    EncodedMatch::Short { index, .. } => {
+                        main_frequencies[263 + index] += 1;
+                    }
                 }
-                match_state.remember(length, offset);
+                if matches!(encoded, EncodedMatch::Short { .. }) {
+                    match_state.remember_short(offset);
+                } else {
+                    match_state.remember(length, offset);
+                }
             }
         }
     }
@@ -908,7 +989,8 @@ fn serialize_block(
                 bits.write_bits(code, cl);
             }
             EncodeToken::Match { length, offset } => {
-                match match_state.encode_match(length, offset)? {
+                let encoded = match_state.encode_match(length, offset)?;
+                match encoded {
                     EncodedMatch::LastLengthRepeat => {
                         let (code, cl) = encode_code(&main_codes, 258)?;
                         bits.write_bits(code, cl);
@@ -951,8 +1033,19 @@ fn serialize_block(
                             bits.write_bits(offset_extra as u32, OFFSET_BITS[offset_slot]);
                         }
                     }
+                    EncodedMatch::Short { index, extra } => {
+                        let (code, cl) = encode_code(&main_codes, 263 + index)?;
+                        bits.write_bits(code, cl);
+                        if SHORT_BITS[index] != 0 {
+                            bits.write_bits(extra as u32, SHORT_BITS[index]);
+                        }
+                    }
                 }
-                match_state.remember(length, offset);
+                if matches!(encoded, EncodedMatch::Short { .. }) {
+                    match_state.remember_short(offset);
+                } else {
+                    match_state.remember(length, offset);
+                }
             }
         }
     }
@@ -2638,11 +2731,11 @@ mod tests {
     fn packed_bytes_are_stable_across_refactors() {
         let data = golden_corpus();
         for (level, len, hash) in [
-            (1u8, 12476usize, 0x81a9_437b_0c0e_956bu64),
-            (2, 12472, 0x4d88_c697_8344_13f9),
-            (3, 12472, 0x4d88_c697_8344_13f9),
-            (4, 12474, 0xc8ab_2abc_8435_91d1),
-            (5, 12474, 0xc8ab_2abc_8435_91d1),
+            (1u8, 12492usize, 0x5613_7f5a_0cee_1c82u64),
+            (2, 12487, 0xfc4d_2adb_b4f3_2fef),
+            (3, 12487, 0xfc4d_2adb_b4f3_2fef),
+            (4, 12489, 0xe894_72a4_8bf3_911b),
+            (5, 12489, 0xe894_72a4_8bf3_911b),
         ] {
             let mut encoder = Unpack29Encoder::with_options(options_for_level(level));
             let packed = encoder.encode_member(&data).expect("encode");
