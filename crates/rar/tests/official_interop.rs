@@ -2558,3 +2558,194 @@ fn official_unrar_validates_rar5_solid_filters() {
         assert_eq!(reader.read_entry(entry).unwrap(), *data);
     }
 }
+
+/// `E8`-dense executable-shaped bytes: the x86 filter's favourite diet, and the
+/// payload the multi-window cases below use.
+fn e8_dense(size: usize) -> Vec<u8> {
+    let mut data = Vec::with_capacity(size + 16);
+    let mut address = 0x0040_0000u32;
+    while data.len() < size {
+        data.push(0xE8);
+        data.extend_from_slice(&address.to_le_bytes());
+        address = address.wrapping_add(0x10);
+        data.extend(std::iter::repeat_n(0x90, 11));
+    }
+    data.truncate(size);
+    data
+}
+
+/// 3-byte RGB gradient: what a three-channel delta filter is for.
+fn rgb_gradient(size: usize) -> Vec<u8> {
+    let mut data = Vec::with_capacity(size + 3);
+    let (mut r, mut g, mut b) = (0u8, 0u8, 0u8);
+    while data.len() < size {
+        data.extend_from_slice(&[r, g, b]);
+        r = r.wrapping_add(1);
+        g = g.wrapping_add(3);
+        b = b.wrapping_add(7);
+    }
+    data.truncate(size);
+    data
+}
+
+/// The streaming writer cuts a member into `threads * 8 MiB` windows, so 80 MiB
+/// at four threads is two MT windows plus a sequential tail. The tail used to
+/// query the long-range table with an anchor short by the bytes the MT path had
+/// deferred, which corrupted the member only at this size (and only at some
+/// thread counts). `unrar t` decompresses and checks the CRC of every member,
+/// which is exactly that gate; our own reader then has to agree.
+#[test]
+fn official_unrar_validates_rar5_multi_window_large_member() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let dir = make_temp_dir();
+    let payload = e8_dense(80 * 1024 * 1024);
+    let source = dir.path().join("huge.bin");
+    std::fs::write(&source, &payload).unwrap();
+    let path = dir.path().join("multi-window.rar");
+    {
+        let threads = rar_rs::ThreadCount::try_from(4usize).unwrap();
+        let mut writer = rar_rs::ArchiveWriter::create_with(
+            &path,
+            rar_rs::WriterOptions::new().thread_count(threads),
+        )
+        .unwrap();
+        writer
+            .add_path(&source, rar_rs::EntryWriteOptions::new())
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    let status = std::process::Command::new(&unrar)
+        .arg("t")
+        .arg("-idq")
+        .arg(&path)
+        .status()
+        .expect("failed to run official unrar");
+    assert!(
+        status.success(),
+        "official unrar rejected an 80 MiB RAR5 member spanning several streaming windows"
+    );
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let entry = reader.unique_entry("huge.bin").unwrap();
+    assert_eq!(
+        reader.read_entry(entry).unwrap(),
+        payload,
+        "the multi-window archive must round-trip through our own reader"
+    );
+}
+
+/// The other direction over the same shape: an official `-m3` archive of 80 MiB
+/// of E8-dense bytes. This is the direction that catches decode-side filter
+/// regressions — an over-eager operand guard only showed up on official streams
+/// at this size, never on archives our own writer produced.
+#[test]
+fn our_unrar_reads_official_multi_window_large_member() {
+    let rar = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let dir = make_temp_dir();
+    let payload = e8_dense(80 * 1024 * 1024);
+    std::fs::write(dir.path().join("huge.bin"), &payload).unwrap();
+    let status = std::process::Command::new(&rar)
+        .current_dir(dir.path())
+        .args(["a", "-y", "-idq", "-m3"])
+        .arg("official.rar")
+        .arg("huge.bin")
+        .status()
+        .expect("failed to run official rar");
+    assert!(
+        status.success(),
+        "official rar failed to create the 80 MiB reference archive"
+    );
+    let mut reader = ArchiveReader::open(dir.path().join("official.rar")).unwrap();
+    let entry = reader.unique_entry("huge.bin").unwrap();
+    assert_eq!(
+        reader.read_entry(entry).unwrap(),
+        payload,
+        "our decoder must read an official 80 MiB multi-window member"
+    );
+}
+
+/// RAR5 switches the rest of the suite and the generated corpus do not
+/// exercise: forced/disabled long-range (`-mcl±`), exhaustive search (`-mcx`),
+/// delta with an explicit channel count (`-mcd3+`), a 64 MiB dictionary, and a
+/// non-ASCII member password (the corpus only covers a Unicode *header*
+/// password). Each archive is small; the point is that our reader accepts what
+/// the official writer produced.
+#[test]
+fn official_rar_flag_edges_round_trip() {
+    let rar = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let dir = make_temp_dir();
+    let text = b"flag edge payload ".repeat(20_000);
+    let gradient = rgb_gradient(1_000_000);
+    std::fs::write(dir.path().join("text.txt"), &text).unwrap();
+    std::fs::write(dir.path().join("grad.bin"), &gradient).unwrap();
+
+    let cases: [(&str, &[&str], &str, &[u8]); 5] = [
+        ("mcl-off", &["-m3", "-mcl-"], "text.txt", text.as_slice()),
+        ("mcl-forced", &["-m3", "-mcl+"], "text.txt", text.as_slice()),
+        ("mcx", &["-m3", "-mcx"], "text.txt", text.as_slice()),
+        ("mcd3", &["-m3", "-mcd3+"], "grad.bin", gradient.as_slice()),
+        ("md64", &["-m3", "-md64m"], "text.txt", text.as_slice()),
+    ];
+    for (name, switches, member, want) in cases {
+        let archive = format!("{name}.rar");
+        let mut command = std::process::Command::new(&rar);
+        command
+            .current_dir(dir.path())
+            .arg("a")
+            .arg("-y")
+            .arg("-idq");
+        for switch in switches {
+            command.arg(switch);
+        }
+        let status = command
+            .arg(&archive)
+            .arg(member)
+            .status()
+            .expect("failed to run official rar");
+        assert!(
+            status.success(),
+            "official rar rejected {switches:?} for {name}"
+        );
+        let mut reader = ArchiveReader::open(dir.path().join(&archive))
+            .unwrap_or_else(|e| panic!("open {name}: {e}"));
+        let entry = reader.unique_entry(member).unwrap();
+        assert_eq!(
+            reader.read_entry(entry).unwrap(),
+            want,
+            "{name}: our reader must reproduce what official rar wrote"
+        );
+    }
+
+    let password = "密码";
+    let status = std::process::Command::new(&rar)
+        .current_dir(dir.path())
+        .args(["a", "-y", "-idq", "-m3"])
+        .arg(format!("-p{password}"))
+        .arg("unicode-pw.rar")
+        .arg("text.txt")
+        .status()
+        .expect("failed to run official rar");
+    assert!(
+        status.success(),
+        "official rar rejected the non-ASCII password"
+    );
+    let mut reader = ArchiveReader::open_with(
+        dir.path().join("unicode-pw.rar"),
+        rar_rs::OpenOptions::new().password(password),
+    )
+    .unwrap();
+    let entry = reader.unique_entry("text.txt").unwrap();
+    assert_eq!(
+        reader.read_entry(entry).unwrap(),
+        text,
+        "a non-ASCII member password must derive the same key on both sides"
+    );
+}
