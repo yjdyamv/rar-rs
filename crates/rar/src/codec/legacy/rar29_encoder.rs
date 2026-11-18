@@ -621,11 +621,21 @@ fn tokenize(
         } else if pair_previous != 0
             && (1..=SHORT_MATCH_MAX_OFFSET).contains(&(pos - (pair_previous as usize - 1)))
         {
-            // No LZ match here. Two literals cost more than one short-distance
-            // symbol plus its 2..6 extra bits, so spend the short form.
+            // Advance the ring the way the coder will. A two-byte match can
+            // still take the last-length or repeat-offset form, and both update
+            // `old_offsets` differently from the short form, so assuming the
+            // short form here would leave this state out of step with the
+            // stream the parser goes on to choose against.
             let offset = pos - (pair_previous as usize - 1);
+            if matches!(
+                state.encode_match(2, offset)?,
+                EncodedMatch::Short { .. }
+            ) {
+                state.remember_short(offset);
+            } else {
+                state.remember(2, offset);
+            }
             tokens.push(EncodeToken::Match { length: 2, offset });
-            state.remember_short(offset);
             finder.insert(pos + 1);
             pos += 2;
         } else {
