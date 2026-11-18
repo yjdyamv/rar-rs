@@ -305,6 +305,26 @@ fn encode_chunked_raw_inner(
 
     let mut local_state = EncoderState::default();
     let state = state.unwrap_or(&mut local_state);
+    // The MT path defers a window's bytes into `pending`/`pending_skipped`
+    // instead of indexing them (see `encode_chunked_mt_with_progress`), so
+    // every consumer of the state's own long-range table has to fold those in
+    // before it queries it. `find_matches_optimal` anchors its far-match
+    // queries at `total_pushed()`, which is short by exactly the un-indexed
+    // history otherwise, and a short anchor resolves every long-range match to
+    // a wrong distance — a member spanning more than one streaming window came
+    // out corrupt (measured: 70 MiB at `-mt4`, first bad byte 61 B into the
+    // last window; 32 MiB ≡ 2 (mod the 85-byte test pattern), which is why it
+    // looked like a two-byte shift). Folding is idempotent: the take leaves
+    // both fields empty, and `find_matches_optimal` indexes each chunk itself
+    // as it goes.
+    let skipped = std::mem::take(&mut state.pending_skipped);
+    let pending = std::mem::take(&mut state.pending);
+    if long_range && let Some(lr) = state.long_range.as_mut() {
+        if skipped > 0 {
+            lr.skip(skipped);
+        }
+        lr.push(&pending);
+    }
     let chunk_size = chunk_size.max(1);
 
     let mut output = Vec::new();
