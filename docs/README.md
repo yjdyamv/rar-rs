@@ -42,7 +42,11 @@
   [0005 RAR4 编辑架构](adr/0005-rar4-edit-architecture.md) ·
   [0006 公开面收敛到角色门面](adr/0006-public-api-convergence.md) ·
   [0007 删除 `raw` feature](adr/0007-raw-feature-retired.md) ·
-  [0008 单向的家族分层与 `Engine` 接缝](adr/0008-one-way-family-layering.md)
+  [0008 单向的家族分层与 `Engine` 接缝](adr/0008-one-way-family-layering.md) ·
+  [0009 匹配器内核替换（已否决）](adr/0009-match-finder-kernel.md) ·
+  [0010 哈希环匹配器（已否决）](adr/0010-hash-ring-finder.md) ·
+  [0011 按官方形状重做匹配器（已否决）](adr/0011-official-shaped-matcher.md) ·
+  [0012 两段式解析：距离/rep 裁决后置（提议）](adr/0012-deferred-distance-adjudication.md)
 - **议题**（`docs/issues/<feature>/`，只留未关闭的）：判决留在议题文件里；议题**关闭时**把结论并进
   [`../PLAN.md`](../PLAN.md)（下一步 / 已知小差异）或
   [`PITFALLS.md`](PITFALLS.md)（长期规则）并删文件。
