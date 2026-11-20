@@ -82,7 +82,7 @@
 
 ## 下一步
 
-### 发布 0.15.1（进行中）
+### 发布 0.15.1 与 0.15.2（已发）
 
 0.14.0 已发布到 GitHub（tag + Release，2026-11-03），crates.io 三个 crate 仍
 未发布。 **`v0.15.0` 的 tag 与 GitHub Release 已于 2026-11-18 发出**，但此后
@@ -105,15 +105,39 @@ tarball 里只有 `README.md`，首次发布就是一份没有正文的 `BSD-2-C
       2026-11-20 发出，CI run #278 的 16 个 job 全绿（check / test / msrv /
       lint-windows / 9 个 addon 构建 + wasm / release），Release 已发，25
       个资产。
-- [ ] **`cargo publish` 按顺序**：`rar-rs` → `rar-cli` / `rar-rs-napi`
-      （crates.io 首次；后两者依赖 workspace 内的
-      `rar-rs`，必须先有前者，在此之前 `cargo package -p rar-cli` 会报找不到
-      `rar-rs`，属预期）。先 `cargo login`（token 需 `publish-new` +
-      `publish-update` 权限）——本机还没有 `~/.cargo/credentials.toml`， 没有
-      token 这一步就无法自动化；索引可见后再发后两个。
-- [ ] **发布后做一遍下游实测**：从 crates.io 干净拉取 `rar-cli` 的临时工程，
-      `cargo install rar-cli` 能跑；`rar-rs-napi` 的 `.node` 与 wasm 产物照 CI
-      release job 的路径复核一次；docs.rs 三个 crate 都能构建。
+- [x] **`cargo publish` 按顺序**：2026-11-20 用 owner token 发出三个 crate 的
+      0.15.1（`rar-rs` → 等索引 → `rar-cli` / `rar-rs-napi`），crates.io 的
+      `max_version` 均为 0.15.1，tarball 里五个许可证文件齐全。
+- [x] **发布后做一遍下游实测**：`cargo install rar-cli --locked` 装出
+      `rar.exe`/`unrar.exe` 并能 `a`/`t`；docs.rs 上 `rar-rs` 与 `rar-rs-napi`
+      构建成功，**`rar-cli` 失败**——docs.rs 固定跑 `cargo rustdoc --lib`， 而该
+      crate 只有两个 bin。
+
+### 0.15.2：给 rar-cli 一个库目标（已发）
+
+docs.rs 的 `cargo-args` 只能传选项、不能换子命令，所以修法只有新增 lib
+target。`crates/rar-cli/src/lib.rs` 是**只有 `//!` 文档、零 item** 的空库： 把
+`src/*.rs` 改成 `pub mod` 会被 `clippy -D warnings` 的 dead-code 卡住；而
+`include_str!` 根 README 会把它中间那个 ```rust 代码块拖成 doctest。功能代码
+一行未动，只多一个版本号。
+
+- [x] 五处版本 0.15.1 → 0.15.2，`Cargo.lock` 与 `fuzz/Cargo.lock` 手工同步；
+      `ci-lint.sh --no-tests`
+      全绿，`SA_REQUIRE_WINRAR=1 cargo test
+      --workspace --all-features`
+      exit 0。
+- [x] tag `v0.15.2`，CI run #280 的 16 个 job 全绿，Release 25 个资产。
+- [x] 三个 crate 发到 crates.io；docs.rs build #5402834（rar-cli）9s 成功，
+      三个文档页 200。
+- [x] **crates.io 发布迁到 CI**：`scripts/ci/publish-crates.sh`（依赖顺序、
+      轮询稀疏索引、已存在版本跳过）+ CI 的 `publish` job（`needs: release`，
+      Trusted Publishing 换临时 token，无长期密钥）。三个 crate 的可信发布者
+      已由 owner 在 crates.io 侧配好（workflow 文件名 `CI.yml`）。
+      `test-release-scripts.sh` 用 stub `curl` 的假索引覆盖「跳过已发布」与
+      「索引路径」两条规则，并断言脚本的 `CRATES` 列表等于全部 workspace 包名。
+- [ ] **首跑复核**：`workflow_dispatch` 带 `release_tag: v0.15.2`，期望
+      `publish` 对三个 crate 各打一行 `skip`（0.15.2 已在索引上），即 OIDC
+      换取与跳过逻辑成立。
 
 发布闸门（本机 `cargo test --workspace --all-features`，stdin 接 EOF）：全绿
 （`rar-rs` 36 个 target、`rar-cli` 的 bins/`cli_behavior`/`volume_bare_name`、
@@ -517,17 +541,21 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 2. 刷新 `Cargo.lock` 与 `fuzz/Cargo.lock`（两个 CI 检查都带 `--locked`）。
    只改版本号时不要整个 `cargo update` fuzz 工作区——那会顺带升级一堆依赖， 把
    `fuzz/Cargo.lock` 里 `rar-rs` 那一行的 version 改掉就够了。
-3. 本地跑测试闸门：`cargo test --workspace --all-features`（CI 只跑 smoke）。
+3. 本地跑测试闸门：`SA_REQUIRE_WINRAR=1 cargo test --workspace --all-features`
+   （CI 只跑 smoke；不设这个变量时依赖官方工具的语料套件会静默跳过）。
 4. 确认三个 crate 目录里的 `LICENSE` / `NOTICE` / `THIRD_PARTY_LICENSES.md` /
    `LICENSES/` 与根目录逐字节相同（`bash scripts/ci/check-crate-licenses.sh`）：
    `cargo package` 看不到根目录，缺副本就会发出一份没正文的许可声明。
 5. 打 tag `vX.Y.Z`（Release job 校验它等于 `crates/rar-napi` 的 Cargo.toml 与
    package.json）。
-6. `cargo login`（token 需 `publish-new` + `publish-update`），然后按顺序
-   `cargo publish`：`rar-rs` → 等索引可见 → `rar-cli` / `rar-rs-napi`。
-   先对后两个跑 `cargo publish --dry-run`：在 `rar-rs` 上索引之前它们必然 报
-   `no matching package named 'rar-rs' found`。
-7. 发布后复核：`cargo install rar-cli --locked` 能装能跑、docs.rs 三个 crate
-   都构建成功。
+6. **发 crates.io 不用手工**：tag 推上去后 `release` 发 GitHub 资产，紧接着
+   `publish` job 用 Trusted Publishing 换临时 token 跑
+   `scripts/ci/publish-crates.sh`（依赖顺序、轮询稀疏索引、已存在版本跳过）。
+   只有**新名字首次**仍需手工 `cargo publish`（crates.io 要求 crate 先存在才
+   能挂可信发布者），token 需 `publish-new`。发布失败只需重跑
+   `workflow_dispatch` 带同一个 `release_tag`：已发出的版本会被跳过。
+7. 发布后复核：`cargo install rar-cli --locked` 能装能跑、
+   `https://docs.rs/{rar-rs,rar-cli,rar-rs-napi}/X.Y.Z/<crate_with_underscores>/`
+   三条 200（`/status.json` 一律 404，别拿它当判据）。
 8. 刷新本文件与 `README` / `CONTEXT` / `ARCHITECTURE` / `CLI` / `testing` 的
    `最后核对` 锚点。

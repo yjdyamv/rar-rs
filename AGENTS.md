@@ -20,7 +20,8 @@ job 能证明什么）与 [`docs/testing.md`](docs/testing.md)（测试分层）
 - `bash scripts/ci-lint.sh`（`--no-tests` 只跑静态部分；完整跑与 CI 的 `test`
   目标相同）。
 - 动了 `.github/workflows/` 再跑 `bash scripts/ci/run-actionlint.sh`；动了
-  `scripts/ci/collect-release-assets.sh` 或 `release-notes.sh` 再跑
+  `scripts/ci/collect-release-assets.sh`、`release-notes.sh` 或
+  `publish-crates.sh` 再跑
   `bash scripts/ci/test-release-scripts.sh`。actionlint/shellcheck 不在 PATH 时
   `ci-lint.sh` 打印 `SKIP:` ——**那不算通过**。
 - 本地 `cargo test` 缺 WinRAR
@@ -45,6 +46,15 @@ job 能证明什么）与 [`docs/testing.md`](docs/testing.md)（测试分层）
   移植清单。改根目录的文本必须同步三份副本，
   `scripts/ci/check-crate-licenses.sh` 逐字节比对（本地 `ci-lint.sh` 与 CI 的
   `check` 都跑）。
+- **发布到 crates.io 由 CI 的 `publish` job
+  做**：`scripts/ci/publish-crates.sh`， `needs: release`，靠 Trusted Publishing
+  换临时 token，不存长期密钥。
+- **脚本里的 `CRATES` 列表是纯数据**：`test-release-scripts.sh` 断言它等于
+  `crates/*/Cargo.toml` 列出的包名。新增 crate 忘了加进去，编译、测试、Release
+  都正常，只有没人发它。
+- **Trusted Publishing 每个 crate 一条配置**（owner、repo、workflow 文件名、可选
+  environment），workflow 文件名必须与仓库里这份一致（`CI.yml`）。新名字第一次
+  仍需手工 `cargo publish`：crates.io 要求 crate 先存在才能挂可信发布者。
 - **MSRV 是 1.95**（`Cargo.toml` 的
   `rust-version`）：`crates/rar/src/archive/reader.rs` 用
   `AtomicU32::try_update`（1.95 稳定）。更旧的工具链会直接拒绝这个 crate。

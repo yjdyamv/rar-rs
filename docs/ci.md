@@ -32,7 +32,9 @@ flowchart TD
     wasm["build-wasm — wasi bundle + loader patch"]
   end
 
-  rel["release — tag (or dispatch naming one)<br/>version check · assets · SHA-256SUMS<br/>· grouped notes · idempotent publish"]
+  rel["release — tag (or dispatch naming one)<br/>version check · assets · SHA-256SUMS<br/>· grouped notes · idempotent upload"]
+
+  pub["publish — crates.io<br/>Trusted Publishing (OIDC) · rar-rs first<br/>· index polled · versions already up skipped"]
 
   pr --> check & test & msrv & win
   main --> check & test & msrv & win
@@ -53,6 +55,7 @@ flowchart TD
   win --> rel
   build -->|"one addon artifact per target"| rel
   wasm -->|"bindings-wasm32-wasip1-threads"| rel
+  rel -->|"only after the Release exists"| pub
 ```
 
 Two properties of the shape are worth reading off the diagram:
@@ -62,10 +65,12 @@ Two properties of the shape are worth reading off the diagram:
   the slowest job instead of the sum. The price is that a formatting mistake
   also burns the test minutes; paid on purpose — a red `check` names the
   problem, and a serialised pipeline would give one failure at a time.
-- **`release` is the only job with `needs`.** Everything else is independent, so
-  a broken job can never hide behind an earlier failure, and `release` cannot
-  assemble a partial artifact set. `build` needs `build-matrix` only because it
-  reads the target list from it.
+- **`release` and `publish` are the only jobs with `needs`.** Everything else is
+  independent, so a broken job can never hide behind an earlier failure, and
+  `release` cannot assemble a partial artifact set. `build` needs `build-matrix`
+  only because it reads the target list from it. `publish` needs `release`
+  because crates.io versions are permanent (yankable, never replaceable): the
+  version must only reach the registry after the tag has produced its Release.
 
 ## What each job is allowed to prove
 
@@ -79,6 +84,7 @@ Two properties of the shape are worth reading off the diagram:
 | `build` (`×1`–`×9`) | A loadable `.node` exists for each target the selector chose, plus the `tsc` type gate once, on the entry that generated `binding.d.ts`.                                                                                                                                                                   | One job per target so `fail-fast: false` reports every broken platform in one run instead of one per push. On a PR one target runs, so the napi pipeline and the type gate are exercised before a tag (see below).                                                              |
 | `build-wasm`        | The wasi bundle: 8 files, loader patched for Windows host paths.                                                                                                                                                                                                                                           | Cheap and independent; a red wasm run should not make 9 addon jobs look broken.                                                                                                                                                                                                 |
 | `release`           | The tag, the version match, the exact asset set, the checksums, the notes; and that re-running it updates instead of failing.                                                                                                                                                                              | —                                                                                                                                                                                                                                                                               |
+| `publish`           | That all three crate versions on the index match the tag, in dependency order, through a short-lived OIDC token rather than a stored secret; already-published versions are skipped.                                                                                                                       | Publishing cannot be undone on crates.io, so it is the one job that must not run until every other gate has passed — `needs: release` is that ordering, and it makes a re-release dispatch a gap-filler instead of a failure.                                                   |
 
 ## The release path is rehearsed before the tag
 
@@ -87,21 +93,24 @@ A green pull request used to say nothing about a release: the addon build, the
 time on the tag. Five changes close that gap — two cost seconds, three cost
 minutes:
 
-| Release-only step                                                              | Where it now runs on a PR                        | What it costs   |
-| ------------------------------------------------------------------------------ | ------------------------------------------------ | --------------- |
-| asset contract (9 addons, 8 WASI files, identical loaders, license flattening) | `check`, as `scripts/ci/test-release-scripts.sh` | seconds         |
-| release-notes grouping and the previous-tag range                              | same fixture test, in `check`                    | seconds         |
-| `napi build` + `tsc` type gate                                                 | `build`, on the one `smoke` matrix entry         | one addon build |
-| wasi bundle + loader patch                                                     | `build-wasm`                                     | ~4 min          |
-| the eight cross targets (musl, arm, darwin, win32)                             | weekly schedule, full matrix, no publish         | weekly          |
-| the corpus on Windows, against the official WinRAR builds                      | tag and dispatch (same runs that publish)        | minutes, 4×     |
+| Release-only step                                                              | Where it now runs on a PR                        | What it costs          |
+| ------------------------------------------------------------------------------ | ------------------------------------------------ | ---------------------- |
+| asset contract (9 addons, 8 WASI files, identical loaders, license flattening) | `check`, as `scripts/ci/test-release-scripts.sh` | seconds                |
+| release-notes grouping and the previous-tag range                              | same fixture test, in `check`                    | seconds                |
+| `napi build` + `tsc` type gate                                                 | `build`, on the one `smoke` matrix entry         | one addon build        |
+| wasi bundle + loader patch                                                     | `build-wasm`                                     | ~4 min                 |
+| the eight cross targets (musl, arm, darwin, win32)                             | weekly schedule, full matrix, no publish         | weekly                 |
+| the corpus on Windows, against the official WinRAR builds                      | tag and dispatch (same runs that publish)        | minutes, 4×            |
+| crate publish order, index polling, skip-if-already-published                  | `check`, in the same fixture test (stub index)   | 2 curl-less assertions |
 
-No rehearsal gaps are left in that table, but two rows are release-shaped rather
-than per-PR on purpose: a second _library configuration_ of a suite that already
-runs on every push, and a Windows corpus whose setup downloads four official
-releases. Both run on every tag before `release` consumes the artifacts, which
-is the run that matters; the weekly job covers the first, so a break is found
-within seven days instead of at the tag.
+No rehearsal gaps are left in that table, but three rows are release-shaped
+rather than per-PR on purpose: a second _library configuration_ of a suite that
+already runs on every push, and a Windows corpus whose setup downloads four
+official releases. Both run on every tag before `release` consumes the
+artifacts, which is the run that matters; the weekly job covers the first, so a
+break is found within seven days instead of at the tag. The third is the token
+exchange: a `release_tag` dispatch naming a tag whose versions are all on the
+index runs `publish` end to end and publishes nothing, which is the rehearsal.
 
 The rules that used to be shell inside `release` are now
 `scripts/ci/collect-release-assets.sh` and `scripts/ci/release-notes.sh`, which
@@ -124,9 +133,10 @@ Rough runner-minutes per event (Linux ≈ 1×, Windows ≈ 4× billed):
 | -------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | PR                         | 7    | ~2 min faster than a run that also re-ran the corpus against a scalar build; the static gates answer in ~2 min, the single addon build sets the tail |
 | push to main               | 4    | no addon work — the pull request already built that tree                                                                                             |
-| push of a tag              | 16   | dominated by the 9-target build matrix                                                                                                               |
+| push of a tag              | 17   | dominated by the 9-target build matrix; `release` then `publish`, the latter usually skipping every crate                                            |
 | weekly schedule            | 14   | the full matrix + wasi bundle, so the heavy path is proven without publishing; also the advisory DB and "does today's stable build it"               |
 | dispatch, no `release_tag` | 15   | the smoke path for workflow changes: builds the matrix against the default branch, publishes nothing                                                 |
+| dispatch, `release_tag`    | 17   | `release` re-uploads the assets, `publish` proves the OIDC exchange and skips every version already on the index                                     |
 
 Caches that keep this down: `Swatinem/rust-cache` with one `linux` key shared by
 `check`/`test` (same toolchain and lock, so one dependency cache serves both), a
@@ -144,6 +154,8 @@ build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
 | `cancel-in-progress` only for PRs                         | Cancelling a `main` or tag run can leave a release half-published; a PR run only wastes minutes.                                                                                                                                                                                                                                                                                                                      |
 | actionlint + shellcheck are steps, actionlint is verified | The workflows are the one part of the repo nothing compiled. `scripts/ci/run-actionlint.sh` downloads a pinned tarball and checks it against the SHA-256 from actionlint's own release index. shellcheck runs at `-S warning` — at the default style level its info findings fire on deliberate constructs.                                                                                                           |
 | `msrv` reads `Cargo.toml`                                 | The version lives in one place; a job that hard-codes it would let the manifest drift.                                                                                                                                                                                                                                                                                                                                |
+| `publish` uses Trusted Publishing, not a secret           | crates.io mints a token per run through `rust-lang/crates-io-auth-action@v1` and `id-token: write`, so a stolen repository secret cannot publish a version; the trust is per crate (`rar-rs`, `rar-cli`, `rar-rs-napi`) and names this workflow file. It also waits on `needs: release`, because a version that reached the registry cannot be replaced — only yanked.                                                |
+| `publish` skips what is already on the index              | A `release_tag` dispatch exists to repair a half-published release; failing on the versions that did make it would defeat that. The skip also makes a re-pointed tag a no-op instead of a second permanent version.                                                                                                                                                                                                   |
 | Dependabot, grouped                                       | The repo had already drifted (`actions/cache@v4` beside `v6`). Dependabot does not know `rust-version`, so a bump that raises the floor surfaces as a red `msrv` job.                                                                                                                                                                                                                                                 |
 | `retention-days: 7` on the artifacts                      | `release` consumes them in the same run; the 90-day default stores nine addons for three months.                                                                                                                                                                                                                                                                                                                      |
 | The addon matrix is data, in `scripts/ci/build-matrix.js` | Two events need two subsets of one list — nine entries on a tag, one on a PR. A `matrix:` literal per job would duplicate the targets, and a duplicated list is how the smoke target silently stops being the target that ships.                                                                                                                                                                                      |
@@ -183,8 +195,14 @@ build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
    fixtures, fmt, the guards, clippy, rustdoc. This is the same set `check`
    runs.
 3. `bash scripts/ci/test-release-scripts.sh` on its own when editing the release
-   scripts or the build matrix (it is part of step 2 as well).
+   scripts (`collect-release-assets.sh`, `release-notes.sh`,
+   `publish-crates.sh`) or the build matrix (it is part of step 2 as well).
 4. `workflow_dispatch` with an empty `release_tag` — builds the whole matrix
    against the default branch and stops before `release`. That is the only way
    to test the heavy half without cutting a tag.
-5. To re-publish an existing tag: dispatch with `release_tag` set to it.
+5. To re-publish an existing tag: dispatch with `release_tag` set to it. If its
+   versions are already on crates.io, `publish` prints a `skip` for each and the
+   run is the rehearsal of the OIDC exchange.
+6. A **new** crate name cannot be published through OIDC: crates.io needs the
+   crate to exist before a Trusted Publisher can be attached to it, so the first
+   upload is a manual `cargo publish` with `publish-new`.

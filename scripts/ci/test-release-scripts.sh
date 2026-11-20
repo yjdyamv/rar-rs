@@ -230,6 +230,51 @@ expect_failure 'assets: flattened license collision fails' bash "$here/collect-r
   "$fixture/bindings" "$fixture/wasm" "$fixture/release" "$fixture"
 
 # ---------------------------------------------------------------------------
+# publish-crates.sh: the sparse index path is a URL built from the crate name,
+# and the skip rule is what makes a re-leased tag a no-op instead of a failure
+# on the versions that are already up. A `file://` index exercises both
+# branches without a network or a token.
+# ---------------------------------------------------------------------------
+publish="$here/publish-crates.sh"
+check 'publish: a long name splits into two directories' \
+  'ra/r-/rar-rs' "$(bash "$publish" --index-path rar-rs)"
+check 'publish: a three character name nests under its first letter' \
+  '3/a/abc' "$(bash "$publish" --index-path abc)"
+
+# A stub `curl` stands in for the registry: only the names it was given a file
+# for exist, so the dry run proves both branches without a network or a token.
+fake_index="$tmp/fake-index"
+stub_bin="$tmp/bin"
+mkdir -p "$fake_index" "$stub_bin"
+tree_version=$(sed -n '/^\[package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p}' \
+  "$here/../../crates/rar/Cargo.toml" | head -1)
+printf '{"name":"rar-rs","vers":"%s"}\n' "$tree_version" >"$fake_index/rar-rs"
+cat >"$stub_bin/curl" <<'STUB'
+#!/usr/bin/env bash
+# Emulates `curl -fsS <url>` against $FAKE_INDEX: the last path segment is the
+# crate name, and a missing file is the sparse index's 404.
+for arg in "$@"; do url=$arg; done
+if [ -f "$FAKE_INDEX/${url##*/}" ]; then cat "$FAKE_INDEX/${url##*/}"; else exit 22; fi
+STUB
+chmod +x "$stub_bin/curl"
+dry=$(PATH="$stub_bin:$PATH" FAKE_INDEX="$fake_index" bash "$publish" --dry-run)
+check 'publish: skips the crate already in the index' "skip  rar-rs $tree_version" "$dry"
+check 'publish: still publishes the crates that are missing' 'would publish rar-cli' "$dry"
+
+# The list is data: a crate added to the workspace but not to the script would
+# compile, test and release, and never reach the registry — the failure is
+# silent until someone tries to install the new name.
+script_crates=$(sed -n 's/^CRATES=(\(.*\))$/\1/p' "$publish" | tr ' ' '\n' | sort)
+workspace_crates=$(for manifest in "$here"/../../crates/*/Cargo.toml; do
+  sed -n '/^\[package\]/,/^\[/{s/^name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p}' "$manifest"
+done | sort)
+if [ "$script_crates" = "$workspace_crates" ]; then
+  ok 'publish: the crate list covers every workspace crate'
+else
+  not_ok "publish: crate list is [$script_crates], workspace has [$workspace_crates]"
+fi
+
+# ---------------------------------------------------------------------------
 # The two lists that have to agree: what the build matrix produces and what the
 # release insists on. Editing one without the other is the failure mode this
 # whole file exists to catch, so check it here rather than in a comment.
