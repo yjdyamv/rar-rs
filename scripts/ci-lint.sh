@@ -11,7 +11,8 @@
 #   scripts/ci/clippy-feature-matrix.sh     rar-rs, the feature combinations the
 #                                          workspace build cannot cover
 #   scripts/ci/test-release-scripts.sh     the release asset rules + notes
-#                                          grouping, against fixtures
+#                                          grouping + publish rules, against
+#                                          fixtures
 #   scripts/ci/test-generated-corpus.sh     the generated legacy-corpus suites
 #
 # It exists because the documented local gate (`cargo test --workspace

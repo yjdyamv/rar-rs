@@ -75,6 +75,14 @@ env:
         description: 'Existing tag to (re)release, e.g. v0.15.0 (empty = plain build)'
         required: false
         type: string
+      # A re-release repairs a half-uploaded release by adding what is missing.
+      # Replacing an asset that is already published is a different act: the
+      # digests are pinned by the VS Code consumer, so it has to be asked for.
+      force_assets:
+        description: 'Replace published release assets that differ (true/false)'
+        required: false
+        type: string
+        default: 'false'
   # RustSec advisories change without a commit. A weekly run re-evaluates the
   # committed lockfiles against the advisory database so a new advisory is
   # noticed here instead of on the next unrelated push. Only `check` and `test`
@@ -766,20 +774,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
-        # Idempotent: re-running a tag that already has a release replaces the
-        # notes and overwrites the assets (`--clobber`), so a run that died
-        # mid-upload converges instead of leaving a half-populated release.
-        # `--verify-tag` stops a release from being created off a typo'd ref.
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          assets=( release/* )
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
-            gh release upload "$TAG" "${assets[@]}" --clobber
-          else
-            gh release create "$TAG" "${assets[@]}" \
-              --title "$TAG" \
-              --notes-file "$RUNNER_TEMP/release-notes.md" \
-              --verify-tag
-          fi
+          FORCE_ASSETS: ${{ inputs.force_assets }}
+        # Creating, repairing and replacing are three different acts:
+        # `scripts/ci/publish-release.sh` creates the release if it is missing,
+        # uploads only the assets an existing release lacks, and refuses to
+        # replace an asset whose digest moved unless `force_assets` says so.
+        # Installing from this release is fail-closed on a hash mismatch, so a
+        # silent overwrite on a re-run would break every pinned consumer.
+        # `--verify-tag` keeps a release from being created off a typo'd ref.
+        run: bash scripts/ci/publish-release.sh "$TAG" "$RUNNER_TEMP/release-notes.md" release

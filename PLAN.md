@@ -49,10 +49,12 @@
   绑定单元测试），cargo deny 每周定时重跑一次以接住新的 RustSec 公告；七目标
   fuzz；取消钩子；QO 快路径；流式修复； 零填充分卷。**发布路径不再只在打 tag
   时才第一次执行**：资产收集与 release notes 已抽成
-  `scripts/ci/collect-release-assets.sh` / `scripts/ci/release-notes.sh` 并由
-  `scripts/ci/test-release-scripts.sh` 用 fixture 在每次 push 上验证（addon /
-  WASI 清单、跨 target 生成的 loader 一致性、license 扁平化碰撞、notes
-  分组与上一个 tag 的取法）；`build` 的 9 条矩阵移入
+  `scripts/ci/collect-release-assets.sh` / `scripts/ci/release-notes.sh` /
+  `scripts/ci/publish-release.sh` 并由 `scripts/ci/test-release-scripts.sh` 用
+  fixture 在每次 push 上验证（addon / WASI 清单、跨 target 生成的 loader
+  一致性、license 扁平化碰撞、notes 分组与上一个 tag
+  的取法、发布的三种状态——补缺、不动已发布字节、 内容变了必须显式
+  `force_assets=true`）；`build` 的 9 条矩阵移入
   `scripts/ci/build-matrix.js`，PR 只跑其中 1 条（带 `tsc` 类型闸门），每周
   定时跑满 9 条 + wasi bundle。job 图、每个 job 允许证明什么、成本与取舍见
   `docs/ci.md`。

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Fixture tests for the two scripts the `release` job runs.
+# Fixture tests for the three scripts the `release` job runs.
 #
 # The point is that the release payload's rules — one addon per platform, every
 # WASI file present, a reproducible generated loader, no flattened-license
-# collision, and the release-notes grouping — are enforced on every push, not
-# discovered by the first tag. These scripts are pure filesystem/git logic, so
+# collision, the release-notes grouping, and the refusal to replace published
+# bytes without being asked — are enforced on every push, not discovered by the
+# first tag. These scripts are pure filesystem/git logic plus a stubbed `gh`, so
 # seconds of fixtures here replace a nine-target rebuild.
 #
 # Run from anywhere: bash scripts/ci/test-release-scripts.sh
@@ -227,6 +228,115 @@ make_fixture "$fixture"
 printf 'dupes\n' >"$fixture/LICENSES/vendor__MIT.txt"
 expect_failure 'assets: flattened license collision fails' bash "$here/collect-release-assets.sh" \
   "$fixture/bindings" "$fixture/wasm" "$fixture/release" "$fixture"
+
+# ---------------------------------------------------------------------------
+# publish-release.sh: what a re-run of `release` is allowed to do, driven through
+# a stub `gh`. The workflow's `force_assets` input carries the intent; these cases
+# are the mechanism honouring it — a differing asset is refused unless the input
+# is true, because anything pinning its hash (smart-archiver does) breaks the
+# moment it changes silently.
+# ---------------------------------------------------------------------------
+stubbin=$tmp/stubbin
+mkdir -p "$stubbin"
+cat >"$stubbin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$GH_STUB_LOG"
+case "$1 $2" in
+  "release view") [ "${GH_STUB_VIEW:-present}" = present ] && exit 0 || exit 1 ;;
+  "api repos/"*) cat "${GH_STUB_DIGESTS:-/dev/null}" ;;
+  "release create") exit 0 ;;
+  "release edit") exit 0 ;;
+  "release upload") exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$stubbin/gh"
+
+pub=$tmp/pub
+mkdir -p "$pub/assets" "$tmp/digests"
+printf 'alpha\n' >"$pub/assets/alpha.node"
+printf 'beta\n' >"$pub/assets/beta.node"
+printf 'gamma\n' >"$pub/assets/gamma.node"
+printf 'notes\n' >"$pub/notes.md"
+
+# digest_of <file> -> its sha256, the way the script computes it.
+digest_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+# write_digests <file> <name:sum>... -> the `gh api` output the stub replays.
+# A name that is absent from the file is an asset the release does not have.
+write_digests() {
+  local out=$1
+  shift
+  : >"$out"
+  local spec
+  for spec in "$@"; do
+    printf '%s\t%s\n' "${spec%%:*}" "${spec#*:}" >>"$out"
+  done
+}
+
+zeros=$(printf '%064d' 0)
+matching=$tmp/digests/matching.tsv
+write_digests "$matching" \
+  "alpha.node:$(digest_of "$pub/assets/alpha.node")" \
+  "beta.node:$(digest_of "$pub/assets/beta.node")" \
+  "gamma.node:$(digest_of "$pub/assets/gamma.node")"
+
+pub_log=$tmp/publish.log
+# publish_try <view> <digests-file> <force> [assets-dir] [notes-file]
+# Leaves the combined output in $out and the exit status in $rc.
+publish_try() {
+  local view=$1 digests=$2 force=$3
+  local assets=${4:-$pub/assets} notes=${5:-$pub/notes.md}
+  : >"$pub_log"
+  if out=$(GH_STUB_LOG=$pub_log GH_STUB_VIEW=$view GH_STUB_DIGESTS=$digests \
+    GITHUB_REPOSITORY=example/rar-rs FORCE_ASSETS=$force \
+    PATH="$stubbin:$PATH" bash "$here/publish-release.sh" v1 "$notes" "$assets" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+}
+
+publish_try absent "$matching" ''
+if [ "$rc" -eq 0 ]; then ok 'publish: creates the release when it does not exist'; else
+  not_ok "publish: creates a missing release (rc=$rc: $out)"
+fi
+check 'publish: create carries the payload' 'gamma.node' "$(cat "$pub_log")"
+
+publish_try present "$matching" ''
+if [ "$rc" -eq 0 ]; then ok 'publish: a matching release is left alone'; else
+  not_ok "publish: matching release (rc=$rc: $out)"
+fi
+check_absent 'publish: nothing is uploaded when the payload matches' 'release upload' "$(cat "$pub_log")"
+
+repair=$tmp/digests/repair.tsv
+write_digests "$repair" \
+  "alpha.node:$(digest_of "$pub/assets/alpha.node")" \
+  "beta.node:$(digest_of "$pub/assets/beta.node")"
+publish_try present "$repair" ''
+log=$(cat "$pub_log")
+if [ "$rc" -eq 0 ]; then ok 'publish: a half-finished release is completed'; else
+  not_ok "publish: repair run (rc=$rc: $out)"
+fi
+check 'publish: uploads only the missing asset' 'gamma.node' "$log"
+check_absent 'publish: leaves the matching assets alone' 'alpha.node' "$log"
+
+differing=$tmp/digests/differing.tsv
+write_digests "$differing" \
+  "alpha.node:$(digest_of "$pub/assets/alpha.node")" \
+  "beta.node:$(digest_of "$pub/assets/beta.node")" \
+  "gamma.node:$zeros"
+publish_try present "$differing" ''
+if [ "$rc" -ne 0 ]; then ok 'publish: a differing asset is refused'; else
+  not_ok 'publish: a differing asset is refused (exited 0)'
+fi
+check 'publish: the refusal names the asset' 'gamma.node' "$out"
+check 'publish: the refusal names the override' 'FORCE_ASSETS=true' "$out"
+
+publish_try present "$differing" true
+if [ "$rc" -eq 0 ]; then ok 'publish: force_assets=true allows the replacement'; else
+  not_ok "publish: forced replacement (rc=$rc: $out)"
+fi
+check 'publish: the forced run uploads the asset' 'gamma.node' "$(cat "$pub_log")"
 
 # ---------------------------------------------------------------------------
 # The two lists that have to agree: what the build matrix produces and what the
