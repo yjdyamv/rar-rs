@@ -36,6 +36,8 @@ flowchart TD
 
   pub["publish — crates.io<br/>Trusted Publishing (OIDC) · rar-rs first<br/>· index polled · versions already up skipped"]
 
+  pubnpm["publish-npm — 11 npm packages<br/>platform packages first, root last<br/>· version already up skipped"]
+
   pr --> check & test & msrv & win
   main --> check & test & msrv & win
   cron --> check & test & msrv
@@ -56,6 +58,7 @@ flowchart TD
   build -->|"one addon artifact per target"| rel
   wasm -->|"bindings-wasm32-wasip1-threads"| rel
   rel -->|"only after the Release exists"| pub
+  rel -->|"same artifacts, as npm tarballs"| pubnpm
 ```
 
 Two properties of the shape are worth reading off the diagram:
@@ -65,26 +68,28 @@ Two properties of the shape are worth reading off the diagram:
   the slowest job instead of the sum. The price is that a formatting mistake
   also burns the test minutes; paid on purpose — a red `check` names the
   problem, and a serialised pipeline would give one failure at a time.
-- **`release` and `publish` are the only jobs with `needs`.** Everything else is
-  independent, so a broken job can never hide behind an earlier failure, and
-  `release` cannot assemble a partial artifact set. `build` needs `build-matrix`
-  only because it reads the target list from it. `publish` needs `release`
-  because crates.io versions are permanent (yankable, never replaceable): the
-  version must only reach the registry after the tag has produced its Release.
+- **`release` and the two publish jobs are the only ones with `needs`.**
+  Everything else is independent, so a broken job can never hide behind an
+  earlier failure, and `release` cannot assemble a partial artifact set. `build`
+  needs `build-matrix` only because it reads the target list from it. Both
+  `publish` and `publish-npm` need `release` because a version that reaches a
+  registry cannot be replaced — crates.io only yanks, npm only deprecates — so a
+  version must only ship after the tag has produced its Release.
 
 ## What each job is allowed to prove
 
-| Job                 | Proves                                                                                                                                                                                                                                                                                                     | Not merged into a neighbour because                                                                                                                                                                                                                                             |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check`             | The tree compiles, is formatted, is lint-clean, its manifest invariants hold, its dependencies are legal, its docs build.                                                                                                                                                                                  | Runs no test suite: a red `check` and a red `test` mean different things, and the log you open first should be the right one.                                                                                                                                                   |
-| `test`              | Behaviour: library unit tests, the CLI suites, the binding's Rust tests, the JS path-mapping test, the zig installer's failure modes — plus the 10 generated legacy-corpus targets, which the first step already runs under `--all-features`; the second, scalar-build run of them is `schedule`/tag only. | Same reason, mirrored. It also installs no clippy/rustfmt and no wasm target — `-D warnings` on the test profile would report a warning that `check` already fails on.                                                                                                          |
-| `msrv`              | The `rust-version` in `Cargo.toml` compiles, using exactly that toolchain with `--all-features`.                                                                                                                                                                                                           | `check`/`test` run whatever `stable` is today, so without this job `rust-version` is a comment. Kept separate so the failure reads "the floor broke", not "the tree broke".                                                                                                     |
-| `lint-windows`      | Everything under `#[cfg(windows)]`: the CLI switch contract, separator hazards, the binding's `error.rs`/`guard.rs` tests; on tags and dispatches, also the generated corpus against the official Windows builds (`SA_REQUIRE_WINRAR=1`).                                                                  | Windows minutes are ~4× Linux; splitting it into a static and a test job would double the runner cost for a log-clarity gain that the Linux split already provides. The WinRAR fetch is what makes the corpus step expensive, so it follows the corpus and runs release-shaped. |
-| `build-matrix`      | Which addon targets this event builds: the whole list on tags, dispatches and the weekly run; the one `smoke` entry on a pull request.                                                                                                                                                                     | The list is data (`scripts/ci/build-matrix.js`), not a `matrix:` literal, because two events need two different subsets of the same list, and a duplicated literal would let the PR smoke target drift away from the target the release builds.                                 |
-| `build` (`×1`–`×9`) | A loadable `.node` exists for each target the selector chose, plus the `tsc` type gate once, on the entry that generated `binding.d.ts`.                                                                                                                                                                   | One job per target so `fail-fast: false` reports every broken platform in one run instead of one per push. On a PR one target runs, so the napi pipeline and the type gate are exercised before a tag (see below).                                                              |
-| `build-wasm`        | The wasi bundle: 8 files, loader patched for Windows host paths.                                                                                                                                                                                                                                           | Cheap and independent; a red wasm run should not make 9 addon jobs look broken.                                                                                                                                                                                                 |
-| `release`           | The tag, the version match, the exact asset set, the checksums, the notes; and that re-running it updates instead of failing.                                                                                                                                                                              | —                                                                                                                                                                                                                                                                               |
-| `publish`           | That all three crate versions on the index match the tag, in dependency order, through a short-lived OIDC token rather than a stored secret; already-published versions are skipped.                                                                                                                       | Publishing cannot be undone on crates.io, so it is the one job that must not run until every other gate has passed — `needs: release` is that ordering, and it makes a re-release dispatch a gap-filler instead of a failure.                                                   |
+| Job                 | Proves                                                                                                                                                                                                                                                                                                     | Not merged into a neighbour because                                                                                                                                                                                                                                                                         |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check`             | The tree compiles, is formatted, is lint-clean, its manifest invariants hold, its dependencies are legal, its docs build.                                                                                                                                                                                  | Runs no test suite: a red `check` and a red `test` mean different things, and the log you open first should be the right one.                                                                                                                                                                               |
+| `test`              | Behaviour: library unit tests, the CLI suites, the binding's Rust tests, the JS path-mapping test, the zig installer's failure modes — plus the 10 generated legacy-corpus targets, which the first step already runs under `--all-features`; the second, scalar-build run of them is `schedule`/tag only. | Same reason, mirrored. It also installs no clippy/rustfmt and no wasm target — `-D warnings` on the test profile would report a warning that `check` already fails on.                                                                                                                                      |
+| `msrv`              | The `rust-version` in `Cargo.toml` compiles, using exactly that toolchain with `--all-features`.                                                                                                                                                                                                           | `check`/`test` run whatever `stable` is today, so without this job `rust-version` is a comment. Kept separate so the failure reads "the floor broke", not "the tree broke".                                                                                                                                 |
+| `lint-windows`      | Everything under `#[cfg(windows)]`: the CLI switch contract, separator hazards, the binding's `error.rs`/`guard.rs` tests; on tags and dispatches, also the generated corpus against the official Windows builds (`SA_REQUIRE_WINRAR=1`).                                                                  | Windows minutes are ~4× Linux; splitting it into a static and a test job would double the runner cost for a log-clarity gain that the Linux split already provides. The WinRAR fetch is what makes the corpus step expensive, so it follows the corpus and runs release-shaped.                             |
+| `build-matrix`      | Which addon targets this event builds: the whole list on tags, dispatches and the weekly run; the one `smoke` entry on a pull request.                                                                                                                                                                     | The list is data (`scripts/ci/build-matrix.js`), not a `matrix:` literal, because two events need two different subsets of the same list, and a duplicated literal would let the PR smoke target drift away from the target the release builds.                                                             |
+| `build` (`×1`–`×9`) | A loadable `.node` exists for each target the selector chose, plus the `tsc` type gate once, on the entry that generated `binding.d.ts`.                                                                                                                                                                   | One job per target so `fail-fast: false` reports every broken platform in one run instead of one per push. On a PR one target runs, so the napi pipeline and the type gate are exercised before a tag (see below).                                                                                          |
+| `build-wasm`        | The wasi bundle: 8 files, loader patched for Windows host paths.                                                                                                                                                                                                                                           | Cheap and independent; a red wasm run should not make 9 addon jobs look broken.                                                                                                                                                                                                                             |
+| `release`           | The tag, the version match, the exact asset set, the checksums, the notes; and that re-running it updates instead of failing.                                                                                                                                                                              | —                                                                                                                                                                                                                                                                                                           |
+| `publish`           | That all three crate versions on the index match the tag, in dependency order, through a short-lived OIDC token rather than a stored secret; already-published versions are skipped.                                                                                                                       | Publishing cannot be undone on crates.io, so it is the one job that must not run until every other gate has passed — `needs: release` is that ordering, and it makes a re-release dispatch a gap-filler instead of a failure.                                                                               |
+| `publish-npm`       | That the 11 npm packages — 10 platform packages and the root that names them — carry the release payload's bytes, go up in an order that leaves no window where `npm i rar-rs` installs nothing that loads, and ship the notices; versions already on the registry are skipped.                            | The same argument as `publish`, from the other side: keeping them apart means a crates.io failure does not hide an npm one, and each can be re-run alone through `release_tag`. npm's first publish for a new name still needs a token — `publish` has no such gap because every crate name exists already. |
 
 ## The release path is rehearsed before the tag
 
@@ -102,6 +107,7 @@ minutes:
 | the eight cross targets (musl, arm, darwin, win32)                             | weekly schedule, full matrix, no publish         | weekly                 |
 | the corpus on Windows, against the official WinRAR builds                      | tag and dispatch (same runs that publish)        | minutes, 4×            |
 | crate publish order, index polling, skip-if-already-published                  | `check`, in the same fixture test (stub index)   | 2 curl-less assertions |
+| npm publish order, payload filling, skip-if-already-published                  | same fixture test (stub `npm` + stub payload)    | seconds                |
 
 No rehearsal gaps are left in that table, but three rows are release-shaped
 rather than per-PR on purpose: a second _library configuration_ of a suite that
@@ -110,7 +116,9 @@ official releases. Both run on every tag before `release` consumes the
 artifacts, which is the run that matters; the weekly job covers the first, so a
 break is found within seven days instead of at the tag. The third is the token
 exchange: a `release_tag` dispatch naming a tag whose versions are all on the
-index runs `publish` end to end and publishes nothing, which is the rehearsal.
+index runs `publish` end to end and publishes nothing, which is the rehearsal —
+and `publish-npm` in the same run rehearses the skip rule against the npm
+registry.
 
 The rules that used to be shell inside `release` are now
 `scripts/ci/collect-release-assets.sh` and `scripts/ci/release-notes.sh`, which
@@ -129,14 +137,14 @@ on every PR — that is the runner bill this shape exists to avoid.
 
 Rough runner-minutes per event (Linux ≈ 1×, Windows ≈ 4× billed):
 
-| Event                      | Jobs | Notes                                                                                                                                                |
-| -------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PR                         | 7    | ~2 min faster than a run that also re-ran the corpus against a scalar build; the static gates answer in ~2 min, the single addon build sets the tail |
-| push to main               | 4    | no addon work — the pull request already built that tree                                                                                             |
-| push of a tag              | 17   | dominated by the 9-target build matrix; `release` then `publish`, the latter usually skipping every crate                                            |
-| weekly schedule            | 14   | the full matrix + wasi bundle, so the heavy path is proven without publishing; also the advisory DB and "does today's stable build it"               |
-| dispatch, no `release_tag` | 15   | the smoke path for workflow changes: builds the matrix against the default branch, publishes nothing                                                 |
-| dispatch, `release_tag`    | 17   | `release` re-uploads the assets, `publish` proves the OIDC exchange and skips every version already on the index                                     |
+| Event                      | Jobs | Notes                                                                                                                                                                  |
+| -------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PR                         | 7    | ~2 min faster than a run that also re-ran the corpus against a scalar build; the static gates answer in ~2 min, the single addon build sets the tail                   |
+| push to main               | 4    | no addon work — the pull request already built that tree                                                                                                               |
+| push of a tag              | 18   | dominated by the 9-target build matrix; `release`, then `publish` (usually skipping every crate) and `publish-npm` in parallel                                         |
+| weekly schedule            | 14   | the full matrix + wasi bundle, so the heavy path is proven without publishing; also the advisory DB and "does today's stable build it"                                 |
+| dispatch, no `release_tag` | 15   | the smoke path for workflow changes: builds the matrix against the default branch, publishes nothing                                                                   |
+| dispatch, `release_tag`    | 18   | `release` re-uploads the assets, `publish` proves the OIDC exchange and skips every version already on the index, `publish-npm` does the same against the npm registry |
 
 Caches that keep this down: `Swatinem/rust-cache` with one `linux` key shared by
 `check`/`test` (same toolchain and lock, so one dependency cache serves both), a
@@ -157,6 +165,12 @@ build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
 | `publish` uses Trusted Publishing, not a secret           | crates.io mints a token per run through `rust-lang/crates-io-auth-action@v1` and `id-token: write`, so a stolen repository secret cannot publish a version; the trust is per crate (`rar-rs`, `rar-cli`, `rar-rs-napi`) and names this workflow file. It also waits on `needs: release`, because a version that reached the registry cannot be replaced — only yanked.                                                |
 | `publish` skips what is already on the index              | A `release_tag` dispatch exists to repair a half-published release; failing on the versions that did make it would defeat that. The skip also makes a re-pointed tag a no-op instead of a second permanent version.                                                                                                                                                                                                   |
 | `publish` overlays `scripts/ci` from its own commit       | `cargo publish` ships the working tree, so the checkout is the tag's tree; but a repair dispatch may name a tag cut before a fix to these scripts, and then the run would fail on a file that did not exist yet (exactly how v0.15.2's first `publish` run died: `No such file or directory`). Tooling from the workflow's commit, crates from the tag.                                                               |
+| npm packages are derived, not checked in                  | `napi create-npm-dirs` writes one package per `napi.targets` entry from `crates/rar-napi/package.json`, so names, versions and `os`/`cpu`/`libc` cannot drift from the build matrix; committing those directories would add a tenth place the version lives. `npm/` is gitignored and regenerated per publish.                                                                                                        |
+| `publish-npm` fills from the release payload              | The payload is what the `release` job checksums, so npm serves byte-for-byte what the GitHub Release serves, and a target whose addon is missing fails before a package that cannot load is published — the reason `collect-release-assets.sh` runs first instead of trusting the worktree.                                                                                                                           |
+| `publish-npm` puts the root package last                  | npm resolves a package's `optionalDependencies` right after the package itself, so a root published first leaves a window where `npm i rar-rs` installs nothing that can load. The order comes from the script, not from a checklist.                                                                                                                                                                                 |
+| `optionalDependencies` are read off the directories       | The alternative — a hand-kept list in `package.json` — is the same failure mode as a hand-kept target list: a platform added to the matrix and never to the list publishes a root package that points at nine of ten addons.                                                                                                                                                                                          |
+| `publish-npm` does not call `napi pre-publish`            | That helper runs `npm publish` per platform **and** uploads the same files as GitHub Release assets, which would race the `release` job; doing the two steps here keeps the asset set and the registry contents apart, and keeps the skip rule.                                                                                                                                                                       |
+| npm publishes with `--provenance`                         | `id-token: write` is already granted for crates.io's OIDC exchange, so the same run can attest the tarballs; `--access public` is what an unscoped publish needs on the first name and stays correct afterwards.                                                                                                                                                                                                      |
 | Dependabot, grouped                                       | The repo had already drifted (`actions/cache@v4` beside `v6`). Dependabot does not know `rust-version`, so a bump that raises the floor surfaces as a red `msrv` job.                                                                                                                                                                                                                                                 |
 | `retention-days: 7` on the artifacts                      | `release` consumes them in the same run; the 90-day default stores nine addons for three months.                                                                                                                                                                                                                                                                                                                      |
 | The addon matrix is data, in `scripts/ci/build-matrix.js` | Two events need two subsets of one list — nine entries on a tag, one on a PR. A `matrix:` literal per job would duplicate the targets, and a duplicated list is how the smoke target silently stops being the target that ships.                                                                                                                                                                                      |
@@ -183,7 +197,8 @@ build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
 - **SHA-pinning third-party actions.** They are pinned by major tag and tracked
   by Dependabot; the trade-off is a supply-chain surface in exchange for
   readable versions. Revisit if the repo ever gets a release key worth stealing
-  (it currently publishes with `GITHUB_TOKEN` and no registry tokens).
+  (it now holds `NPM_TOKEN`, which is a granular token limited to the `rar-rs`
+  packages — the other registry uses a per-run OIDC token).
 - **The JS/WASI binding suites in CI.** Owner's call (2026-09): they were the
   one flaky gate; they stay local. `docs/testing.md` is where the local covers
   them.
@@ -197,13 +212,17 @@ build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
    runs.
 3. `bash scripts/ci/test-release-scripts.sh` on its own when editing the release
    scripts (`collect-release-assets.sh`, `release-notes.sh`,
-   `publish-crates.sh`) or the build matrix (it is part of step 2 as well).
+   `publish-crates.sh`, `publish-npm.sh`) or the build matrix (it is part of
+   step 2 as well).
 4. `workflow_dispatch` with an empty `release_tag` — builds the whole matrix
    against the default branch and stops before `release`. That is the only way
    to test the heavy half without cutting a tag.
 5. To re-publish an existing tag: dispatch with `release_tag` set to it. If its
-   versions are already on crates.io, `publish` prints a `skip` for each and the
-   run is the rehearsal of the OIDC exchange.
+   versions are already on crates.io or npm, the publish jobs print a `skip` for
+   each and the run is the rehearsal of the OIDC exchange and the skip rule.
 6. A **new** crate name cannot be published through OIDC: crates.io needs the
    crate to exist before a Trusted Publisher can be attached to it, so the first
-   upload is a manual `cargo publish` with `publish-new`.
+   upload is a manual `cargo publish` with `publish-new`. npm has the same
+   limitation for every new package name, so the first npm publish of `rar-rs`
+   and its ten platform packages uses `NPM_TOKEN`; once they exist, a Trusted
+   Publisher per package replaces the secret.

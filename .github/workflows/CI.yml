@@ -854,3 +854,75 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: bash scripts/ci/publish-crates.sh
         shell: bash
+  publish-npm:
+    name: Publish to npm (${{ github.event.inputs.release_tag || github.ref_name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
+    needs:
+      - release
+    # The second job that writes outside the repository. `id-token: write` is
+    # only for the provenance attestation npm signs; the publish itself needs
+    # `NPM_TOKEN`, because npm cannot authorize the *first* publish of a name
+    # over OIDC — a trusted publisher can only be configured for a package that
+    # already exists. Once the eleven names exist, a Trusted Publisher entry per
+    # package (`CI.yml`, this repository) lets the token go away.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+          # Same reason as `publish`: the overlay needs the workflow's commit.
+          fetch-depth: 0
+      - name: Install node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/rar-napi/package-lock.json
+          # `actions/setup-node` writes the auth line into .npmrc from
+          # `NODE_AUTH_TOKEN`, which is how `npm publish` finds the secret.
+          registry-url: https://registry.npmjs.org
+      - name: Take the release scripts from the workflow's own commit
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin "$REF"
+          git checkout "$SHA" -- scripts/ci
+        shell: bash
+      - name: Verify the tag matches the workspace version
+        # The npm version is the crate version, so this is the same guard the
+        # crates.io job runs: publishing is what cannot be undone.
+        run: bash scripts/ci/check-versions.sh "${{ github.event.inputs.release_tag || github.ref_name }}"
+        shell: bash
+      - name: Install the CLI that generates the platform packages
+        working-directory: crates/rar-napi
+        run: npm ci
+      - name: Download the native bindings
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bindings-*
+          path: bindings
+      - name: Download WASI bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: bindings-wasm32-wasip1-threads
+          path: wasm
+      - name: Assemble the release payload
+        # The same script and the same rules as `release`: the tarballs npm
+        # serves and the assets the Release carries are one set of bytes.
+        run: bash scripts/ci/collect-release-assets.sh bindings wasm release .
+        shell: bash
+      - name: Create one npm package per target
+        working-directory: crates/rar-napi
+        run: ./node_modules/.bin/napi create-npm-dirs
+        shell: bash
+      - name: Publish the platform packages, then the root package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_PUBLISH_FLAGS: --access public --provenance
+        run: bash scripts/ci/publish-npm.sh release
+        shell: bash

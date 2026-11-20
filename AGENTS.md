@@ -20,8 +20,8 @@ job 能证明什么）与 [`docs/testing.md`](docs/testing.md)（测试分层）
 - `bash scripts/ci-lint.sh`（`--no-tests` 只跑静态部分；完整跑与 CI 的 `test`
   目标相同）。
 - 动了 `.github/workflows/` 再跑 `bash scripts/ci/run-actionlint.sh`；动了
-  `scripts/ci/collect-release-assets.sh`、`release-notes.sh` 或
-  `publish-crates.sh` 再跑
+  `scripts/ci/collect-release-assets.sh`、`release-notes.sh`、`publish-crates.sh`
+  或 `publish-npm.sh` 再跑
   `bash scripts/ci/test-release-scripts.sh`。actionlint/shellcheck 不在 PATH 时
   `ci-lint.sh` 打印 `SKIP:` ——**那不算通过**。
 - 本地 `cargo test` 缺 WinRAR
@@ -55,6 +55,18 @@ job 能证明什么）与 [`docs/testing.md`](docs/testing.md)（测试分层）
 - **Trusted Publishing 每个 crate 一条配置**（owner、repo、workflow 文件名、可选
   environment），workflow 文件名必须与仓库里这份一致（`CI.yml`）。新名字第一次
   仍需手工 `cargo publish`：crates.io 要求 crate 先存在才能挂可信发布者。
+- **发布到 npm 由 CI 的 `publish-npm` job
+  做**：`scripts/ci/publish-npm.sh`，`needs: release`，先填平台包、根包最后。
+- **`crates/rar-napi/npm/` 不入库**：那是 `napi create-npm-dirs` 从
+  `crates/rar-napi/package.json` 派生的 10
+  个平台包目录（名字、version、`os`/`cpu`/`libc` 全由那份清单推出来），发布时
+  重新生成。改 `napi.targets` 就是改 npm 上会出现哪些包名——`binding.js` 里写死的
+  `rar-rs-<platform>` 解析必须跟它一致。
+- **根包的 `optionalDependencies` 由脚本推导**，不手工维护：由
+  `npm/*/package.json` 的 `name` 合成。手工清单会漏掉新平台，`npm i rar-rs`
+  装到一个指不全依赖的根包。 根包 `files` 必须列出
+  `NOTICE`、`THIRD_PARTY_LICENSES.md`、`LICENSES`， `publish-npm.sh` 会断言（npm
+  只默认带 `LICENSE`）。
 - **MSRV 是 1.95**（`Cargo.toml` 的
   `rust-version`）：`crates/rar/src/archive/reader.rs` 用
   `AtomicU32::try_update`（1.95 稳定）。更旧的工具链会直接拒绝这个 crate。

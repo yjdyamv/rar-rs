@@ -139,6 +139,32 @@ target。`crates/rar-cli/src/lib.rs` 是**只有 `//!` 文档、零 item** 的�
       `publish` 对三个 crate 各打一行 `skip`（0.15.2 已在索引上），即 OIDC
       换取与跳过逻辑成立。
 
+### npm 发布（0.15.3 首发，待发）
+
+napi-rs 的产物此前只挂在 GitHub Release 上：`npm i rar-rs`
+不存在，`napi
+create-npm-dirs` 能生成的 10 个平台包也没人发。机制已落地成
+`scripts/ci/publish-npm.sh` + CI 的 `publish-npm` job（`needs: release`），
+剩下的是首次执行。
+
+- [x] **脚本与 job**：`napi create-npm-dirs` 从 `crates/rar-napi/package.json`
+      派生平台包，脚本用 Release payload 填字节，平台包先发、根包最后； 根包
+      staging 到临时目录（`binding.js`、wasm loader、`browser.js` 是 gitignored
+      的构建产物），`optionalDependencies` 由实际目录推导， `files` 必须列
+      `NOTICE`/`THIRD_PARTY_LICENSES.md`/`LICENSES`；已存在版本 打 `skip`（npm
+      版本号不可回收，失败重跑要能收敛）。`npm/` 目录不入库。 fixture
+      测试覆盖顺序、跳过、缺件、许可证四条。
+- [ ] **首发（必须手工/token）**：npm 的 Trusted Publishing 不能建新包，11
+      个名字全是新包，所以第一轮要 `NPM_TOKEN`（granular，`Read and write` +
+      bypass 2FA）。顺序：先给仓库加 secret，再打 tag `v0.15.3`——当前 `v0.15.2`
+      树里的 `package.json` 还没有那三条 `files`，直接拿它重发会在 「files does
+      not list NOTICE」处失败。
+- [ ] **首发后换 Trusted Publishing**：11 个包各配一条（owner `yjdyamv`、 repo
+      `rar-rs`、workflow `CI.yml`），然后删掉 `NPM_TOKEN`。
+- [x] **不需要 npm org**：11 个包名都是无 scope 的（`rar-rs`、
+      `rar-rs-<platform>`），`binding.js` 里写死的解析也是无 scope 形式；只有
+      想改成 `@scope/...` 才需要组织，而那要同时改前缀解析与根包名。
+
 发布闸门（本机 `cargo test --workspace --all-features`，stdin 接 EOF）：全绿
 （`rar-rs` 36 个 target、`rar-cli` 的 bins/`cli_behavior`/`volume_bare_name`、
 `rar-rs-napi` lib 全 ok）；WASI 与原生绑定都能构建。此前记录的两个环境性失败
@@ -177,11 +203,10 @@ target。`crates/rar-cli/src/lib.rs` 是**只有 `//!` 文档、零 item** 的�
       `ExtractArchiveOptions.collectErrors` 与 `ExtractionResult.failures`。
 - [x] **手写类型 + 编译闸门**：`rar-rs.d.ts` 为公开面，`npm run typecheck`
       （`tsc --noEmit` + `__test__/types.test-d.ts` 的编译期断言）进 CI。
-- [ ] **npm 打包（明确暂缓，别自行推进）**：多平台 `optionalDependencies`、 wasm
-      入口、`exports` 子路径、发布工作流。**按用户要求先不做**。开工前需定一个
-      **scope 名**：napi-rs 官方文档警告无 scope 的平台包名（如
-      `rar-rs-win32-x64-msvc`）可能触发 npm 的 spam 检测，建议平台包放 scope
-      下、主包保持 `rar-rs`。
+- [x] **npm 打包**：见上文「npm 发布」——平台包由 `napi create-npm-dirs`
+      派生，`optionalDependencies` 由脚本推导，发布走 `publish-npm.sh`。
+      首发（0.15.3）待执行：`NPM_TOKEN` 只在首次需要，之后换成 Trusted
+      Publishing。
 - [ ] **CI 首跑**：跨平台 build 矩阵与新增的 typecheck 步骤只做过静态修改，
       首次跑通必须由 CI 证明（本地无法覆盖）。`release`
       侧真正发布（`gh
@@ -548,14 +573,17 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
    `cargo package` 看不到根目录，缺副本就会发出一份没正文的许可声明。
 5. 打 tag `vX.Y.Z`（Release job 校验它等于 `crates/rar-napi` 的 Cargo.toml 与
    package.json）。
-6. **发 crates.io 不用手工**：tag 推上去后 `release` 发 GitHub 资产，紧接着
-   `publish` job 用 Trusted Publishing 换临时 token 跑
-   `scripts/ci/publish-crates.sh`（依赖顺序、轮询稀疏索引、已存在版本跳过）。
-   只有**新名字首次**仍需手工 `cargo publish`（crates.io 要求 crate 先存在才
-   能挂可信发布者），token 需 `publish-new`。发布失败只需重跑
-   `workflow_dispatch` 带同一个 `release_tag`：已发出的版本会被跳过。
+6. **发 crates.io / npm 都不用手工**：tag 推上去后 `release` 发 GitHub 资产，
+   紧接着 `publish` job 用 Trusted Publishing 换临时 token 跑
+   `scripts/ci/publish-crates.sh`（依赖顺序、轮询稀疏索引、已存在版本跳过），
+   `publish-npm` job 并行走 `scripts/ci/publish-npm.sh`（平台包先、根包最后）。
+   只有**新名字首次**仍需手工/token：crates.io 要求 crate 先存在才能挂可信
+   发布者（token 需 `publish-new`）；npm 同理，11 个包首发用 `NPM_TOKEN`。
+   发布失败只需重跑 `workflow_dispatch` 带同一个 `release_tag`：已发出的版本
+   会被跳过。
 7. 发布后复核：`cargo install rar-cli --locked` 能装能跑、
    `https://docs.rs/{rar-rs,rar-cli,rar-rs-napi}/X.Y.Z/<crate_with_underscores>/`
-   三条 200（`/status.json` 一律 404，别拿它当判据）。
+   三条 200（`/status.json` 一律 404，别拿它当判据）；`npm view rar-rs version`
+   与 `npm i rar-rs` 后 `require('rar-rs')` 能加载。
 8. 刷新本文件与 `README` / `CONTEXT` / `ARCHITECTURE` / `CLI` / `testing` 的
    `最后核对` 锚点。
