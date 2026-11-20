@@ -313,3 +313,122 @@ fn cli_non_unicode_arguments_do_not_panic() {
         "a missing source file must fail cleanly"
     );
 }
+
+/// A switch value is whatever the user types after the switch letter: it can
+/// overflow, be non-numeric, have the wrong shape or be empty. Every such form
+/// must come back as a clean rejection -- a non-zero exit and a normal
+/// message -- never a panic, an index-out-of-bounds, an arithmetic overflow or
+/// a hang. The broad sweep only asks "did it terminate cleanly"; the curated
+/// list pins that a value reaching a strict parser really is rejected.
+#[test]
+fn cli_malformed_switch_values_are_rejected_without_panicking() {
+    use std::process::Stdio;
+
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"probe").unwrap();
+    let archive = dir.path().join("t.rar");
+    let created = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-idq"])
+        .arg(&archive)
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(created.success(), "fixture archive must build");
+
+    // A child that reads stdin (a bare `-p`/`-z`/`@`) must see EOF, not the
+    // test runner's terminal, so a prompt cannot hang the suite.
+    let run = |token: &str| -> std::process::Output {
+        std::process::Command::new(RAR_CLI)
+            .arg("a")
+            .arg(token)
+            .arg(&archive)
+            .arg("f.txt")
+            .current_dir(dir.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let assert_clean = |token: &str, output: &std::process::Output| {
+        assert!(
+            output.status.code().is_some(),
+            "{token}: child was killed by a signal"
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for marker in [
+            "panicked",
+            "RUST_BACKTRACE",
+            "index out of bounds",
+            "attempt to",
+            "slice index",
+        ] {
+            assert!(
+                !combined.contains(marker),
+                "{token}: `{marker}` leaked: {combined}"
+            );
+        }
+    };
+
+    let long = "9".repeat(200);
+    let junk = [
+        "",
+        "-",
+        "%",
+        "1.5",
+        "abc",
+        "0x10",
+        "18446744073709551616",
+        long.as_str(),
+    ];
+    let prefixes = [
+        "-m", "-v", "-ta", "-tb", "-tk", "-tn", "-to", "-ts", "-sl", "-sm", "-mc", "-ma", "-md",
+        "-mdx", "-mt", "-ms", "-ap", "-ag", "-hp", "-rv", "-sc", "-e", "-x", "-n", "-z", "-p",
+    ];
+    let mut swept = 0usize;
+    for prefix in prefixes {
+        for value in junk {
+            let token = format!("{prefix}{value}");
+            let output = run(&token);
+            assert_clean(&token, &output);
+            swept += 1;
+        }
+    }
+    assert!(swept >= 200, "battery shrank unexpectedly: {swept}");
+
+    // Values no create-scoped switch of this shape can accept must be refused,
+    // proving the value reaches the parser instead of being silently dropped
+    // (a switch an unrelated command does not declare is dropped by design).
+    for token in [
+        "-m9",
+        "-mabc",
+        "-m-1",
+        "-m99999999999999999999",
+        "-vabc",
+        "-v1x2",
+        "-v99999999999999999999999",
+        "-taabc",
+        "-ta99999999999999999999",
+        "-tbabc",
+        "-mt0",
+        "-mtabc",
+        "-mt999999999999999999999",
+        "-mdabc",
+        "-md1x",
+        "-sl1x",
+        "-sm1x",
+        "-rv1x",
+        "-tk1x",
+    ] {
+        let output = run(token);
+        assert_clean(token, &output);
+        assert!(
+            !output.status.success(),
+            "{token}: a malformed value must be rejected, not accepted: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
