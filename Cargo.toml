@@ -14,6 +14,13 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
+# The minimum toolchain is 1.95, not the 1.85 `edition = "2024"` alone implies:
+# `AtomicU32::try_update` (crates/rar/src/archive/reader.rs) stabilized in
+# 1.95, and the dependency graph needs 1.89 on its own (aes 0.9, wide 1.7,
+# safe_arch 1.2). The `msrv` CI job compiles with exactly this version, so a
+# change that raises the floor without saying so fails the run instead of
+# surprising a consumer.
+rust-version = "1.95"
 # The project's own contributions are BSD-2-Clause (LICENSE). Portions ported
 # from other projects keep their own terms and are documented in NOTICE and
 # THIRD_PARTY_LICENSES.md rather than folded into this field, so a
