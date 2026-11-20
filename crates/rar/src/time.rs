@@ -149,18 +149,39 @@ pub fn local_civil_to_epoch(secs: u32) -> u32 {
 /// offset.
 pub fn local_civil_to_system_time(y: i64, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> SystemTime {
     let local = civil_to_epoch_secs(y, mo, d, h, mi, s) - local_offset_secs();
+    // A civil date outside `SystemTime`'s range must not panic on the
+    // add/subtract. On Windows the earliest representable instant is
+    // 1601-01-01 UTC, and the CLI's `-ta0000` (even `-ta1601`, once the local
+    // offset is applied) falls below it: subtracting that duration from
+    // `UNIX_EPOCH` overflowed. Clamp to the epoch — the date-filter callers
+    // already reduce a pre-epoch instant to second 0.
+    let delta = Duration::from_secs(local.unsigned_abs());
     if local >= 0 {
-        UNIX_EPOCH + Duration::from_secs(local as u64)
+        UNIX_EPOCH.checked_add(delta).unwrap_or(UNIX_EPOCH)
     } else {
-        UNIX_EPOCH - Duration::from_secs((-local) as u64)
+        UNIX_EPOCH.checked_sub(delta).unwrap_or(UNIX_EPOCH)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        civil_from_days, civil_to_epoch_secs, days_from_civil, local_offset_secs, snap_to_minute,
+        civil_from_days, civil_to_epoch_secs, days_from_civil, local_civil_to_system_time,
+        local_offset_secs, snap_to_minute,
     };
+    use std::time::UNIX_EPOCH;
+
+    /// A civil date far below `SystemTime`'s minimum (the CLI's `-ta0000`, and
+    /// `-ta1601` once the local offset is applied) must clamp instead of
+    /// panicking on `UNIX_EPOCH - Duration`.
+    #[test]
+    fn out_of_range_civil_dates_clamp_to_the_epoch() {
+        assert!(local_civil_to_system_time(0, 1, 1, 0, 0, 0) <= UNIX_EPOCH);
+        assert!(local_civil_to_system_time(1600, 1, 1, 0, 0, 0) <= UNIX_EPOCH);
+        assert!(local_civil_to_system_time(1601, 1, 1, 0, 0, 0) <= UNIX_EPOCH);
+        // A representable future date still lands after the epoch.
+        assert!(local_civil_to_system_time(9999, 12, 31, 23, 59, 59) > UNIX_EPOCH);
+    }
 
     #[test]
     fn snap_to_minute_rounds_the_clock_tick_wobble() {
