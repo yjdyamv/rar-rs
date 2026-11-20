@@ -861,12 +861,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
     needs:
       - release
-    # The second job that writes outside the repository. `id-token: write` is
-    # only for the provenance attestation npm signs; the publish itself needs
-    # `NPM_TOKEN`, because npm cannot authorize the *first* publish of a name
-    # over OIDC — a trusted publisher can only be configured for a package that
-    # already exists. Once `@yjdyamv/rar-rs` exists, a Trusted Publisher entry
-    # for it (`CI.yml`, this repository) lets the token go away.
+    # The second job that writes outside the repository, and the second to use
+    # OIDC: `id-token: write` lets npm exchange a short-lived publishing token
+    # (and signs the provenance attestation), so no secret is stored. That works
+    # only once a Trusted Publisher entry names this workflow for the package —
+    # npm cannot authorize the *first* publish of a name that way, which is why
+    # the first one was done by hand with a token.
     permissions:
       contents: read
       id-token: write
@@ -882,9 +882,6 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: crates/rar-napi/package-lock.json
-          # `actions/setup-node` writes the auth line into .npmrc from
-          # `NODE_AUTH_TOKEN`, which is how `npm publish` finds the secret.
-          registry-url: https://registry.npmjs.org
       - name: Take the release scripts from the workflow's own commit
         env:
           REF: ${{ github.ref }}
@@ -914,8 +911,10 @@ jobs:
         run: bash scripts/ci/collect-release-assets.sh bindings wasm release .
         shell: bash
       - name: Publish the package that carries every platform binary
+        # No `NODE_AUTH_TOKEN`: with `id-token: write` npm exchanges the workflow
+        # identity for a publishing token, the same way `publish` does with
+        # crates.io. `--provenance` signs the tarball with that identity.
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_PUBLISH_FLAGS: --access public --provenance
         run: bash scripts/ci/publish-npm.sh release
         shell: bash

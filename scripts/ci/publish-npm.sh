@@ -25,9 +25,10 @@
 #   PAYLOAD_DIR  flattened release payload (default: release/)
 #
 # Environment: NPM (default `npm`), ROOT (default `.`), NPM_PUBLISH_FLAGS
-# (default `--access public`; the workflow adds `--provenance`). The token comes
-# from `NODE_AUTH_TOKEN`, which is how npm itself reads an injected secret —
-# this script never handles it.
+# (default `--access public`; the workflow adds `--provenance`). Credentials are
+# either a token in `NODE_AUTH_TOKEN` (how npm reads an injected secret) or npm's
+# own OIDC exchange, which the workflow gets from `id-token: write` — this script
+# handles neither, it only checks that one of them is there.
 set -euo pipefail
 export LC_ALL=C
 
@@ -76,12 +77,17 @@ json() {
 [ -d "$payload" ] ||
   fail "no payload directory at $payload — run collect-release-assets.sh first"
 
-# npm reads the token from `NODE_AUTH_TOKEN` (what `actions/setup-node` turns
-# into an `.npmrc` line) or from `~/.npmrc`. Failing here names the missing
-# secret; failing at `npm publish` would come after the Release and read as
-# "npm is broken". A dry run needs none of this.
-if ((!dry_run)) && [ -z "${NODE_AUTH_TOKEN:-}" ] && ! grep -q _authToken "$HOME/.npmrc" 2>/dev/null; then
-  fail "no npm credentials: set NODE_AUTH_TOKEN (and note that a *new* package name cannot be published over OIDC)"
+# npm authenticates two ways here: a token in `NODE_AUTH_TOKEN` (what
+# `actions/setup-node` turns into an `.npmrc` line), or its own OIDC exchange,
+# available whenever the job granted `id-token: write` — Actions exports
+# `ACTIONS_ID_TOKEN_REQUEST_URL` for exactly that, and CI relies on it so no
+# secret is stored. Failing here names the missing credential; failing at
+# `npm publish` would come after the Release and read as "npm is broken". A dry
+# run needs neither.
+has_oidc=0
+[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && has_oidc=1
+if ((!dry_run)) && [ -z "${NODE_AUTH_TOKEN:-}" ] && [ "$has_oidc" -eq 0 ] && ! grep -q _authToken "$HOME/.npmrc" 2>/dev/null; then
+  fail "no npm credentials: set NODE_AUTH_TOKEN, or grant the job id-token: write so npm can exchange an OIDC token, or put an authToken in ~/.npmrc"
 fi
 
 name=$(json "$package_dir/package.json" .name)

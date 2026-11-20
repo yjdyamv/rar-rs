@@ -424,6 +424,17 @@ expect_failure 'publish-npm: a run without credentials fails' \
 check 'publish-npm: a run without credentials names the secret' \
   'no npm credentials' "$(cat "$tmp/out.log")"
 
+# npm's OIDC exchange is the other way in, and it is the one CI uses: the job
+# grants `id-token: write` and Actions exports `ACTIONS_ID_TOKEN_REQUEST_URL`.
+# A run with no token at all must therefore proceed (here: to the skip rule).
+printf '@yjdyamv/rar-rs@1.2.3\n' >"$published"
+oidc_run=$(env -u NODE_AUTH_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL=https://example.invalid/token \
+  PATH="$stub_bin:$PATH" ROOT="$root" NPM_STAGE_DIR="$stage" HOME="$tmp/empty-home" \
+  FAKE_NPM_PUBLISHED="$published" FAKE_NPM_LOG="$log" bash "$npm_publish" "$payload")
+check 'publish-npm: an OIDC identity alone is enough to run' \
+  'skip  @yjdyamv/rar-rs 1.2.3' "$oidc_run"
+: >"$published"
+
 # The payload is the authority: an addon the build matrix promised but the
 # payload does not carry must fail here, not publish a package that installs on
 # that platform and cannot load.

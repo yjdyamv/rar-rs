@@ -171,13 +171,13 @@ napi-rs 的产物此前只挂在 GitHub Release 上，npm
       secret）。首发已经手工完成，所以现在给 `@yjdyamv/rar-rs` 配 Trusted
       Publisher （owner `yjdyamv`、repo `rar-rs`、workflow
       `CI.yml`）就能彻底不要 secret。
-- [ ] **残留的 `0.0.0-stage`**：npm 的 staged publish 在被 kill 后留下一个
-      `0.0.0-stage` 版本（无 dist-tag，不影响 `npm i`）。删除它需要**不 bypass
+- [x] **残留的 `0.0.0-stage`（已删）**：npm 的 staged publish 被 kill 后留下一
+      个 `0.0.0-stage` 版本（无 dist-tag，不影响 `npm i`）。删除要**不 bypass
       2FA** 的
-      token：`npm unpublish "@yjdyamv/rar-rs@0.0.0-stage" --force`，再按提示
-      在浏览器里确认（或 `--otp=`）。用 bypass token 会拿到 403（npm
-      的策略），用 包权限不匹配的 token 会拿到 404 而且 **CLI 仍然 exit
-      0**（假成功，注意）。
+      token：`npm unpublish "@yjdyamv/rar-rs@0.0.0-stage" --force`，再按
+      提示在浏览器里确认（或 `--otp=`）。用 bypass token 会拿到 403（npm 的策
+      略），用包权限不匹配的 token 会拿到 404 而且 **CLI 仍然 exit 0**（假成
+      功，注意）。已删，registry 上只剩 0.15.2。
 
 发布闸门（本机 `cargo test --workspace --all-features`，stdin 接 EOF）：全绿
 （`rar-rs` 36 个 target、`rar-cli` 的 bins/`cli_behavior`/`volume_bare_name`、

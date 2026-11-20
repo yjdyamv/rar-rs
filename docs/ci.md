@@ -197,8 +197,7 @@ build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
 - **SHA-pinning third-party actions.** They are pinned by major tag and tracked
   by Dependabot; the trade-off is a supply-chain surface in exchange for
   readable versions. Revisit if the repo ever gets a release key worth stealing
-  (it now holds `NPM_TOKEN`, which is a granular token limited to the `rar-rs`
-  packages — the other registry uses a per-run OIDC token).
+  (both registries use a per-run OIDC token, so no long-lived secret is stored).
 - **The JS/WASI binding suites in CI.** Owner's call (2026-09): they were the
   one flaky gate; they stay local. `docs/testing.md` is where the local covers
   them.
@@ -224,5 +223,6 @@ build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
    crate to exist before a Trusted Publisher can be attached to it, so the first
    upload is a manual `cargo publish` with `publish-new`. npm has the same
    limitation for a new package name, so the first npm publish of
-   `@yjdyamv/rar-rs` uses `NPM_TOKEN`; once it exists, a Trusted Publisher entry
-   for that package replaces the secret.
+   `@yjdyamv/rar-rs` was done by hand with a token; once a Trusted Publisher
+   entry names this workflow, the job needs no secret (it already asks for
+   `id-token: write` and passes `--provenance`).
