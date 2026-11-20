@@ -82,25 +82,35 @@
 
 ## 下一步
 
-### 发布 0.15.0（进行中）
+### 发布 0.15.1（进行中）
 
-0.14.0 已发布到 GitHub（tag + Release，2026-11-03），但 crates.io 三个 crate 仍
-未发布。HEAD 相对 `v0.14.0` 有 186 个提交（`-x`/`-n` 选择器、绝对路径命名修复、
-WASI 工具链升级等），按变更取 **0.15.0**。版本面已收口：五处版本一致（三个 crate
-的 `[package] version`、`crates/rar-napi/package.json`、根 `Cargo.toml` 的
-workspace 依赖），`Cargo.lock` 与 `fuzz/Cargo.lock`
-已刷新，`cargo package -p
-rar-rs` 校验通过。剩下的是执行：
+0.14.0 已发布到 GitHub（tag + Release，2026-11-03），crates.io 三个 crate 仍
+未发布。 **`v0.15.0` 的 tag 与 GitHub Release 已于 2026-11-18 发出**，但此后
+HEAD 又积累了 22 个提交，其中五个是真修复（RAR5 在 32
+位主机上的字典上限与编码器字典大小、 RAR4 恢复记录大小检查下溢、`-inul`
+压掉错误信息、`--help`/`-?` 在所有位置当根级 开关），另有 `rust-version = 1.95`
+与 CI 重写。`cargo publish` 打的是**工作树**， 发 0.15.0 会与已发布的 Release
+资产不是同一棵树，而 crates.io 只能 yank、版本号 永久占用。所以按变更取
+**0.15.1**，把 0.15.0 那批与之后 22 个提交一起发。
 
-- [ ] **打 tag `v0.15.0`**（annotated，正文按 Library / CLI / Build 分组）——
+版本面已收口：五处版本一致（三个 crate 的 `[package] version`、
+`crates/rar-napi/package.json`、根 `Cargo.toml` 的 workspace 依赖），
+`Cargo.lock` 与 `fuzz/Cargo.lock` 已刷新，`cargo package -p rar-rs` 校验通过。
+`crates/rar/`、`crates/rar-cli/`、`crates/rar-napi/` 各自带上
+`LICENSE`、`NOTICE`、`THIRD_PARTY_LICENSES.md`、`LICENSES/` 的逐字节副本—— 此前
+tarball 里只有 `README.md`，首次发布就是一份没有正文的 `BSD-2-Clause`
+声明，`scripts/ci/check-crate-licenses.sh` 守住这一点。剩下的是执行：
+
+- [ ] **打 tag `v0.15.1`**（annotated，正文按 Library / CLI / Build 分组）——
       GitHub Release 矩阵在 tag 上跑。
 - [ ] **`cargo publish` 按顺序**：`rar-rs` → `rar-cli` / `rar-rs-napi`
       （crates.io 首次；后两者依赖 workspace 内的
       `rar-rs`，必须先有前者，在此之前 `cargo package -p rar-cli` 会报找不到
-      `rar-rs`，属预期）。
+      `rar-rs`，属预期）。先 `cargo login`（token 需 `publish-new` +
+      `publish-update` 权限），索引可见后再发后两个。
 - [ ] **发布后做一遍下游实测**：从 crates.io 干净拉取 `rar-cli` 的临时工程，
       `cargo install rar-cli` 能跑；`rar-rs-napi` 的 `.node` 与 wasm 产物照 CI
-      release job 的路径复核一次。
+      release job 的路径复核一次；docs.rs 三个 crate 都能构建。
 
 发布闸门（本机 `cargo test --workspace --all-features`，stdin 接 EOF）：全绿
 （`rar-rs` 36 个 target、`rar-cli` 的 bins/`cli_behavior`/`volume_bare_name`、
@@ -502,9 +512,19 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
    `[package] version`，`crates/rar-napi/package.json`，根 `Cargo.toml` 的
    `[workspace.dependencies] rar-rs`。
 2. 刷新 `Cargo.lock` 与 `fuzz/Cargo.lock`（两个 CI 检查都带 `--locked`）。
+   只改版本号时不要整个 `cargo update` fuzz 工作区——那会顺带升级一堆依赖， 把
+   `fuzz/Cargo.lock` 里 `rar-rs` 那一行的 version 改掉就够了。
 3. 本地跑测试闸门：`cargo test --workspace --all-features`（CI 只跑 smoke）。
-4. 打 tag `vX.Y.Z`（Release job 校验它等于 `crates/rar-napi` 的 Cargo.toml 与
+4. 确认三个 crate 目录里的 `LICENSE` / `NOTICE` / `THIRD_PARTY_LICENSES.md` /
+   `LICENSES/` 与根目录逐字节相同（`bash scripts/ci/check-crate-licenses.sh`）：
+   `cargo package` 看不到根目录，缺副本就会发出一份没正文的许可声明。
+5. 打 tag `vX.Y.Z`（Release job 校验它等于 `crates/rar-napi` 的 Cargo.toml 与
    package.json）。
-5. 按顺序 `cargo publish`：`rar-rs` → `rar-cli` / `rar-rs-napi`。
-6. 刷新本文件与 `README` / `CONTEXT` / `ARCHITECTURE` / `CLI` / `testing` 的
+6. `cargo login`（token 需 `publish-new` + `publish-update`），然后按顺序
+   `cargo publish`：`rar-rs` → 等索引可见 → `rar-cli` / `rar-rs-napi`。
+   先对后两个跑 `cargo publish --dry-run`：在 `rar-rs` 上索引之前它们必然 报
+   `no matching package named 'rar-rs' found`。
+7. 发布后复核：`cargo install rar-cli --locked` 能装能跑、docs.rs 三个 crate
+   都构建成功。
+8. 刷新本文件与 `README` / `CONTEXT` / `ARCHITECTURE` / `CLI` / `testing` 的
    `最后核对` 锚点。

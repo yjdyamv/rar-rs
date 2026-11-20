@@ -7,6 +7,7 @@
 #   scripts/ci/run-actionlint.sh           workflow-file lint (opt-in locally)
 #                                          plus shellcheck over the shell scripts
 #   scripts/ci/check-host-paths.sh          host-path separator guard
+#   scripts/ci/check-crate-licenses.sh      the legal texts each crate ships
 #   scripts/ci/check-versions.sh            the five version-bearing places
 #   scripts/ci/clippy-feature-matrix.sh     rar-rs, the feature combinations the
 #                                          workspace build cannot cover
@@ -116,6 +117,9 @@ run bash scripts/ci/check-host-paths.sh
 
 step "workspace versions agree"
 run bash scripts/ci/check-versions.sh
+
+step "crate license texts match the root copies"
+run bash scripts/ci/check-crate-licenses.sh
 
 step "cargo check (rar-rs, wasm target, -D warnings)"
 RUSTFLAGS="-D warnings" run cargo check -p rar-rs --all-features \

@@ -205,6 +205,14 @@ jobs:
         # five places must agree with each other, and `release` separately
         # proves they agree with the tag.
         run: bash scripts/ci/check-versions.sh
+      - name: Crate license texts match the root copies
+        # `cargo package` only ships files under the package directory, so each
+        # crate carries a copy of `LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES.md`
+        # and `LICENSES/`. Editing the root text and forgetting the copies
+        # publishes a crate whose license declaration has no text behind it —
+        # and crates.io cannot take a tarball back. The comparison lives in the
+        # script so `scripts/ci-lint.sh` runs the same one.
+        run: bash scripts/ci/check-crate-licenses.sh
       - name: Cargo check (rar-rs, wasm target, -D warnings)
         # The only `cargo check` left: clippy below already compiles the
         # workspace and every rar-rs feature combination, so a plain host check
