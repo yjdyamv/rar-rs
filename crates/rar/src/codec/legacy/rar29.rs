@@ -608,7 +608,12 @@ impl Rar29Decoder {
 
         let mut block_start = vm.read_encoded_u32()? as usize;
         if first_byte & 0x40 != 0 {
-            block_start += 258;
+            // `read_encoded_u32` can return up to `u32::MAX`; adding the 258-byte
+            // VM header offset then overflows `usize` on a 32-bit host. Mirror
+            // the `checked_add` on the next line instead of panicking/wrapping.
+            block_start = block_start
+                .checked_add(258)
+                .ok_or(E::Bad("VM block start overflows"))?;
         }
         block_start = self
             .history
@@ -1307,6 +1312,26 @@ mod tests {
         }
         data.truncate(bytes);
         data
+    }
+
+    /// A crafted VM filter record can make `read_encoded_u32` return
+    /// `0xFFFF_FFFF`; the 258-byte VM header offset then overflowed `usize` on a
+    /// 32-bit host. The check must turn that into the same "overflows" error the
+    /// following `checked_add` already produces (before the fix it panicked).
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn vm_block_start_overflow_is_rejected_on_32_bit() {
+        // tag 3 (16 + 16 bits), both halves 0xFFFF -> 0xFFFF_FFFF.
+        let data = vec![0xFF, 0xFF, 0xFF, 0xFF, 0xC0];
+        // first_byte 0x40: the 258-byte offset is added; without 0x80 the value
+        // read first is `block_start`, not the program index.
+        let err = Rar29Decoder::new()
+            .parse_vm_code(0x40, data)
+            .expect_err("must reject the overflowing block start");
+        assert!(
+            matches!(err, E::Bad(message) if message.contains("overflows")),
+            "{err:?}"
+        );
     }
 
     #[test]
