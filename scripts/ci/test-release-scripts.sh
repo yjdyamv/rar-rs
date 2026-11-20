@@ -446,7 +446,7 @@ mv "$tmp/held-addon.node" "$payload/rar-rs-napi.darwin-arm64.node"
 
 sed -i.bak '/"NOTICE",/d' "$npm_package/package.json"
 expect_failure 'publish-npm: a files list without the notices fails' run_npm
-check 'publish-npm: a missing notice is named' 'files does not list NOTICE' \
+check 'publish-npm: a missing notice is named' 'does not list NOTICE' \
   "$(cat "$tmp/out.log")"
 mv "$npm_package/package.json.bak" "$npm_package/package.json"
 

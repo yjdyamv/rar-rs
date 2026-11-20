@@ -218,7 +218,13 @@ build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
    to test the heavy half without cutting a tag.
 5. To re-publish an existing tag: dispatch with `release_tag` set to it. If its
    versions are already on crates.io or npm, the publish jobs print a `skip` for
-   each and the run is the rehearsal of the OIDC exchange and the skip rule.
+   each and the run is the rehearsal of the OIDC exchange and the skip rule. The
+   overlay is **tooling only**: `scripts/ci` comes from the workflow's commit,
+   but `Cargo.toml` and `package.json` come from the tag, so a change to a
+   manifest still needs a new tag — dispatching `v0.15.2` fails at
+   `does not list NOTICE`, because that tree's `package.json` predates the
+   `files` additions. The validation runs _before_ the skip for this reason: a
+   re-run of a broken payload fails instead of reporting a clean skip.
 6. A **new** crate name cannot be published through OIDC: crates.io needs the
    crate to exist before a Trusted Publisher can be attached to it, so the first
    upload is a manual `cargo publish` with `publish-new`. npm has the same

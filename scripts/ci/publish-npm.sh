@@ -210,7 +210,7 @@ STUB
 for entry in NOTICE THIRD_PARTY_LICENSES.md LICENSES; do
   case $(json "$package_dir/package.json" ".files.join('\n')") in
     *"$entry"*) ;;
-    *) fail "files does not list $entry — npm would publish without it" ;;
+    *) fail "$package_dir/package.json does not list $entry — npm would publish without it (note that the manifest comes from the tag, so an old tag cannot be re-published this way)" ;;
   esac
 done
 
