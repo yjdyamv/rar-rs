@@ -113,6 +113,14 @@ tarball 里只有 `README.md`，首次发布就是一份没有正文的 `BSD-2-C
       构建成功，**`rar-cli` 失败**——docs.rs 固定跑 `cargo rustdoc --lib`， 而该
       crate 只有两个 bin。
 
+### 0.15.3：第一次由 CI 自己发布（已发）
+
+无功能改动，只为让 `publish` 与 `publish-npm` 第一次走发布分支（此前只打过
+`skip`：0.15.1/0.15.2 都是手工发的）。tag `v0.15.3`、run `44735569928` 全绿，
+三个 crate 与 npm 包都是 CI 用 OIDC 发的，npm 侧带 SLSA provenance。可复用的
+教训：npm 的版本号一旦用过就永久作废（`npm unpublish` 之后也不能重发），所以
+「删包重发同一个版本」这条路不存在；要验证发布链路只能升版本。
+
 ### 0.15.2：给 rar-cli 一个库目标（已发）
 
 docs.rs 的 `cargo-args` 只能传选项、不能换子命令，所以修法只有新增 lib
@@ -167,16 +175,17 @@ napi-rs 的产物此前只挂在 GitHub Release 上，npm
       均正常。发布过程中踩到两件事值得记：npm 的 `PUT` 返回 202 后 tarball
       还要几分钟才可下载（别立刻判定失败）；granular token 没勾 bypass 2FA 时
       `npm publish` 会报 `EOTP`。
-- [x] **CI 里发（已就绪，未真跑）**：`publish-npm` 走
-      OIDC（`id-token:
-      write` + `--provenance`），`@yjdyamv/rar-rs` 的
-      Trusted Publisher 已配好 （owner `yjdyamv`、repo `rar-rs`、workflow
-      `CI.yml`），仓库不存 secret。注意 两个 registry
-      的**发布**路径至今只在「已存在则 skip」这条分支上跑过（0.15.2
-      是先手工发的），所以下一次真实发版才是第一次端到端；0.15.2 没法拿来验证
-      ——它会直接 skip。失败也不要紧：`publish`/`publish-npm` 的脚本取自 workflow
-      所在提交（tag 树只提供 crate 内容），改完 `main` 用同一个 tag
-      `workflow_dispatch` 重跑即可，不消耗版本号。
+- [x] **CI 里发（已真跑）**：`publish-npm` 走 OIDC（`id-token: write` +
+      `--provenance`），`@yjdyamv/rar-rs` 的 Trusted Publisher 已配好（owner
+      `yjdyamv`、repo `rar-rs`、workflow `CI.yml`），仓库不存 secret。 **v0.15.3
+      是第一次真发布**（run `44735569928`）：crates.io 三个 crate 全是
+      `Uploading` 而非 `skip`，npm 的 `_npmUser` 是
+      `GitHub Actions <npm-oidc-no-reply@github.com>` +
+      `trustedPublisher.github`， attestation 为 SLSA provenance v1，28 文件
+      14.2 MB。此后 dispatch 旧 tag 只会 skip；改脚本能在 `main`
+      上修好再用同一个 tag 重跑（脚本取自 workflow 提交），但**改
+      `Cargo.toml`/`package.json` 必须新打 tag**——`v0.15.2` 就是这么 死在
+      `does not list NOTICE` 上的。
 - [x] **残留的 `0.0.0-stage`（已删）**：npm 的 staged publish 被 kill 后留下一
       个 `0.0.0-stage` 版本（无 dist-tag，不影响 `npm i`）。删除要**不 bypass
       2FA** 的
