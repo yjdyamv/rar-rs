@@ -19,6 +19,3 @@ wasi-worker*.mjs
 *.node
 *.wasm
 
-# `napi create-npm-dirs` writes one package per target here, at publish time.
-# Regenerated from `package.json` on every publish, so it is not a source file.
-npm/

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Fixture tests for the three scripts the `release` job runs.
+# Fixture tests for the release scripts the `release` and `publish` jobs run.
 #
 # The point is that the release payload's rules — one addon per platform, every
 # WASI file present, a reproducible generated loader, no flattened-license
 # collision, the release-notes grouping, the refusal to replace published bytes
-# without being asked, and the npm publish order — are enforced on every push,
+# without being asked, and what the npm tarball carries — are enforced on every
+# push,
 # not discovered by the first tag. These scripts are pure filesystem/git logic plus a stubbed `gh`, so
 # seconds of fixtures here replace a nine-target rebuild.
 #
@@ -275,11 +276,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# publish-npm.sh: the platform packages are derived from package.json and
-# filled from the payload, so what a fixture can prove is exactly what a real
-# tag would get wrong — a target publishing without its binary, the root
-# package's `optionalDependencies` missing a platform, a notice dropped from
-# `files`, or the root going up before the packages it names.
+# publish-npm.sh: one package carrying every platform binary. What a fixture
+# proves is exactly what a real tag would get wrong — a target shipping without
+# its addon, an artifact that never reaches the tarball, a notice dropped from
+# `files`, a README not taken from the repository root, or a staged manifest
+# that still names per-platform packages nobody publishes any more.
 # ---------------------------------------------------------------------------
 npm_publish="$here/publish-npm.sh"
 # `json()` in the script reads package.json with node, and node.exe does not
@@ -287,51 +288,58 @@ npm_publish="$here/publish-npm.sh"
 # Windows form here and the plain path on Linux.
 fixture=$(cd "$tmp" && { pwd -W 2>/dev/null || pwd; })/npm
 payload="$fixture/payload"
-npmdirs="$fixture/npm-dirs"
 root="$fixture/root"
 npm_package="$root/crates/rar-napi"
-mkdir -p "$payload" "$npmdirs" "$npm_package"
+mkdir -p "$payload" "$npm_package/LICENSES"
 
-# mkpkg <dir> <name> <version> <main> <file>...
-mkpkg() {
-  local dir=$1 name=$2 version=$3 main=$4 sep=''
-  shift 4
-  mkdir -p "$dir"
-  {
-    printf '{\n  "name": "%s",\n  "version": "%s",\n  "main": "%s",\n  "files": [' "$name" "$version" "$main"
-    for file in "$@"; do
-      printf '%s"%s"' "$sep" "$file"
-      sep=', '
-    done
-    printf ']\n}\n'
-  } >"$dir/package.json"
-  printf '# %s\n' "$name" >"$dir/README.md"
+# Three native targets plus the WASI one stand in for the real matrix: the
+# script derives what it expects from `napi.targets`, so a fixture with three
+# triples and three addons exercises the same arithmetic as nine.
+cat >"$npm_package/package.json" <<'JSON'
+{
+  "name": "@yjdyamv/rar-rs",
+  "version": "1.2.3",
+  "main": "rar-rs.js",
+  "files": [
+    "rar-rs.js",
+    "binding.js",
+    "binding.d.ts",
+    "browser.js",
+    "README.md",
+    "*.node",
+    "rar-rs-napi.wasm32-wasi.wasm",
+    "rar-rs-napi.wasi.cjs",
+    "wasi-worker.mjs",
+    "NOTICE",
+    "THIRD_PARTY_LICENSES.md",
+    "LICENSES"
+  ],
+  "napi": {
+    "binaryName": "rar-rs-napi",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "wasm32-wasip1-threads"
+    ]
+  }
 }
+JSON
 
-mkpkg "$npm_package" rar-rs 1.2.3 rar-rs.js \
-  rar-rs.js binding.js rar-rs-napi.wasm32-wasi.wasm README.md browser.js \
-  NOTICE THIRD_PARTY_LICENSES.md LICENSES
-mkpkg "$npmdirs/darwin-arm64" rar-rs-darwin-arm64 1.2.3 \
-  rar-rs-napi.darwin-arm64.node rar-rs-napi.darwin-arm64.node
-mkpkg "$npmdirs/linux-x64-gnu" rar-rs-linux-x64-gnu 1.2.3 \
-  rar-rs-napi.linux-x64-gnu.node rar-rs-napi.linux-x64-gnu.node
-mkpkg "$npmdirs/wasm32-wasi" rar-rs-wasm32-wasi 1.2.3 rar-rs-napi.wasi.cjs \
-  rar-rs-napi.wasm32-wasi.wasm rar-rs-napi.wasi.cjs
-
-for file in rar-rs.js binding.js LICENSE NOTICE THIRD_PARTY_LICENSES.md; do
+for file in rar-rs.js binding.js binding.d.ts LICENSE NOTICE THIRD_PARTY_LICENSES.md; do
   printf '%s\n' "$file" >"$npm_package/$file"
 done
-mkdir -p "$npm_package/LICENSES"
 printf 'MIT\n' >"$npm_package/LICENSES/MIT.txt"
 printf '# rar-rs\n\nROOT-README marker.\n' >"$root/README.md"
-for file in rar-rs-napi.darwin-arm64.node rar-rs-napi.linux-x64-gnu.node \
-  rar-rs-napi.wasm32-wasi.wasm rar-rs-napi.wasi.cjs binding.js; do
+for file in rar-rs-napi.win32-x64-msvc.node rar-rs-napi.darwin-arm64.node \
+  rar-rs-napi.linux-x64-gnu.node rar-rs-napi.wasm32-wasi.wasm \
+  rar-rs-napi.wasi.cjs wasi-worker.mjs; do
   printf '%s\n' "$file" >"$payload/$file"
 done
 
 # The stub answers the two commands the script makes: `view` decides the skip
 # rule from $FAKE_NPM_PUBLISHED (one `name@version` per line), and `publish`
-# records which package directory it ran in, so the order is observable.
+# records the name it was handed, so a publish that never happened is visible.
 cat >"$stub_bin/npm" <<'STUB'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -350,49 +358,61 @@ log="$tmp/npm-log"
 stage="$fixture/stage"
 : >"$published"
 : >"$log"
+mkdir -p "$tmp/empty-home"
 run_npm() {
   PATH="$stub_bin:$PATH" ROOT="$root" NPM_STAGE_DIR="$stage" \
     NODE_AUTH_TOKEN=fixture-token HOME="$tmp/empty-home" \
     FAKE_NPM_PUBLISHED="$published" FAKE_NPM_LOG="$log" \
-    bash "$npm_publish" "$payload" "$npmdirs" "$@"
+    bash "$npm_publish" "$payload" "$@"
 }
-mkdir -p "$tmp/empty-home"
+staged="$stage/@yjdyamv/rar-rs"
 
 plan=$(run_npm --dry-run)
-check 'publish-npm: the dry run plans each platform package' \
-  'would publish rar-rs-darwin-arm64 1.2.3' "$plan"
-check 'publish-npm: the dry run ends with the root package' \
-  'would publish rar-rs 1.2.3' "$(tail -2 <<<"$plan" | head -1)"
+check 'publish-npm: the dry run plans the package' \
+  'would publish @yjdyamv/rar-rs 1.2.3' "$plan"
+check 'publish-npm: the dry run counts every artifact' \
+  'with 4 artifact(s)' "$plan"
 check_absent 'publish-npm: the dry run publishes nothing' rar-rs "$(cat "$log")"
 
 run_npm >"$tmp/npm.log"
 published_count=$(wc -l <"$log" | tr -d ' ')
-if [ "$published_count" = 4 ]; then
-  ok 'publish-npm: publishes four packages, one per platform plus the root'
+if [ "$published_count" = 1 ]; then
+  ok 'publish-npm: publishes one package, not one per platform'
 else
-  not_ok "publish-npm: published [$published_count] packages, expected 4"
+  not_ok "publish-npm: published [$published_count] packages, expected 1"
 fi
-check 'publish-npm: the root package goes last' rar-rs "$(tail -1 "$log")"
-check 'publish-npm: the WASI package is published too' rar-rs-wasm32-wasi \
-  "$(tr '\n' ' ' <"$log")"
-check 'publish-npm: optionalDependencies name each platform package' \
-  '"rar-rs-linux-x64-gnu": "1.2.3"' "$(cat "$stage/rar-rs/package.json")"
+check 'publish-npm: the published name carries the scope' '@yjdyamv/rar-rs' \
+  "$(cat "$log")"
+
+check 'publish-npm: every native addon travels with the package' \
+  rar-rs-napi.linux-x64-gnu.node "$(ls "$staged")"
+check 'publish-npm: the platform spelling is not needed to fill the package' \
+  rar-rs-napi.win32-x64-msvc.node "$(ls "$staged")"
+check 'publish-npm: the WASI binary travels too' rar-rs-napi.wasm32-wasi.wasm \
+  "$(ls "$staged")"
+check 'publish-npm: the WASI worker scripts travel too' wasi-worker.mjs \
+  "$(ls "$staged")"
+check 'publish-npm: the staged manifest globs the addons in' '"*.node"' \
+  "$(cat "$staged/package.json")"
+check_absent 'publish-npm: the staged manifest names no platform packages' \
+  optionalDependencies "$(cat "$staged/package.json")"
 check 'publish-npm: the README comes from the repository root' ROOT-README \
-  "$(cat "$stage/rar-rs/README.md")"
-check 'publish-npm: browser.js re-exports the WASI package' \
-  "export * from 'rar-rs-wasm32-wasi'" "$(cat "$stage/rar-rs/browser.js")"
-check 'publish-npm: the notices travel with the root package' NOTICE \
-  "$(ls "$stage/rar-rs")"
+  "$(cat "$staged/README.md")"
+check 'publish-npm: browser.js re-exports the local WASI loader' \
+  "export * from './rar-rs-napi.wasi-browser.js'" "$(cat "$staged/browser.js")"
+check 'publish-npm: the notices travel with the package' NOTICE "$(ls "$staged")"
+check 'publish-npm: the license texts travel with the package' MIT.txt \
+  "$(ls "$staged/LICENSES")"
 
 # A version already on the registry is a skip, not a failure: npm owns a
 # version number forever, so re-running a half-finished publish has to work.
-printf 'rar-rs-linux-x64-gnu@1.2.3\n' >"$published"
+printf '@yjdyamv/rar-rs@1.2.3\n' >"$published"
 : >"$log"
 skipped=$(run_npm)
 check 'publish-npm: skips a version already on the registry' \
-  'skip  rar-rs-linux-x64-gnu 1.2.3' "$skipped"
-check_absent 'publish-npm: a skipped package is not published' \
-  rar-rs-linux-x64-gnu "$(cat "$log")"
+  'skip  @yjdyamv/rar-rs 1.2.3' "$skipped"
+check_absent 'publish-npm: a skipped package is not published' rar-rs \
+  "$(cat "$log")"
 : >"$published"
 
 # No token and no `~/.npmrc` must fail before the first publish, naming the
@@ -400,22 +420,34 @@ check_absent 'publish-npm: a skipped package is not published' \
 # alternative is a bare `ENEEDAUTH` after the Release has gone up.
 expect_failure 'publish-npm: a run without credentials fails' \
   env -u NODE_AUTH_TOKEN HOME="$tmp/empty-home" PATH="$stub_bin:$PATH" \
-  ROOT="$root" bash "$npm_publish" "$payload" "$npmdirs"
+  ROOT="$root" bash "$npm_publish" "$payload"
 check 'publish-npm: a run without credentials names the secret' \
   'no npm credentials' "$(cat "$tmp/out.log")"
 
-# The payload is the authority: a target whose binary is not in it must fail
-# here, not publish a package that cannot be loaded. A real run fills the
-# directories in place, so drop what the earlier run left behind first — in CI
-# `napi create-npm-dirs` always hands over fresh ones.
-rm -f "$npmdirs/darwin-arm64/rar-rs-napi.darwin-arm64.node"
+# The payload is the authority: an addon the build matrix promised but the
+# payload does not carry must fail here, not publish a package that installs on
+# that platform and cannot load.
 mv "$payload/rar-rs-napi.darwin-arm64.node" "$tmp/held-addon.node"
 expect_failure 'publish-npm: a target without its artifact fails' run_npm
+check 'publish-npm: a missing build is named' 'a build is missing' \
+  "$(cat "$tmp/out.log")"
 mv "$tmp/held-addon.node" "$payload/rar-rs-napi.darwin-arm64.node"
 
-sed -i.bak 's/"NOTICE", //' "$npm_package/package.json"
+sed -i.bak '/"NOTICE",/d' "$npm_package/package.json"
 expect_failure 'publish-npm: a files list without the notices fails' run_npm
+check 'publish-npm: a missing notice is named' 'files does not list NOTICE' \
+  "$(cat "$tmp/out.log")"
 mv "$npm_package/package.json.bak" "$npm_package/package.json"
+
+# Not just the `main`: a package that ships without its WASI worker scripts
+# installs fine and then cannot spawn, which is the failure this check exists
+# to stop — it is how this repo's own payload was missing them.
+mv "$payload/wasi-worker.mjs" "$tmp/held-worker.mjs"
+expect_failure 'publish-npm: a payload missing a listed file fails' run_npm
+check 'publish-npm: a missing listed file is named' 'wasi-worker.mjs' \
+  "$(cat "$tmp/out.log")"
+mv "$tmp/held-worker.mjs" "$payload/wasi-worker.mjs"
+
 
 # ---------------------------------------------------------------------------
 # The two lists that have to agree: what the build matrix produces and what the

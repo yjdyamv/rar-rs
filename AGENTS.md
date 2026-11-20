@@ -56,17 +56,20 @@ job 能证明什么）与 [`docs/testing.md`](docs/testing.md)（测试分层）
   environment），workflow 文件名必须与仓库里这份一致（`CI.yml`）。新名字第一次
   仍需手工 `cargo publish`：crates.io 要求 crate 先存在才能挂可信发布者。
 - **发布到 npm 由 CI 的 `publish-npm` job
-  做**：`scripts/ci/publish-npm.sh`，`needs: release`，先填平台包、根包最后。
-- **`crates/rar-napi/npm/` 不入库**：那是 `napi create-npm-dirs` 从
-  `crates/rar-napi/package.json` 派生的 10
-  个平台包目录（名字、version、`os`/`cpu`/`libc` 全由那份清单推出来），发布时
-  重新生成。改 `napi.targets` 就是改 npm 上会出现哪些包名——`binding.js` 里写死的
-  `rar-rs-<platform>` 解析必须跟它一致。
-- **根包的 `optionalDependencies` 由脚本推导**，不手工维护：由
-  `npm/*/package.json` 的 `name` 合成。手工清单会漏掉新平台，`npm i rar-rs`
-  装到一个指不全依赖的根包。 根包 `files` 必须列出
-  `NOTICE`、`THIRD_PARTY_LICENSES.md`、`LICENSES`， `publish-npm.sh` 会断言（npm
-  只默认带 `LICENSE`）。
+  做**：`scripts/ci/publish-npm.sh`，`needs: release`，从 Release payload 填一个
+  **单包**（`@yjdyamv/rar-rs`），随包带全部 9 个平台 addon 与 wasm。
+- **npm 只发一个包，不拆平台包**：napi 生成的加载器先找同目录
+  `./rar-rs-napi.<platform>.node`、再回退到平台包，所以单包能加载。拆成每平台一个包
+  能省下载量（1.4 MB 对 14 MB），但要多 10 个包名与
+  `optionalDependencies`，`napi create-npm-dirs`
+  那条路已被放弃（`crates/rar-napi/npm/` 不再生成，也不要提交回去）。
+- **`napi.targets` 是 npm 内容的唯一清单**：`publish-npm.sh`
+  只做算术校验——payload 里 `*.node` 的个数必须等于 native target
+  的个数，`wasm32-*` 则必须存在 `rar-rs-napi.wasm32-wasi.wasm`。加平台就是加
+  target，不要另立表。根包 `files` 必须列出
+  `NOTICE`、`THIRD_PARTY_LICENSES.md`、`LICENSES` 与 `wasi-worker*.mjs`，
+  `publish-npm.sh` 会断言（npm 只默认带 `LICENSE`；少一个 worker 的 wasm
+  包装得上、跑不起来）。
 - **MSRV 是 1.95**（`Cargo.toml` 的
   `rust-version`）：`crates/rar/src/archive/reader.rs` 用
   `AtomicU32::try_update`（1.95 稳定）。更旧的工具链会直接拒绝这个 crate。

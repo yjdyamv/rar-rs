@@ -1,32 +1,33 @@
 #!/usr/bin/env bash
-# Publish the napi-rs payload to npm: nine platform packages and the WASI one,
-# then the root package that names them in `optionalDependencies`.
+# Publish the napi-rs payload to npm as a single package.
 #
-# The platform packages are not checked in. `napi create-npm-dirs` derives one
-# per target from `crates/rar-napi/package.json` — name, version, `os`/`cpu`
-# and `libc`, and the WASI flavour's runtime dependencies — so the package
-# names cannot drift from the targets, and the version has one source. This
-# script fills those directories from the *release payload*
-# (`collect-release-assets.sh`), so what npm serves is byte-for-byte what the
-# GitHub Release serves, and a missing addon fails here instead of shipping a
-# package that cannot load on someone's machine.
+# One package carrying every platform binary, rather than a root package plus
+# one package per target. `napi`'s generated loaders make that safe: `binding.js`
+# tries `./<binaryName>.<platform>.node` before it falls back to a per-platform
+# package, and both WASI loaders resolve the `.wasm` next to themselves
+# (`rar-rs-napi.wasi.cjs` before `require.resolve('rar-rs-wasm32-wasi')`,
+# `rar-rs-napi.wasi-browser.js` via `new URL('./…', import.meta.url)`). What it
+# costs is bytes: every install downloads the whole set (~14 MB packed) instead
+# of the one binary it can load (~1.4 MB). What it buys is one name, no
+# `optionalDependencies` to keep in sync, and one registry entry to configure.
 #
-# Order is not cosmetic: npm installs a root package's `optionalDependencies`
-# right after the root resolves, so publishing the root before the platform
-# packages leaves a window where `npm i rar-rs` installs nothing that can load.
-# A version that is already on the registry is skipped — npm owns a version
-# number forever, so a failed run has to be re-runnable without hand-edits.
+# The *release payload* (`collect-release-assets.sh`) is the only source of
+# bytes: it is the same set the `release` job checksums, so npm serves what the
+# GitHub Release serves. Every target listed in `napi.targets` must have its
+# artifact in the payload, or the run fails here instead of publishing a
+# package that installs but cannot load on that platform.
 #
-# Usage: publish-npm.sh [--dry-run] [PAYLOAD_DIR] [NPM_DIR]
+# A version already on the registry is skipped — npm owns a version number
+# forever, so a failed run has to be re-runnable without hand-edits.
+#
+# Usage: publish-npm.sh [--dry-run] [PAYLOAD_DIR]
 #
 #   PAYLOAD_DIR  flattened release payload (default: release/)
-#   NPM_DIR      directories created by `napi create-npm-dirs`
-#                (default: crates/rar-napi/npm)
 #
-# Environment: NPM (default `npm`), ROOT (default `.`),
-# NPM_PUBLISH_FLAGS (default `--access public`; the workflow adds
-# `--provenance`). The token comes from `NODE_AUTH_TOKEN`, which is how npm
-# itself reads an injected secret — this script never handles it.
+# Environment: NPM (default `npm`), ROOT (default `.`), NPM_PUBLISH_FLAGS
+# (default `--access public`; the workflow adds `--provenance`). The token comes
+# from `NODE_AUTH_TOKEN`, which is how npm itself reads an injected secret —
+# this script never handles it.
 set -euo pipefail
 export LC_ALL=C
 
@@ -36,7 +37,7 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run) dry_run=1 ;;
     -h | --help)
-      sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -48,7 +49,15 @@ done
 root=${ROOT:-.}
 package_dir=$root/crates/rar-napi
 payload=${positional[0]:-release}
-npm_dir=${positional[1]:-$package_dir/npm}
+
+# `json()` hands a path to `node -e`, and node needs a path it can `require`:
+# a relative one only works with a `./` prefix, and Git Bash's `/c/...` / `/tmp/...`
+# spellings do not resolve at all. Normalise both directories once.
+abspath() {
+  (cd "$1" 2>/dev/null && { pwd -W 2>/dev/null || pwd; }) || printf '%s' "$1"
+}
+package_dir=$(abspath "$package_dir")
+payload=$(abspath "$payload")
 npm_bin=${NPM:-npm}
 publish_flags=${NPM_PUBLISH_FLAGS:---access public}
 
@@ -58,62 +67,34 @@ fail() {
 }
 
 # `node -p` rather than sed: package.json is JSON, and every field this script
-# needs (`files`, `main`, `optionalDependencies`) is one parse away.
+# needs (`files`, `napi.targets`) is one parse away.
 json() {
   node -e "const p=require('$1');process.stdout.write(String(p$2 ?? ''))"
 }
 
 [ -f "$package_dir/package.json" ] || fail "no package.json at $package_dir"
-[ -d "$npm_dir" ] ||
-  fail "no $npm_dir — run \`napi create-npm-dirs\` in $package_dir first"
 [ -d "$payload" ] ||
   fail "no payload directory at $payload — run collect-release-assets.sh first"
 
 # npm reads the token from `NODE_AUTH_TOKEN` (what `actions/setup-node` turns
 # into an `.npmrc` line) or from `~/.npmrc`. Failing here names the missing
-# secret; failing at the first `npm publish` would come after the Release and
-# read as "npm is broken". A dry run needs none of this.
+# secret; failing at `npm publish` would come after the Release and read as
+# "npm is broken". A dry run needs none of this.
 if ((!dry_run)) && [ -z "${NODE_AUTH_TOKEN:-}" ] && ! grep -q _authToken "$HOME/.npmrc" 2>/dev/null; then
   fail "no npm credentials: set NODE_AUTH_TOKEN (and note that a *new* package name cannot be published over OIDC)"
 fi
 
 name=$(json "$package_dir/package.json" .name)
 version=$(json "$package_dir/package.json" .version)
+binary=$(json "$package_dir/package.json" .napi.binaryName)
 
-# Each platform package is filled from its own `files` list, so a target added
-# to `napi.targets` without a matching artifact fails on the missing `main`
-# below rather than publishing an empty package.
-main_of() { json "$1/package.json" .main; }
-
-for dir in "$npm_dir"/*/; do
-  dir=${dir%/}
-  has_files=$(json "$dir/package.json" .files)
-  [ -n "$has_files" ] || fail "$dir/package.json has no files list"
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    # The payload is authoritative: it is the artifact the `release` job
-    # checksums, so a stale copy in the worktree must not win.
-    if [ -f "$payload/$entry" ]; then
-      cp "$payload/$entry" "$dir/$entry"
-    elif [ -f "$package_dir/$entry" ]; then
-      cp "$package_dir/$entry" "$dir/$entry"
-    fi
-  done < <(json "$dir/package.json" ".files.join('\n')"; echo)
-  main=$(main_of "$dir")
-  [ -n "$main" ] || fail "$dir/package.json has no main"
-  [ -f "$dir/$main" ] || fail "$dir is missing $main — the payload has no artifact for it"
-  # npm redirects a bare `LICENSE` into the tarball regardless of `files`, so
-  # the notice travels with every package, not just the root one.
-  cp "$package_dir/LICENSE" "$dir/LICENSE"
-done
-
-# The root package is staged in a temporary directory: `binding.js`, the WASI
-# loaders and `browser.js` are build outputs (gitignored, produced by
-# `napi build`), and publicating from the worktree would either ship a stale
+# The package is staged in a temporary directory: `binding.js`, the WASI
+# loaders and `browser.js` are build outputs (gitignored, written by
+# `napi build`), and publishing from the worktree would either ship a stale
 # copy or leave publish-time edits behind.
 if [ -n "${NPM_STAGE_DIR:-}" ]; then
   # A seam for `test-release-scripts.sh` and for reproducing a publish by hand:
-  # the staged root package is otherwise deleted on exit.
+  # the staged package is otherwise deleted on exit.
   stage=$NPM_STAGE_DIR
   rm -rf "$stage"
   mkdir -p "$stage"
@@ -131,10 +112,11 @@ cp "$package_dir/package.json" "$stage_pkg/package.json"
 cp "$package_dir/LICENSE" "$stage_pkg/LICENSE"
 
 # Every entry of `files` must resolve, and the payload decides what the bytes
-# are. `README.md` and `browser.js` are the two exceptions: the README lives at
-# the repository root (one README for the crate, the CLI and npm), and
-# `browser.js` is the one-line re-export `napi build` writes only when it
-# compiles a target — the publish job never does.
+# are. Three exceptions: the native artifacts are globbed by `files` and copied
+# from `napi.targets` below, the README lives at the repository root (one README
+# for the crate, the CLI and npm), and `browser.js` is the one-line re-export
+# `napi build` writes only when it compiles a target — the publish job never
+# does.
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
   case "$entry" in
@@ -142,14 +124,12 @@ while IFS= read -r entry; do
       cp "$root/README.md" "$stage_pkg/README.md"
       ;;
     browser.js)
-      wasm_pkg=""
-      for dir in "$npm_dir"/*/; do
-        case $(json "${dir%/}/package.json" .name) in
-          *-wasm32-*) wasm_pkg=$(json "${dir%/}/package.json" .name) ;;
-        esac
-      done
-      [ -n "$wasm_pkg" ] || fail "no wasm32 package in $npm_dir to re-export from"
-      printf "export * from '%s'\n" "$wasm_pkg" >"$stage_pkg/browser.js"
+      # Bundlers reach the WASI build through this file, so it has to point at
+      # the copy inside this package: the per-platform packages are gone.
+      printf "export * from './%s.wasi-browser.js'\n" "$binary" >"$stage_pkg/browser.js"
+      ;;
+    '*.node' | *.wasm)
+      : # native artifacts, handled from napi.targets below
       ;;
     *)
       if [ -e "$payload/$entry" ]; then
@@ -163,6 +143,61 @@ while IFS= read -r entry; do
   esac
 done < <(json "$package_dir/package.json" ".files.join('\n')"; echo)
 
+# The target list in package.json is the single source of truth, and the count
+# is what gets checked: napi names the artifacts after its own platform spelling
+# (`win32-x64-msvc`), not the Rust triple in `napi.targets`, so a hand-kept
+# triple-to-platform table would be one more place to forget. One `.node` per
+# native target is the invariant that actually matters — a dropped addon fails
+# here instead of publishing a package that installs but cannot load. The WASI
+# target is named outright, because its artifact is a `.wasm` next to the two
+# worker scripts the loader spawns (ordinary `files` entries — forgetting them
+# is what makes a WASI package install and then fail to spawn).
+targets=$(json "$package_dir/package.json" ".napi.targets.join('\n')"; echo)
+native_targets=0
+want_wasm=0
+while IFS= read -r target; do
+  [ -n "$target" ] || continue
+  case "$target" in
+    wasm32-*) want_wasm=1 ;;
+    *) native_targets=$((native_targets + 1)) ;;
+  esac
+done < <(printf '%s\n' "$targets")
+artifacts=()
+for candidate in "$payload/$binary".*.node; do
+  [ -f "$candidate" ] || continue
+  artifacts+=("$(basename "$candidate")")
+done
+[ "${#artifacts[@]}" -eq "$native_targets" ] ||
+  fail "the payload carries ${#artifacts[@]} native addon(s) but napi.targets names $native_targets native target(s) — a build is missing"
+[ "${#artifacts[@]}" -gt 0 ] || fail "napi.targets is empty — nothing to publish"
+if [ "$want_wasm" -eq 1 ]; then
+  [ -f "$payload/$binary.wasm32-wasi.wasm" ] ||
+    fail "the payload has no $binary.wasm32-wasi.wasm for the wasm32 target"
+  artifacts+=("$binary.wasm32-wasi.wasm")
+fi
+for artifact in "${artifacts[@]}"; do
+  cp "$payload/$artifact" "$stage_pkg/$artifact"
+done
+
+# `files` has to glob the artifacts in, or npm quietly drops them and the
+# package ships as metadata only. Adding the two globs here keeps the staged
+# manifest in step with what was just copied, whichever tag the workflow
+# checked out.
+node - "$stage_pkg/package.json" <<'STUB'
+const fs = require('fs')
+const path = process.argv[2]
+const pkg = JSON.parse(fs.readFileSync(path, 'utf8'))
+const files = (pkg.files || []).filter(
+  (entry) => !entry.endsWith('.node') && !entry.endsWith('.wasm'),
+)
+files.push('*.node', `${pkg.napi.binaryName}.wasm32-wasi.wasm`)
+pkg.files = files
+// One package means no per-platform packages to depend on; a leftover list
+// would make npm install registries that are no longer published.
+delete pkg.optionalDependencies
+fs.writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`)
+STUB
+
 # The third-party notices are the same texts the crates and the GitHub Release
 # ship. npm packs a `files` entry and little else, so being listed is the whole
 # mechanism — assert it here rather than noticing a license-free tarball later.
@@ -173,41 +208,24 @@ for entry in NOTICE THIRD_PARTY_LICENSES.md LICENSES; do
   esac
 done
 
-# The root's `optionalDependencies` are exactly the platform packages this run
-# created, at this version — derived rather than listed, because a hand-kept
-# list is the same failure mode as a hand-kept target list.
-node - "$stage_pkg/package.json" "$npm_dir" <<'STUB'
-const fs = require('fs')
-const [pkgPath, dir] = process.argv.slice(2)
-const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
-const optional = {}
-for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-  if (!entry.isDirectory()) continue
-  const path = `${dir}/${entry.name}/package.json`
-  if (!fs.existsSync(path)) continue
-  optional[JSON.parse(fs.readFileSync(path, 'utf8')).name] = pkg.version
-}
-pkg.optionalDependencies = { ...(pkg.optionalDependencies || {}), ...optional }
-fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
-STUB
-
-# Platform packages first, sorted so a dry run's plan is stable, root last.
-targets=()
-for dir in "$npm_dir"/*/; do targets+=("${dir%/}"); done
-targets+=("$stage_pkg")
-
-for dir in "${targets[@]}"; do
-  pkg_name=$(json "$dir/package.json" .name)
-  if "$npm_bin" view "$pkg_name@$version" version >/dev/null 2>&1; then
-    echo "skip  $pkg_name $version — already on the registry"
-    continue
-  fi
-  if ((dry_run)); then
-    echo "would publish $pkg_name $version ($dir)"
-    continue
-  fi
-  echo "publishing $pkg_name $version"
-  (cd "$dir" && "$npm_bin" publish $publish_flags)
+# Nothing else validates the tarball: `npm publish` would happily ship a package
+# with no `.node` in it at all.
+for artifact in "${artifacts[@]}"; do
+  [ -f "$stage_pkg/$artifact" ] || fail "$artifact did not reach $stage_pkg"
 done
+
+if "$npm_bin" view "$name@$version" version >/dev/null 2>&1; then
+  echo "skip  $name $version — already on the registry"
+  echo "done: $name $version"
+  exit 0
+fi
+
+if ((dry_run)); then
+  echo "would publish $name $version ($stage_pkg)"
+  echo "  with ${#artifacts[@]} artifact(s): ${artifacts[*]}"
+else
+  echo "publishing $name $version"
+  (cd "$stage_pkg" && "$npm_bin" publish $publish_flags)
+fi
 
 echo "done: $name $version"

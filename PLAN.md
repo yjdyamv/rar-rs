@@ -139,31 +139,45 @@ target。`crates/rar-cli/src/lib.rs` 是**只有 `//!` 文档、零 item** 的�
       `publish` 对三个 crate 各打一行 `skip`（0.15.2 已在索引上），即 OIDC
       换取与跳过逻辑成立。
 
-### npm 发布（0.15.3 首发，待发）
+### npm 发布（0.15.2 已发，单包）
 
-napi-rs 的产物此前只挂在 GitHub Release 上：`npm i rar-rs`
-不存在，`napi
-create-npm-dirs` 能生成的 10 个平台包也没人发。机制已落地成
-`scripts/ci/publish-npm.sh` + CI 的 `publish-npm` job（`needs: release`），
-剩下的是首次执行。
+napi-rs 的产物此前只挂在 GitHub Release 上，npm
+上没有可安装入口。现在是**一个包** `@yjdyamv/rar-rs`：`npm i @yjdyamv/rar-rs`
+装到 14.2 MB 的 tarball，里面 9 个平台 `*.node`、wasm 与两个 worker
+脚本、全部许可证文本；napi 生成的加载器先找同目录的
+`./rar-rs-napi.<platform>.node`，所以一套字节在所有平台都能加载。
 
-- [x] **脚本与 job**：`napi create-npm-dirs` 从 `crates/rar-napi/package.json`
-      派生平台包，脚本用 Release payload 填字节，平台包先发、根包最后； 根包
-      staging 到临时目录（`binding.js`、wasm loader、`browser.js` 是 gitignored
-      的构建产物），`optionalDependencies` 由实际目录推导， `files` 必须列
-      `NOTICE`/`THIRD_PARTY_LICENSES.md`/`LICENSES`；已存在版本 打 `skip`（npm
-      版本号不可回收，失败重跑要能收敛）。`npm/` 目录不入库。 fixture
-      测试覆盖顺序、跳过、缺件、许可证四条。
-- [ ] **首发（必须手工/token）**：npm 的 Trusted Publishing 不能建新包，11
-      个名字全是新包，所以第一轮要 `NPM_TOKEN`（granular，`Read and write` +
-      bypass 2FA）。顺序：先给仓库加 secret，再打 tag `v0.15.3`——当前 `v0.15.2`
-      树里的 `package.json` 还没有那三条 `files`，直接拿它重发会在 「files does
-      not list NOTICE」处失败。
-- [ ] **首发后换 Trusted Publishing**：11 个包各配一条（owner `yjdyamv`、 repo
-      `rar-rs`、workflow `CI.yml`），然后删掉 `NPM_TOKEN`。
-- [x] **不需要 npm org**：11 个包名都是无 scope 的（`rar-rs`、
-      `rar-rs-<platform>`），`binding.js` 里写死的解析也是无 scope 形式；只有
-      想改成 `@scope/...` 才需要组织，而那要同时改前缀解析与根包名。
+- [x] **为什么是单包**：先按 napi 的常规做法拆成 10 个平台包 + 根包，实测被 npm
+      拦在
+      根名上（`E403 Package name too similar to existing package tar-fs`，这是对无
+      scope 短名的启发式检查，`rar-rs-<platform>` 因名字长而通过）。改成
+      `@yjdyamv/rar-rs` 走 scope 就绕开了拦截，但拆包要多 10 个包名 +
+      `optionalDependencies` + 每包 `os`/`cpu`/`libc`，单包换来「一个名字、一个
+      registry 条目、用户装上一定能加载」，代价是每次安装多下 ~13 MB。选单包。
+- [x] **脚本**：`scripts/ci/publish-npm.sh`（单包版）。staging 到临时目录
+      （`binding.js`、wasm loader、`browser.js` 是 gitignored 的构建产物），
+      `browser.js` 现写现生成并指向包内 `./rar-rs-napi.wasi-browser.js`；`files`
+      逐条 校验（缺 `wasi-worker.mjs` 这类文件会上不了档却装得上、跑不起来）；
+      `napi.targets` 只用来算数（`*.node` 个数 = native target 数，`wasm32-*`
+      单独 要 `.wasm`），不维护 triple→platform 的映射表；已存在版本打
+      `skip`；CI 里 加 `--provenance`。
+- [x] **首发已执行**（0.15.2，手工）：`npm publish` 从 v0.15.2 的 Release
+      payload 填包，`npm view` = 0.15.2、干净缓存安装后
+      `createArchive`/`testArchive`/ `readMember`
+      均正常。发布过程中踩到两件事值得记：npm 的 `PUT` 返回 202 后 tarball
+      还要几分钟才可下载（别立刻判定失败）；granular token 没勾 bypass 2FA 时
+      `npm publish` 会报 `EOTP`。
+- [ ] **CI 里发**：`publish-npm` job 已就绪但从未跑过（仓库还没有 `NPM_TOKEN`
+      secret）。首发已经手工完成，所以现在给 `@yjdyamv/rar-rs` 配 Trusted
+      Publisher （owner `yjdyamv`、repo `rar-rs`、workflow
+      `CI.yml`）就能彻底不要 secret。
+- [ ] **残留的 `0.0.0-stage`**：npm 的 staged publish 在被 kill 后留下一个
+      `0.0.0-stage` 版本（无 dist-tag，不影响 `npm i`）。删除它需要**不 bypass
+      2FA** 的
+      token：`npm unpublish "@yjdyamv/rar-rs@0.0.0-stage" --force`，再按提示
+      在浏览器里确认（或 `--otp=`）。用 bypass token 会拿到 403（npm
+      的策略），用 包权限不匹配的 token 会拿到 404 而且 **CLI 仍然 exit
+      0**（假成功，注意）。
 
 发布闸门（本机 `cargo test --workspace --all-features`，stdin 接 EOF）：全绿
 （`rar-rs` 36 个 target、`rar-cli` 的 bins/`cli_behavior`/`volume_bare_name`、
@@ -203,10 +217,9 @@ create-npm-dirs` 能生成的 10 个平台包也没人发。机制已落地成
       `ExtractArchiveOptions.collectErrors` 与 `ExtractionResult.failures`。
 - [x] **手写类型 + 编译闸门**：`rar-rs.d.ts` 为公开面，`npm run typecheck`
       （`tsc --noEmit` + `__test__/types.test-d.ts` 的编译期断言）进 CI。
-- [x] **npm 打包**：见上文「npm 发布」——平台包由 `napi create-npm-dirs`
-      派生，`optionalDependencies` 由脚本推导，发布走 `publish-npm.sh`。
-      首发（0.15.3）待执行：`NPM_TOKEN` 只在首次需要，之后换成 Trusted
-      Publishing。
+- [x] **npm 打包**：见上文「npm 发布」——单包 `@yjdyamv/rar-rs` 带全部平台
+      addon，字节来自 Release payload，发布走 `publish-npm.sh`。0.15.2 已手工首
+      发；CI 侧仍待 `NPM_TOKEN` 或该包的 Trusted Publisher。
 - [ ] **CI 首跑**：跨平台 build 矩阵与新增的 typecheck 步骤只做过静态修改，
       首次跑通必须由 CI 证明（本地无法覆盖）。`release`
       侧真正发布（`gh
@@ -576,14 +589,17 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 6. **发 crates.io / npm 都不用手工**：tag 推上去后 `release` 发 GitHub 资产，
    紧接着 `publish` job 用 Trusted Publishing 换临时 token 跑
    `scripts/ci/publish-crates.sh`（依赖顺序、轮询稀疏索引、已存在版本跳过），
-   `publish-npm` job 并行走 `scripts/ci/publish-npm.sh`（平台包先、根包最后）。
-   只有**新名字首次**仍需手工/token：crates.io 要求 crate 先存在才能挂可信
-   发布者（token 需 `publish-new`）；npm 同理，11 个包首发用 `NPM_TOKEN`。
-   发布失败只需重跑 `workflow_dispatch` 带同一个 `release_tag`：已发出的版本
-   会被跳过。
+   `publish-npm` job 并行走 `scripts/ci/publish-npm.sh`（单包，全部平台二进制
+   在一个 tarball 里）。 只有**新名字首次**仍需手工/token：crates.io 要求 crate
+   先存在才能挂可信 发布者（token 需 `publish-new`）；npm
+   同理，`@yjdyamv/rar-rs` 首发已手工 完成，之后可挂 Trusted Publisher 去掉
+   `NPM_TOKEN`。 发布失败只需重跑 `workflow_dispatch` 带同一个
+   `release_tag`：已发出的版本 会被跳过。
 7. 发布后复核：`cargo install rar-cli --locked` 能装能跑、
    `https://docs.rs/{rar-rs,rar-cli,rar-rs-napi}/X.Y.Z/<crate_with_underscores>/`
-   三条 200（`/status.json` 一律 404，别拿它当判据）；`npm view rar-rs version`
-   与 `npm i rar-rs` 后 `require('rar-rs')` 能加载。
+   三条 200（`/status.json` 一律
+   404，别拿它当判据）；`npm view
+   @yjdyamv/rar-rs version` 与
+   `npm i @yjdyamv/rar-rs` 后 `require('@yjdyamv/rar-rs')` 能加载。
 8. 刷新本文件与 `README` / `CONTEXT` / `ARCHITECTURE` / `CLI` / `testing` 的
    `最后核对` 锚点。

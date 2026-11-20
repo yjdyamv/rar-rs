@@ -865,8 +865,8 @@ jobs:
     # only for the provenance attestation npm signs; the publish itself needs
     # `NPM_TOKEN`, because npm cannot authorize the *first* publish of a name
     # over OIDC — a trusted publisher can only be configured for a package that
-    # already exists. Once the eleven names exist, a Trusted Publisher entry per
-    # package (`CI.yml`, this repository) lets the token go away.
+    # already exists. Once `@yjdyamv/rar-rs` exists, a Trusted Publisher entry
+    # for it (`CI.yml`, this repository) lets the token go away.
     permissions:
       contents: read
       id-token: write
@@ -898,9 +898,6 @@ jobs:
         # crates.io job runs: publishing is what cannot be undone.
         run: bash scripts/ci/check-versions.sh "${{ github.event.inputs.release_tag || github.ref_name }}"
         shell: bash
-      - name: Install the CLI that generates the platform packages
-        working-directory: crates/rar-napi
-        run: npm ci
       - name: Download the native bindings
         uses: actions/download-artifact@v8
         with:
@@ -916,11 +913,7 @@ jobs:
         # serves and the assets the Release carries are one set of bytes.
         run: bash scripts/ci/collect-release-assets.sh bindings wasm release .
         shell: bash
-      - name: Create one npm package per target
-        working-directory: crates/rar-napi
-        run: ./node_modules/.bin/napi create-npm-dirs
-        shell: bash
-      - name: Publish the platform packages, then the root package
+      - name: Publish the package that carries every platform binary
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_PUBLISH_FLAGS: --access public --provenance
