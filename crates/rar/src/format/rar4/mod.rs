@@ -340,7 +340,11 @@ fn comment_block_at(header: &[u8], start: usize) -> Option<(usize, usize, usize)
             return None;
         }
         let add = u32::from_le_bytes(tail[7..11].try_into().unwrap()) as usize;
-        (start + 17, start + 17 + add)
+        // `add` is a parsed 4-byte length: `start + 17 + add` can overflow
+        // `usize` on a 32-bit host (a crafted ADD_SIZE near 2^32). A comment
+        // body that does not fit is not a usable envelope.
+        let data_start = start + 17;
+        (data_start, data_start.checked_add(add)?)
     } else {
         (start + 13, start + head_size)
     };
@@ -828,6 +832,19 @@ mod tests {
         // A FILE_HEAD (0x74) with no trailing COMM_HEAD subblock.
         let tail = [0u8, 1, FILE_HEAD, 0, 0, 0, 0];
         assert!(parse_file_comment(&tail, 0).0.is_none());
+    }
+
+    /// A nested COMM_HEAD with LONG_BLOCK and a crafted ADD_SIZE near 2^32 must
+    /// not overflow `usize` in `start + 17 + add` on a 32-bit host: the
+    /// envelope is rejected (no comment), not panicked.
+    #[test]
+    fn comment_block_rejects_add_size_overflow() {
+        let mut tail = vec![0u8; 11];
+        tail[2] = COMM_HEAD;
+        tail[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
+        tail[5..7].copy_from_slice(&11u16.to_le_bytes()); // head_size
+        tail[7..11].copy_from_slice(&u32::MAX.to_le_bytes()); // ADD_SIZE
+        assert_eq!(comment_block_at(&tail, 0), None);
     }
 
     #[test]

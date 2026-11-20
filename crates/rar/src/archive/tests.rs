@@ -2054,3 +2054,19 @@ fn set_password_drops_the_cached_header_key() {
         "a new password must drop the cached key"
     );
 }
+
+/// `RarArchive` (and the role facades) are passed by value throughout the
+/// open/write paths. The read state inlines the decoder's Huffman tables
+/// (~19 KiB), so it must stay boxed: left inline, the unoptimized build's
+/// many by-value copies consume ~600 KiB of stack, and the CLI's `rar a`
+/// append chain then overflows the ~1 MiB main-thread stack
+/// (`STATUS_STACK_OVERFLOW`). Boxed, the facade is ~1.7 KiB. See
+/// `PITFALLS.md` ("工程与架构").
+#[test]
+fn archive_engine_stays_small_enough_for_the_main_thread_stack() {
+    assert!(
+        std::mem::size_of::<RarArchive>() <= 4096,
+        "RarArchive is {} bytes; the read state must stay boxed (PITFALLS.md)",
+        std::mem::size_of::<RarArchive>(),
+    );
+}

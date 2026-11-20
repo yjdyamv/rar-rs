@@ -214,6 +214,15 @@ pub(super) struct Rar4Layout {
     pub(super) protect: Option<ProtectRecord>,
 }
 
+/// Convert a 64-bit block position to the `usize` the layout indexes with. A
+/// position that does not fit `usize` — a block whose declared size runs past
+/// the host address space, which a crafted `LONG_BLOCK` `add_size` can force
+/// on a 32-bit target — is rejected rather than truncated into a bogus offset.
+fn layout_offset(offset: u64) -> RarResult<usize> {
+    usize::try_from(offset)
+        .map_err(|_| RarError::format("RAR4: archive layout offset overflows host address space"))
+}
+
 /// Parse a legacy recovery-record block header. Mirrors
 /// `recovery::legacy_rr::scan_protect_with_password`'s header checks without
 /// touching the record's data area.
@@ -236,8 +245,8 @@ fn parse_protect_record(view: &Rar4Block) -> RarResult<Option<ProtectRecord>> {
             ));
         }
         return Ok(Some(ProtectRecord {
-            block_offset: view.offset as usize,
-            data_end: view.end() as usize,
+            block_offset: layout_offset(view.offset)?,
+            data_end: layout_offset(view.end())?,
             rec_sectors: u32::from(rec_sectors),
         }));
     }
@@ -267,8 +276,8 @@ fn parse_protect_record(view: &Rar4Block) -> RarResult<Option<ProtectRecord>> {
             ));
         }
         return Ok(Some(ProtectRecord {
-            block_offset: view.offset as usize,
-            data_end: view.end() as usize,
+            block_offset: layout_offset(view.offset)?,
+            data_end: layout_offset(view.end())?,
             rec_sectors,
         }));
     }
@@ -320,8 +329,8 @@ pub(super) fn scan_layout_stream(
         let Some(view) = read_block(stream, hp.is_some(), hp, EnvelopePolicy::PLAN)? else {
             break;
         };
-        let start = view.offset as usize;
-        stream_end = (view.offset + view.total_size) as usize;
+        let start = layout_offset(view.offset)?;
+        stream_end = layout_offset(view.end())?;
         if view.head_type == MAIN_HEAD && main.is_none() {
             let flags = main_flags(&view.header)?;
             if flags & MHD_PASSWORD != 0 {
@@ -397,4 +406,24 @@ pub(super) fn emit_block(
     }
     out.extend_from_slice(data);
     Ok(())
+}
+
+#[cfg(test)]
+mod offset_tests {
+    use super::layout_offset;
+
+    /// A 64-bit block position that does not fit `usize` must be rejected
+    /// rather than truncated. On a 32-bit host a crafted `LONG_BLOCK`
+    /// `add_size` reaches this; on a 64-bit host every real position fits.
+    #[test]
+    fn rejects_positions_past_the_host_address_space() {
+        assert_eq!(layout_offset(0).unwrap(), 0);
+        assert_eq!(layout_offset(12_345).unwrap(), 12_345);
+        let past_u32 = u64::from(u32::MAX) + 1;
+        if cfg!(target_pointer_width = "32") {
+            assert!(layout_offset(past_u32).is_err());
+        } else {
+            assert_eq!(layout_offset(past_u32).unwrap(), past_u32 as usize);
+        }
+    }
 }

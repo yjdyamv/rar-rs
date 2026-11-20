@@ -465,6 +465,15 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **标记编译门用 `cfg(unix)`/`cfg(windows)`，别用格式常量**：`OS_WINDOWS`
   是格式常量不是编译门；`wasm32-wasip1-threads` 既非 unix 也非 windows，漏门会让
   CI 红。
+- **`RarArchive`
+  的读状态必须装箱**（`read: Option<Box<ReadState>>`，别改回内联）： `ReadState`
+  内联了解码器的 Huffman 表（~19 KiB），而 `RarArchive` / `ArchiveReader` 在
+  open/write 路径里大量**按值**传递——内联时门面达 21 KB，未优化
+  构建下这些按值拷贝吃掉 ~600 KiB 栈，CLI `rar a` 追加到已有档的调用链随即撑爆
+  Windows 约 1 MiB 的主线程栈（`STATUS_STACK_OVERFLOW`；release 与 `cargo test`
+  因 `[profile.test] opt-level = 2` 都不受影响，所以 CI 抓不到，只有 debug 的
+  `cargo run`/本地构建会踩）。装箱后门面降到 1744 B、debug 栈需求降到 ~200 KiB。
+  契约 `archive_engine_stays_small_enough_for_the_main_thread_stack`。
 
 ## 压缩内核（匹配器与解析器）
 

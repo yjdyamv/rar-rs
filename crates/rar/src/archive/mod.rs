@@ -153,7 +153,11 @@ pub struct RarArchive {
     pub(crate) cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Read-side state (solid decode, extract options, NTFS streams).
     /// Present when the archive is opened for reading or appending.
-    pub(crate) read: Option<ReadState>,
+    /// Boxed: it inlines the decoder's Huffman tables (~19 KiB), and a
+    /// `RarArchive` is passed by value throughout the open/write paths — left
+    /// unboxed, an unoptimized build's many by-value copies overflow the
+    /// ~1 MiB main-thread stack (STATUS_STACK_OVERFLOW) on `rar a`'s append.
+    pub(crate) read: Option<Box<ReadState>>,
     /// Write-side state (solid mode, compression, quick-open, recovery).
     /// Present when the archive is opened for writing or appending.
     pub(crate) write: Option<WriteState>,
@@ -169,9 +173,12 @@ impl RarArchive {
     /// appropriate open/prepare method afterward.
     fn new_for_mode(path: PathBuf, mode: Mode, password: Option<String>) -> Self {
         let (read, write) = match mode {
-            Mode::Read => (Some(ReadState::default()), None),
+            Mode::Read => (Some(Box::new(ReadState::default())), None),
             Mode::Write => (None, Some(WriteState::default())),
-            Mode::Append => (Some(ReadState::default()), Some(WriteState::default())),
+            Mode::Append => (
+                Some(Box::new(ReadState::default())),
+                Some(WriteState::default()),
+            ),
         };
         RarArchive {
             path,

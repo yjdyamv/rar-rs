@@ -61,7 +61,7 @@ use super::{ArchiveEntry, ArchiveStream, Mode, ReadState, WriteState, cancel_req
 /// called.
 pub(crate) struct Parts<'a> {
     /// Read-side state; `None` when the archive is not open for reading.
-    pub read: &'a mut Option<ReadState>,
+    pub read: &'a mut Option<Box<ReadState>>,
     /// The member catalog, in archive order.
     pub entries: &'a mut Vec<ArchiveEntry>,
     /// The underlying stream; `None` before one is opened.

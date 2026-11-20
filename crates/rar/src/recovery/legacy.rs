@@ -232,8 +232,12 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
         let head_type = block.head_type;
         let flags = block.flags;
         let on_disk_header = block.on_disk_header() as usize;
-        let total = block.total_size as usize;
-        if start + total > file_len {
+        // `total_size` is a 64-bit on-disk field: a crafted LONG_BLOCK can push
+        // it past `usize` on a 32-bit host, where the old `as usize` wrapped.
+        // Treat a value that does not fit, or a range past the file, the same
+        // way — as an unusable size that the walk must resync past.
+        let total = usize::try_from(block.total_size).unwrap_or(usize::MAX);
+        if start.checked_add(total).is_none_or(|end| end > file_len) {
             if !tolerant {
                 return Err(RarError::format("RAR4: truncated block"));
             }
@@ -380,11 +384,25 @@ impl LegacyRepair {
 /// that sector the same way (verified against 6.23 output).
 fn protected_sector_image(bytes: &[u8], start: usize, prefix_end: usize) -> [u8; 512] {
     let mut image = [0u8; 512];
-    let end = (start + 512).min(prefix_end).min(bytes.len());
+    // `start` can sit one sector short of `usize::MAX` (a crafted grid), so the
+    // `+ 512` must saturate rather than wrap on a 32-bit host.
+    let end = start.saturating_add(512).min(prefix_end).min(bytes.len());
     if end > start {
         image[..end - start].copy_from_slice(&bytes[start..end]);
     }
     image
+}
+
+/// File-absolute offset of sector `index` on the 512-byte grid anchored at
+/// `sfx_offset`, or `None` when it does not fit `usize`. The declared
+/// `total_blocks` is attacker-controlled, so on a 32-bit host `index * 512`
+/// can overflow past `usize` (or the `+ sfx_offset` can): such a sector is off
+/// the end of an addressable archive either way, so the caller reads it as
+/// zeros and its tag mismatches.
+fn sector_start(sfx_offset: usize, index: usize) -> Option<usize> {
+    index
+        .checked_mul(512)
+        .and_then(|delta| sfx_offset.checked_add(delta))
 }
 
 /// Check every sector a record declares and rebuild what parity can, returning
@@ -433,8 +451,9 @@ pub(crate) fn repair_protect_head(
     // damaged tail sector is a data error WinRAR does not report as healthy.
     let mut damaged = Vec::new();
     for index in 0..total_blocks {
-        let start = sfx_offset + index * 512;
-        let image = protected_sector_image(bytes, start, prefix_end);
+        let image = sector_start(sfx_offset, index).map_or([0u8; 512], |start| {
+            protected_sector_image(bytes, start, prefix_end)
+        });
         if sector_tag(&image) != expected_tag(index) {
             damaged.push(index);
         }
@@ -455,7 +474,7 @@ pub(crate) fn repair_protect_head(
     let mut repaired = false;
     for (slot, indexes) in slots.iter().enumerate() {
         for &missing in indexes {
-            let offset = (sfx_offset + missing * 512) as u64;
+            let offset = sfx_offset as u64 + missing as u64 * 512;
             let mut recovered = false;
             if indexes.len() == 1 {
                 let mut sector = parity[slot * 512..slot * 512 + 512].to_vec();
@@ -463,7 +482,11 @@ pub(crate) fn repair_protect_head(
                     if index == missing {
                         continue;
                     }
-                    let start = sfx_offset + index * 512;
+                    // An unaddressable sector is off the archive, so it
+                    // contributes zeros to the parity — skip it.
+                    let Some(start) = sector_start(sfx_offset, index) else {
+                        continue;
+                    };
                     let image = protected_sector_image(bytes, start, prefix_end);
                     for (out, byte) in sector.iter_mut().zip(&image) {
                         *out ^= *byte;
@@ -471,9 +494,10 @@ pub(crate) fn repair_protect_head(
                 }
                 // Only the prefix part of the sector exists on disk: the tail
                 // of the record's own final sector is the record block.
-                if sector_tag(&sector) == expected_tag(missing) {
-                    let start = sfx_offset + missing * 512;
-                    let end = (start + 512).min(prefix_end).min(rebuilt.len());
+                if sector_tag(&sector) == expected_tag(missing)
+                    && let Some(start) = sector_start(sfx_offset, missing)
+                {
+                    let end = start.saturating_add(512).min(prefix_end).min(rebuilt.len());
                     if end > start {
                         rebuilt[start..end].copy_from_slice(&sector[..end - start]);
                         recovered = true;
@@ -733,6 +757,57 @@ mod tests {
         );
     }
 
+    /// A LONG_BLOCK's 64-bit `total_size` (head prefix + 4-byte ADD_SIZE) can
+    /// exceed `usize` once truncated on a 32-bit host. With `ADD_SIZE =
+    /// 0xFFFFFFF4` and a prefix of 11 the sum lands exactly on `usize::MAX`,
+    /// so the old `as usize` + `start + total` overflowed; the walk must treat
+    /// it as an unusable size instead of panicking.
+    #[test]
+    fn oversized_long_block_size_is_rejected_without_overflow() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(RAR4_SIGNATURE);
+        let mut header = vec![0u8; 11];
+        header[2] = 0x74; // FILE_HEAD
+        header[3..5].copy_from_slice(&0x8000u16.to_le_bytes()); // LONG_BLOCK
+        header[5..7].copy_from_slice(&11u16.to_le_bytes()); // head_size
+        header[7..11].copy_from_slice(&0xFFFF_FFF4u32.to_le_bytes()); // ADD_SIZE
+        bytes.extend_from_slice(&header);
+
+        let err = match scan_protect(&bytes) {
+            Err(err) => err,
+            Ok(_) => panic!("expected the out-of-range block to be rejected"),
+        };
+        assert!(
+            matches!(err, RarError::Format(_)),
+            "expected a format error, got {err}"
+        );
+    }
+
+    /// A crafted recovery record can declare far more 512-byte sectors than the
+    /// archive holds: `total_blocks` is bounded only by the record's own data
+    /// size (2 bytes of tags per declared sector). On a 32-bit host
+    /// `index * 512` then overflows `usize` past sector 2^23 — before the
+    /// `checked_mul` fix this panicked with "attempt to multiply with overflow".
+    #[test]
+    fn crafted_total_blocks_does_not_overflow_the_sector_grid() {
+        let total_blocks: u32 = (1 << 23) + 1;
+        let rec_sectors: u32 = 64;
+        let recovery_len = total_blocks as usize * 2 + rec_sectors as usize * 512;
+        let bytes = vec![0u8; recovery_len];
+        let protect = Rar4Protect {
+            rec_sectors,
+            total_blocks,
+            mark: *b"Protect+",
+            data_start: 0,
+            data_end: recovery_len,
+            // Empty protected prefix: every declared sector reads as zeros, so
+            // all are reported damaged, and the grid must still not wrap.
+            block_offset: 0,
+        };
+        let (report, _rebuilt) = repair_protect_head(&bytes, 0, &protect).expect("must not panic");
+        assert!(!report.sectors.is_empty());
+    }
+
     #[test]
     fn protect_scan_finds_and_repairs_damage() {
         // A RAR 2.x archive with a 5% PROTECT_HEAD record, written by 2.90.
@@ -919,6 +994,23 @@ mod tests {
         assert_eq!(file.block_offset, slice.block_offset);
         assert_eq!(file.data_start, slice.data_start);
         assert_eq!(file.data_end, slice.data_end);
+    }
+
+    /// A crafted `total_blocks` puts the per-sector grid multiply (`index *
+    /// 512`) past `usize` on a 32-bit host. The grid helper must report "off
+    /// the archive" instead of overflowing, and an unaddressable sector must
+    /// read as zeros so its tag never matches.
+    #[test]
+    fn crafted_sector_grid_does_not_overflow() {
+        assert_eq!(sector_start(0, 0), Some(0));
+        assert_eq!(sector_start(7, 2), Some(7 + 1024));
+        // `index * 512` overflows.
+        assert_eq!(sector_start(0, usize::MAX), None);
+        // The `+ sfx_offset` overflows.
+        assert_eq!(sector_start(usize::MAX, 1), None);
+        // An unaddressable sector reads as zeros without panicking, so its
+        // tag mismatches and it is reported damaged.
+        assert_eq!(protected_sector_image(b"abc", usize::MAX, 3), [0u8; 512]);
     }
 
     /// The percent form rounds **up**: a record must never protect less than
