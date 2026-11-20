@@ -101,13 +101,16 @@ HEAD 又积累了 22 个提交，其中五个是真修复（RAR5 在 32
 tarball 里只有 `README.md`，首次发布就是一份没有正文的 `BSD-2-Clause`
 声明，`scripts/ci/check-crate-licenses.sh` 守住这一点。剩下的是执行：
 
-- [ ] **打 tag `v0.15.1`**（annotated，正文按 Library / CLI / Build 分组）——
-      GitHub Release 矩阵在 tag 上跑。
+- [x] **打 tag `v0.15.1`**（annotated，正文按 Library / CLI / Build 分组）——
+      2026-11-20 发出，CI run #278 的 16 个 job 全绿（check / test / msrv /
+      lint-windows / 9 个 addon 构建 + wasm / release），Release 已发，25
+      个资产。
 - [ ] **`cargo publish` 按顺序**：`rar-rs` → `rar-cli` / `rar-rs-napi`
       （crates.io 首次；后两者依赖 workspace 内的
       `rar-rs`，必须先有前者，在此之前 `cargo package -p rar-cli` 会报找不到
       `rar-rs`，属预期）。先 `cargo login`（token 需 `publish-new` +
-      `publish-update` 权限），索引可见后再发后两个。
+      `publish-update` 权限）——本机还没有 `~/.cargo/credentials.toml`， 没有
+      token 这一步就无法自动化；索引可见后再发后两个。
 - [ ] **发布后做一遍下游实测**：从 crates.io 干净拉取 `rar-cli` 的临时工程，
       `cargo install rar-cli` 能跑；`rar-rs-napi` 的 `.node` 与 wasm 产物照 CI
       release job 的路径复核一次；docs.rs 三个 crate 都能构建。
