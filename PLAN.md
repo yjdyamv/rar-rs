@@ -167,10 +167,16 @@ napi-rs 的产物此前只挂在 GitHub Release 上，npm
       均正常。发布过程中踩到两件事值得记：npm 的 `PUT` 返回 202 后 tarball
       还要几分钟才可下载（别立刻判定失败）；granular token 没勾 bypass 2FA 时
       `npm publish` 会报 `EOTP`。
-- [ ] **CI 里发**：`publish-npm` job 已就绪但从未跑过（仓库还没有 `NPM_TOKEN`
-      secret）。首发已经手工完成，所以现在给 `@yjdyamv/rar-rs` 配 Trusted
-      Publisher （owner `yjdyamv`、repo `rar-rs`、workflow
-      `CI.yml`）就能彻底不要 secret。
+- [x] **CI 里发（已就绪，未真跑）**：`publish-npm` 走
+      OIDC（`id-token:
+      write` + `--provenance`），`@yjdyamv/rar-rs` 的
+      Trusted Publisher 已配好 （owner `yjdyamv`、repo `rar-rs`、workflow
+      `CI.yml`），仓库不存 secret。注意 两个 registry
+      的**发布**路径至今只在「已存在则 skip」这条分支上跑过（0.15.2
+      是先手工发的），所以下一次真实发版才是第一次端到端；0.15.2 没法拿来验证
+      ——它会直接 skip。失败也不要紧：`publish`/`publish-npm` 的脚本取自 workflow
+      所在提交（tag 树只提供 crate 内容），改完 `main` 用同一个 tag
+      `workflow_dispatch` 重跑即可，不消耗版本号。
 - [x] **残留的 `0.0.0-stage`（已删）**：npm 的 staged publish 被 kill 后留下一
       个 `0.0.0-stage` 版本（无 dist-tag，不影响 `npm i`）。删除要**不 bypass
       2FA** 的
