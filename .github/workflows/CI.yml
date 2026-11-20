@@ -823,8 +823,23 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          # The overlay below needs the workflow's own commit in the object
+          # database; a shallow clone of the tag would not have it.
+          fetch-depth: 0
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Take the release scripts from the workflow's own commit
+        # Publishing reads the working tree, so the tag's tree is what ships —
+        # but a `release_tag` dispatch repairs a tag that may predate these
+        # scripts (v0.15.2 does), and the repaired run should use the fixed
+        # tooling rather than the tooling that was broken when the tag was cut.
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin "$REF"
+          git checkout "$SHA" -- scripts/ci
+        shell: bash
       - name: Verify the tag matches the workspace version
         # Same five-field check as `check` and `release`: publishing is the one
         # step that cannot be undone, so it re-runs the guard from the tag's own
