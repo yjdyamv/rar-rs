@@ -525,6 +525,19 @@ fn rebuild_catalog_capped(
         return Err(RarError::format("archive is missing the main header"));
     }
 
+    // A member whose data continues past the last scanned volume (a volume set
+    // with a missing part, or a truncated single stream) must not be dropped
+    // silently: dropping it left `t` reporting "0 OK" and `x` "No files to
+    // extract" (exit 0) on a broken set, where the official tools fail with
+    // "Cannot open <volume>". RAR4's `SplitMerge::finish` already rejects this;
+    // mirror it here. Salvage keeps whatever parsed.
+    if !salvage && let Some(pending) = builder.pending.as_ref() {
+        return Err(RarError::format(format!(
+            "archive is missing a volume: member '{}' continues past the last volume",
+            pending.header.name
+        )));
+    }
+
     cx.replace_catalog(builder.entries);
     let streams = builder.streams;
     cx.read_ctx_mut().streams = streams;

@@ -2071,6 +2071,46 @@ fn archive_engine_stays_small_enough_for_the_main_thread_stack() {
     );
 }
 
+/// A multi-volume set with a missing middle volume must be rejected, not
+/// scanned to a catalog that drops the spanning member (which made `t`/`x`
+/// report success). RAR4 rejects it via the split merge; RAR5 now does too.
+#[test]
+fn a_missing_middle_volume_is_rejected() {
+    for compression in [
+        crate::version::ArchiveVersion::V50,
+        crate::version::ArchiveVersion::V29,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("vol.rar");
+        let data = vec![7u8; 400_000];
+        {
+            let mut archive = RarArchive::create_with_options(
+                &base,
+                crate::options::CreateOptions {
+                    compression,
+                    volume_size: Some(100 * 1024),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            archive.add_bytes("big.bin", &data, 0).unwrap();
+            archive.close().unwrap();
+        }
+        let volumes = discover_volumes(&base);
+        assert!(volumes.len() >= 3, "{compression}: expected a volume set");
+        std::fs::remove_file(&volumes[1]).unwrap();
+
+        let error = match RarArchive::open(&volumes[0]) {
+            Ok(_) => panic!("{compression}: a missing middle volume must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("missing"),
+            "{compression}: {error}"
+        );
+    }
+}
+
 /// A file holding only the signature (no main header) is a corrupt archive.
 /// It used to scan to an empty catalog, so `t`/`l` reported success on a
 /// broken file; both families now reject it.
