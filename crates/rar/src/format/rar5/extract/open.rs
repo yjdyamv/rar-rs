@@ -171,6 +171,16 @@ impl CatalogBuilder {
                                 self.entries.push(self.pending.take().unwrap());
                                 self.last_file_index = Some(self.entries.len() - 1);
                             }
+                        } else {
+                            // A continuation fragment with no start: the volume
+                            // holding the member's first part is missing (or the
+                            // stream begins mid-member). Dropping it silently left
+                            // `t`/`x` reporting success on a broken set. Mirrors
+                            // RAR4's `SplitMerge` `ContinuationWithoutStart`.
+                            return Err(RarError::format(format!(
+                                "archive is missing a volume: member '{}' starts before the first volume",
+                                fh.name
+                            )));
                         }
                     } else if continues_to {
                         self.pending = Some(ArchiveEntry {

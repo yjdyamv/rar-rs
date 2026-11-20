@@ -219,18 +219,17 @@ fn editing_a_lone_volume_of_a_set_is_refused() {
         std::fs::remove_file(earlier).unwrap();
     }
 
-    let mut editor = crate::archive::ArchiveEditor::open(&lone).unwrap();
-    // The lone part holds whatever fragments start in it (the split prefix
-    // lives in the deleted first volume).
-    let id = editor
-        .entries()
-        .next()
-        .map(|entry| entry.id())
-        .expect("the lone part has at least one entry");
-    let err = editor.delete_entries(&[id]).unwrap_err();
+    // A lone volume carries only continuation fragments (the members start in
+    // the deleted volumes), so the scanner refuses the set instead of
+    // presenting a catalog that would rewrite a fragment. The volume is left
+    // alone either way.
+    let err = match crate::archive::ArchiveEditor::open(&lone) {
+        Ok(_) => panic!("a lone volume of a set must be refused"),
+        Err(err) => err,
+    };
     assert!(
-        matches!(err, RarError::Unsupported(_)),
-        "expected an Unsupported refusal, got {err:?}"
+        err.to_string().contains("missing a volume"),
+        "expected a missing-volume refusal, got {err:?}"
     );
     assert!(lone.exists(), "a refused edit must leave the volume alone");
 }

@@ -2111,6 +2111,48 @@ fn a_missing_middle_volume_is_rejected() {
     }
 }
 
+/// A continuation fragment with no start (the first volume was removed) must
+/// be rejected, not silently dropped -- dropping it made `t`/`x` report
+/// success on a set whose first volume is missing.
+#[test]
+fn a_missing_first_volume_is_rejected() {
+    for compression in [
+        crate::version::ArchiveVersion::V50,
+        crate::version::ArchiveVersion::V29,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("vol.rar");
+        let data = vec![7u8; 400_000];
+        {
+            let mut archive = RarArchive::create_with_options(
+                &base,
+                crate::options::CreateOptions {
+                    compression,
+                    volume_size: Some(100 * 1024),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            archive.add_bytes("big.bin", &data, 0).unwrap();
+            archive.close().unwrap();
+        }
+        let volumes = discover_volumes(&base);
+        assert!(volumes.len() >= 3, "{compression}: expected a volume set");
+        std::fs::remove_file(&volumes[0]).unwrap();
+
+        let error = match RarArchive::open(&volumes[1]) {
+            Ok(_) => panic!("{compression}: a missing first volume must be rejected"),
+            Err(error) => error,
+        };
+        if matches!(compression, crate::version::ArchiveVersion::V50) {
+            assert!(
+                error.to_string().contains("missing a volume"),
+                "{compression}: {error}"
+            );
+        }
+    }
+}
+
 /// A file holding only the signature (no main header) is a corrupt archive.
 /// It used to scan to an empty catalog, so `t`/`l` reported success on a
 /// broken file; both families now reject it.
