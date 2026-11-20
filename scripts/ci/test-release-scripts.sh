@@ -330,7 +330,20 @@ if [ "$rc" -ne 0 ]; then ok 'publish: a differing asset is refused'; else
   not_ok 'publish: a differing asset is refused (exited 0)'
 fi
 check 'publish: the refusal names the asset' 'gamma.node' "$out"
-check 'publish: the refusal names the override' 'FORCE_ASSETS=true' "$out"
+check 'publish: the refusal names the override' 'force_assets' "$out"
+
+# A checkbox arrives as `true`, but a hand-set value must not be read as "no"
+# when it is merely capitalised, and must not pass when it is a typo.
+publish_try present "$differing" True
+if [ "$rc" -eq 0 ]; then ok 'publish: a capitalised yes still replaces'; else
+  not_ok "publish: capitalised override (rc=$rc: $out)"
+fi
+
+publish_try present "$differing" ture
+if [ "$rc" -ne 0 ]; then ok 'publish: a typo in the override is an error'; else
+  not_ok 'publish: a typo in the override is an error (exited 0)'
+fi
+check 'publish: the error quotes the value it refused' "got 'ture'" "$out"
 
 publish_try present "$differing" true
 if [ "$rc" -eq 0 ]; then ok 'publish: force_assets=true allows the replacement'; else

@@ -79,10 +79,10 @@ env:
       # Replacing an asset that is already published is a different act: the
       # digests are pinned by the VS Code consumer, so it has to be asked for.
       force_assets:
-        description: 'Replace published release assets that differ (true/false)'
+        description: 'Replace published release assets that differ'
         required: false
-        type: string
-        default: 'false'
+        type: boolean
+        default: false
   # RustSec advisories change without a commit. A weekly run re-evaluates the
   # committed lockfiles against the advisory database so a new advisory is
   # noticed here instead of on the next unrelated push. Only `check` and `test`

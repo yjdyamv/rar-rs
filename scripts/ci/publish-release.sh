@@ -6,7 +6,13 @@
 #   no release yet          create it with every asset
 #   release exists          upload only the assets it is missing; leave the rest
 #                           alone and rewrite the notes
-#   an asset differs        refuse, list it, and exit 1 unless FORCE_ASSETS=true
+#   an asset differs        refuse, list it, and exit 1 unless FORCE_ASSETS is
+#                           an explicit yes
+#
+# `FORCE_ASSETS` is the `force_assets` dispatch input, which is a checkbox and
+# therefore arrives as `true` or `false`, but a hand-typed value reaches this
+# script on a re-run or from a caller, and a typo must not quietly mean "no":
+# `ture` is an error, not a refusal.
 #
 # The last rule is the one that matters to anything downstream: a `.node` file
 # or a wasm module that someone has pinned by SHA-256 must not change because a
@@ -23,7 +29,8 @@
 # Environment:
 #   GITHUB_REPOSITORY  owner/name, provided by the runner
 #   GITHUB_TOKEN       provided by the runner (env `GH_TOKEN` also works)
-#   FORCE_ASSETS       "true" to overwrite assets that differ from the published
+#   FORCE_ASSETS       yes/no for replacing assets that differ from the
+#                      published ones; anything else is an error
 set -euo pipefail
 
 fail() {
@@ -38,6 +45,12 @@ fail() {
 usage='usage: publish-release.sh TAG NOTES_FILE ASSETS_DIR'
 tag=${1:?$usage}
 notes=${2:?$usage}
+
+case "${FORCE_ASSETS:-false}" in
+  true | True | TRUE | yes | 1) force=true ;;
+  false | False | FALSE | no | 0 | '') force=false ;;
+  *) fail "FORCE_ASSETS must be true or false, got '$FORCE_ASSETS'" ;;
+esac
 dir=${3:?$usage}
 
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set (the workflow provides it)}"
@@ -82,7 +95,7 @@ for path in "${assets[@]}"; do
     conflicts+=("$name (no published digest)")
   elif [ "${published[$name]}" = "$sum" ]; then
     unchanged=$((unchanged + 1))
-  elif [ "${FORCE_ASSETS:-}" = "true" ]; then
+  elif [ "$force" = true ]; then
     missing+=("$path")
   else
     conflicts+=("$name")
@@ -91,7 +104,7 @@ done
 
 if [ "${#conflicts[@]}" -gt 0 ]; then
   fail "refusing to replace published assets of $tag: ${conflicts[*]}" \
-    're-run with FORCE_ASSETS=true if replacing them is what you mean'
+    'dispatch again with force_assets checked if replacing them is what you mean'
 fi
 
 gh release edit "$tag" --notes-file "$notes"
