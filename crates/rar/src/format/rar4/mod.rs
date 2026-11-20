@@ -135,6 +135,10 @@ pub(crate) struct Rar4VolumeScan {
     pub new_numbering: bool,
     /// Set when a salvage scan had to resync past a corrupt block.
     pub damaged: bool,
+    /// Set once a main header has been seen. A stream carrying only the
+    /// signature (no `MAIN_HEAD`) is not a valid archive; without this the
+    /// scan published an empty catalog and `t`/`l` reported success.
+    pub saw_main: bool,
 }
 
 /// Map the shared merge error to the RAR4 texts.
@@ -211,6 +215,9 @@ impl Rar4VolumeScan {
             };
             match block.head_type {
                 MARK_HEAD | MAIN_HEAD => {
+                    if block.head_type == MAIN_HEAD {
+                        self.saw_main = true;
+                    }
                     if block.head_type == MAIN_HEAD && block.flags & MHD_PASSWORD != 0 {
                         header_encrypted = true;
                         let Some(password) = password else {

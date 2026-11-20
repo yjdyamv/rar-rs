@@ -76,7 +76,14 @@ fn open_read_rar4_with(cx: &mut dyn Engine, salvage: bool) -> RarResult<()> {
     let archive_solid = scan.archive_solid;
     let new_numbering = scan.new_numbering;
     let damaged = scan.damaged;
+    let saw_main = scan.saw_main;
     scan.finish()?;
+    // A stream that never carried a main header (signature only, or truncated
+    // before it) is corrupt: report it instead of publishing an empty catalog
+    // that makes `t`/`l` look successful. Salvage tolerates it by design.
+    if !salvage && !saw_main {
+        return Err(RarError::format("RAR4: archive is missing its main header"));
+    }
     cx.set_archive_solid(archive_solid);
     cx.read_ctx_mut().legacy.new_numbering = new_numbering;
     cx.read_ctx_mut().salvage_damaged = damaged;

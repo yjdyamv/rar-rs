@@ -2070,3 +2070,33 @@ fn archive_engine_stays_small_enough_for_the_main_thread_stack() {
         std::mem::size_of::<RarArchive>(),
     );
 }
+
+/// A file holding only the signature (no main header) is a corrupt archive.
+/// It used to scan to an empty catalog, so `t`/`l` reported success on a
+/// broken file; both families now reject it.
+#[test]
+fn signature_only_archives_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let rar5 = dir.path().join("sig5.rar");
+    std::fs::write(&rar5, crate::detect::RAR5_SIGNATURE).unwrap();
+    let error = match RarArchive::open(&rar5) {
+        Err(error) => error,
+        Ok(_) => panic!("a signature-only RAR5 stream must be rejected"),
+    };
+    assert!(
+        error.to_string().contains("missing the main header"),
+        "{error}"
+    );
+
+    let rar4 = dir.path().join("sig4.rar");
+    std::fs::write(&rar4, crate::detect::RAR4_SIGNATURE).unwrap();
+    let error = match RarArchive::open(&rar4) {
+        Err(error) => error,
+        Ok(_) => panic!("a signature-only RAR4 stream must be rejected"),
+    };
+    assert!(
+        error.to_string().contains("missing its main header"),
+        "{error}"
+    );
+}

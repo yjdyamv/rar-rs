@@ -36,6 +36,11 @@ struct CatalogBuilder {
     max_chunks: usize,
     /// Set when a salvage scan had to resync past a corrupt block.
     damaged: bool,
+    /// Set once a main archive header has been seen. A stream that never
+    /// carries one (e.g. a file holding only the 8-byte signature) is not a
+    /// valid archive; without this check it scanned to an empty catalog and
+    /// `t`/`l` reported success on a corrupt file.
+    saw_main: bool,
 }
 
 impl CatalogBuilder {
@@ -49,6 +54,7 @@ impl CatalogBuilder {
             max_entries,
             max_chunks,
             damaged: false,
+            saw_main: false,
         }
     }
 
@@ -112,6 +118,7 @@ impl CatalogBuilder {
 
             match raw.block_type {
                 BLOCK_TYPE_ARCHIVE_HEADER => {
+                    self.saw_main = true;
                     let ah = ArchiveHeader::from_raw(raw)?;
                     if ah.flags & crate::format::rar5::ARCHIVE_FLAG_SOLID != 0 {
                         self.archive_solid = true;
@@ -510,6 +517,14 @@ fn rebuild_catalog_capped(
         )?;
     }
 
+    // A stream that never carried a main archive header (signature only, or
+    // truncated before it) is corrupt: report it instead of publishing an
+    // empty catalog that makes `t`/`l` look successful. The salvage scan
+    // tolerates the missing header because it exists to recover a damaged one.
+    if !salvage && !builder.saw_main {
+        return Err(RarError::format("archive is missing the main header"));
+    }
+
     cx.replace_catalog(builder.entries);
     let streams = builder.streams;
     cx.read_ctx_mut().streams = streams;
@@ -842,7 +857,19 @@ mod tests {
     #[test]
     fn read_main_header_requires_the_archive_header_first() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("no-main.rar");
+        // A valid archive supplies the engine handle; the no-main stream is
+        // fed to `read_main_header` directly (the catalog scan now rejects
+        // such a stream itself, so it can no longer be opened).
+        let valid = dir.path().join("valid.rar");
+        {
+            let mut ar =
+                RarArchive::create_with_options(&valid, crate::options::CreateOptions::default())
+                    .unwrap();
+            ar.add_bytes("a.bin", b"a", 0).unwrap();
+            ar.close().unwrap();
+        }
+        let mut ar = RarArchive::open(&valid).unwrap();
+
         let mut bytes = RAR5_SIGNATURE.to_vec();
         bytes.extend_from_slice(
             &FileHeader {
@@ -852,10 +879,8 @@ mod tests {
             .to_bytes(),
         );
         bytes.extend_from_slice(&EndOfArchiveHeader { flags: 0 }.to_bytes());
-        std::fs::write(&path, &bytes).unwrap();
+        let mut reader = std::io::Cursor::new(bytes);
 
-        let mut ar = RarArchive::open(&path).unwrap();
-        let mut reader = File::open(&path).unwrap();
         let err = match crate::format::rar5::extract::open::read_main_header(&mut ar, &mut reader) {
             Err(error) => error,
             Ok(_) => panic!("a stream without a main header must be rejected"),
