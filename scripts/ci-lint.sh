@@ -1,21 +1,34 @@
 #!/usr/bin/env bash
-# Run the CI `lint` job locally, so a push does not carry a failure CI would
-# catch. This is a *mirror*, not a second source of truth — the workflow is
-# authoritative (`.github/workflows/CI.yml`, job `lint`); update both together.
+# Run the CI static gate locally, so a push does not carry a failure CI would
+# catch. The workflow is authoritative (`.github/workflows/CI.yml`, jobs `check`
+# and `test`); the three share the checks that used to be hand-copied, so only
+# the orchestration below can drift:
+#
+#   scripts/ci/run-actionlint.sh           workflow-file lint (opt-in locally)
+#                                          plus shellcheck over the shell scripts
+#   scripts/ci/check-host-paths.sh          host-path separator guard
+#   scripts/ci/check-versions.sh            the five version-bearing places
+#   scripts/ci/clippy-feature-matrix.sh     rar-rs, the feature combinations the
+#                                          workspace build cannot cover
+#   scripts/ci/test-release-scripts.sh     the release asset rules + notes
+#                                          grouping, against fixtures
+#   scripts/ci/test-generated-corpus.sh     the generated legacy-corpus suites
 #
 # It exists because the documented local gate (`cargo test --workspace
 # --all-features`, docs/testing.md) does not run the static checks — and a
 # `#[cfg(not(feature = "parallel"))]`-only dead code slipped past it once,
-# failing the "clippy (rar-rs, every feature combination)" step.
+# failing the clippy feature-matrix step.
 #
-# Covered: fmt (workspace + fuzz), the host-path separator guard, workspace
-# version agreement, the wasm-target `cargo check`, clippy (workspace, then
-# every rar-rs feature combination), the fuzz `cargo check`s, rustdoc, the
-# dependency gate (cargo deny) and the hermetic JS path-mapping test — plus the
-# same test targets the job runs.
+# Covered: actionlint over the workflow files, shellcheck over them and the
+# shell scripts, the release payload's fixture test, fmt (workspace + fuzz), the
+# three guards below, the wasm-target `cargo check`, clippy (workspace, then the
+# rar-rs feature combinations), the fuzz `cargo check`s, rustdoc, the dependency
+# gate (cargo deny) and the hermetic JS path-mapping test — plus the same test
+# targets `test` runs.
 #
 # Not covered: the Windows-only `lint-windows` job (run it on Windows), the
-# binding build / `tsc` matrix and the official-tool interop suites.
+# binding build / `tsc` matrix and the official-tool interop suites. Markdown
+# formatting is the one optional extra, under `dprint` below.
 # `scripts/wsl/ci-linux.sh` is the full Linux gate under WSL2; this script is
 # the portable static gate that also runs on Windows Git Bash.
 #
@@ -35,7 +48,7 @@ for arg in "$@"; do
   case "$arg" in
     --no-tests) with_tests=0 ;;
     -h | --help)
-      sed -n '2,30p' "$0"
+      sed -n '2,35p' "$0"
       exit 0
       ;;
     *)
@@ -52,6 +65,46 @@ run() {
   exit 1
 }
 
+step "workflow files (actionlint)"
+# The one check `check` runs first and this script used to skip. It is opt-in
+# here because the pinned download in scripts/ci/run-actionlint.sh is a Linux
+# tarball: with `actionlint` on PATH (or ACTIONLINT_BIN set) it runs, otherwise
+# it says so and moves on — the checks that follow do not depend on it.
+if [ -n "${ACTIONLINT_BIN:-}" ] || command -v actionlint >/dev/null 2>&1; then
+  if [ -z "${ACTIONLINT_BIN:-}" ]; then ACTIONLINT_BIN=$(command -v actionlint); fi
+  export ACTIONLINT_BIN
+  run bash scripts/ci/run-actionlint.sh
+else
+  echo "SKIP: actionlint not on PATH (set ACTIONLINT_BIN, or let CI run it)"
+fi
+
+step "shell scripts (shellcheck)"
+# The scripts the workflows call. `-S warning` matches the CI step: at the
+# default style level shellcheck also flags deliberate constructs.
+if command -v shellcheck >/dev/null 2>&1; then
+  run shellcheck -S warning scripts/*.sh scripts/ci/*.sh scripts/wsl/*.sh
+else
+  echo "SKIP: shellcheck not installed"
+fi
+
+step "release payload (fixtures)"
+# The same fixture test `check` runs: the release asset rules and the notes
+# grouping, against temp directories and a scratch git repo. Seconds, no
+# toolchain — and it is the only local way to exercise release-only logic
+# without cutting a tag.
+run bash scripts/ci/test-release-scripts.sh
+
+step "markdown (dprint, optional)"
+# No CI job runs this. It is a local habit, not a gate: `dprint` needs the npm
+# package and `plugins.dprint.dev` at check time, and its markdown plugin wraps
+# on whitespace, so Chinese prose (no spaces) yields nothing to wrap and English
+# prose reflows on every edit. Run it when you want a diff to stay narrow.
+if command -v dprint >/dev/null 2>&1; then
+  run dprint check
+else
+  echo "SKIP: dprint not on PATH (npx dprint@0.50.2 check)"
+fi
+
 step "cargo fmt (workspace)"
 run cargo fmt --all --check
 
@@ -59,34 +112,10 @@ step "cargo fmt (fuzz)"
 run cargo fmt --manifest-path fuzz/Cargo.toml --check
 
 step "host-path separator guard"
-# Host paths must test separators through `std::path::is_separator`, which is
-# platform-correct; a literal backslash check is a Windows-only assumption.
-patterns=$(mktemp)
-printf "ends_with('%s')\nstarts_with('%s')\n" '\\' '\\' > "$patterns"
-if grep -rnFf "$patterns" --include='*.rs' crates/rar-cli/src crates/rar/src; then
-  rm -f "$patterns"
-  echo "!!! host paths must use std::path::is_separator, not a literal backslash check" >&2
-  exit 1
-fi
-rm -f "$patterns"
+run bash scripts/ci/check-host-paths.sh
 
 step "workspace versions agree"
-version() {
-  sed -n '/^\[package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p}' "$1" | head -1
-}
-lib=$(version crates/rar/Cargo.toml)
-cli=$(version crates/rar-cli/Cargo.toml)
-napi=$(version crates/rar-napi/Cargo.toml)
-pkg=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
-  crates/rar-napi/package.json | head -1)
-dep=$(sed -n 's/^rar-rs = { version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
-printf '  rar-rs=%s rar-cli=%s rar-rs-napi=%s package.json=%s workspace-dep=%s\n' \
-  "$lib" "$cli" "$napi" "$pkg" "$dep"
-if [ -z "$lib" ] || [ "$lib" != "$cli" ] || [ "$lib" != "$napi" ] \
-  || [ "$lib" != "$pkg" ] || [ "$lib" != "$dep" ]; then
-  echo "!! library, CLI, binding, package.json and workspace-dependency versions must match" >&2
-  exit 1
-fi
+run bash scripts/ci/check-versions.sh
 
 step "cargo check (rar-rs, wasm target, -D warnings)"
 RUSTFLAGS="-D warnings" run cargo check -p rar-rs --all-features \
@@ -95,14 +124,8 @@ RUSTFLAGS="-D warnings" run cargo check -p rar-rs --all-features \
 step "clippy (workspace, all features and targets, -D warnings)"
 run cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
 
-step "clippy (rar-rs, every feature combination, -D warnings)"
-# The workspace build unifies features across crates, which hides targets that
-# use a gated API without declaring `required-features` for it.
-for features in "" parallel simd parallel,simd; do
-  echo "--- features='$features'"
-  run cargo clippy -p rar-rs --no-default-features --features "$features" \
-    --all-targets --locked -- -D warnings
-done
+step "clippy (rar-rs, the combinations the workspace build misses, -D warnings)"
+run bash scripts/ci/clippy-feature-matrix.sh
 
 step "cargo check (fuzz workspace)"
 run cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
@@ -139,11 +162,7 @@ if [ "$with_tests" -eq 1 ]; then
   run cargo test -p rar-rs-napi --lib --locked
 
   step "cargo test (generated legacy corpus; skips without the official tools)"
-  run cargo test -p rar-rs --locked \
-    --test rar4_read --test rar13_read --test rar4_rev3 \
-    --test rar4_edge_cases --test rar_vm_filters \
-    --test streaming_edge_cases --test structured_recovery_mutations \
-    --test archive_editor --test winrar_generation --test rar50_roundtrip
+  run bash scripts/ci/test-generated-corpus.sh
 fi
 
 step "done"

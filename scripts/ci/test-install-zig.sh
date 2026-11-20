@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Regression tests for scripts/ci/install-zig.sh. A fixture tarball served over
-# HTTP stands in for the real one, so every path runs without a 47 MiB download.
+# Regression tests for the zig half of scripts/ci/install-musl-toolchain.sh. A
+# fixture tarball served over HTTP stands in for the real one, so every path
+# runs without a 47 MiB download. `CARGO_ZIGBUILD_VERSION` is left unset here,
+# which is what selects the zig half alone.
 # Mirror layout matches the real thing: <base>/<version>/<tarball>, and both
 # release spellings are covered (zig 0.15 renamed `zig-linux-x86_64-<v>` to
 # `zig-x86_64-linux-<v>`, which silently 404'd the pinned 0.14.0 download).
@@ -20,7 +22,7 @@ OLD="zig-linux-x86_64-$VER.tar.xz"
 BASE="http://127.0.0.1:$PORT"
 
 cd "${REPO:-$HOME/rar-rs}" || exit 1
-script=scripts/ci/install-zig.sh
+script=scripts/ci/install-musl-toolchain.sh
 
 rm -rf /tmp/srv /tmp/fx /tmp/zt* /tmp/ghpath
 mkdir -p "/tmp/srv/new/$VER" "/tmp/srv/old/$VER" "/tmp/srv/bad/$VER" "/tmp/fx/zig-x86_64-linux-$VER"

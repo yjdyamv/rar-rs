@@ -40,12 +40,22 @@
   `rar-rs.d.ts`**，生成物只叫 `binding.*`，`tsc --noEmit` 在 CI
   把关。错误类别一路传到消费者（`ErrorCode` → CLI 退出码 /
   `RarError.rarCode`），提取可选逐成员容错（`ExtractErrorPolicy`）并带进度。
-- **工程**：workspace 三 crate；CI 做 fmt / 路径分隔符守卫 / clippy
-  `-D warnings` 与 rar-rs 各 feature 组合 / wasm 目标 `cargo check` / 确定性测试
-  smoke / 版本一致性 / cargo deny / rustdoc，绑定侧的类型闸门 `tsc --noEmit` 在
-  build 矩阵里跑一次；另有一条 `lint-windows`（clippy 全目标 + WinRAR 开关契约 +
+- **工程**：workspace 三 crate；CI 做 actionlint（workflow 文件本身）+
+  shellcheck （`scripts/**/*.sh`）/ fmt / 路径分隔符守卫 / clippy `-D warnings`
+  与 rar-rs 各 feature 组合 / wasm 目标 `cargo check` / 确定性测试 smoke /
+  版本一致性 / cargo deny / rustdoc / 声明的 MSRV（`rust-version = 1.95`， 用
+  1.95 真跑 `cargo check`），绑定侧的类型闸门 `tsc --noEmit` 在 build
+  矩阵里跑一次；另有一条 `lint-windows`（clippy 全目标 + WinRAR 开关契约 +
   绑定单元测试），cargo deny 每周定时重跑一次以接住新的 RustSec 公告；七目标
-  fuzz；取消钩子；QO 快路径；流式修复； 零填充分卷。
+  fuzz；取消钩子；QO 快路径；流式修复； 零填充分卷。**发布路径不再只在打 tag
+  时才第一次执行**：资产收集与 release notes 已抽成
+  `scripts/ci/collect-release-assets.sh` / `scripts/ci/release-notes.sh` 并由
+  `scripts/ci/test-release-scripts.sh` 用 fixture 在每次 push 上验证（addon /
+  WASI 清单、跨 target 生成的 loader 一致性、license 扁平化碰撞、notes
+  分组与上一个 tag 的取法）；`build` 的 9 条矩阵移入
+  `scripts/ci/build-matrix.js`，PR 只跑其中 1 条（带 `tsc` 类型闸门），每周
+  定时跑满 9 条 + wasi bundle。job 图、每个 job 允许证明什么、成本与取舍见
+  `docs/ci.md`。
 - **格式对拍**：`crates/rar/tests/format_parity.rs` 把同一批载荷分别喂给我们的
   writer 与官方 `Rar.exe`，逐块逐字段比对（自带 RAR4/RAR5 头解析器，不依赖库内
   解析代码）：STORE 档要求整档逐字节相同（RAR5 / RAR4 / RAR2 三族），压缩档只放
@@ -114,10 +124,10 @@ rar-rs` 校验通过。剩下的是执行：
 ### 测试覆盖（对齐 CI）
 
 - [x] **CI 拉官方工具跑生成套件**：`scripts/fetch_winrar.py`（标准库，双平台）
-      是唯一下载入口，两个 GitHub job 都先跑它；`lint-windows` 用
-      `SA_REQUIRE_WINRAR=1` 跑全套（覆盖 2.90/3.00 配方），Ubuntu job 跑同一批
-      target 但允许自跳（rarlab 的 Linux 版从 3.93 起）。 注意上限仍是 RAR4 写入
-      6.23、`cf` 4.20、`rv3` 4.20。
+      是唯一下载入口，`test` 与 `lint-windows` 都先跑它；`lint-windows` 用
+      `SA_REQUIRE_WINRAR=1` 跑全套（覆盖 2.90/3.00
+      配方），`test`（Ubuntu）跑同一批 target 但允许自跳（rarlab 的 Linux 版从
+      3.93 起）。 注意上限仍是 RAR4 写入 6.23、`cf` 4.20、`rv3` 4.20。
 
 ### 通用库的对外面（已做一半，剩打包）
 
@@ -136,7 +146,11 @@ rar-rs` 校验通过。剩下的是执行：
       `rar-rs-win32-x64-msvc`）可能触发 npm 的 spam 检测，建议平台包放 scope
       下、主包保持 `rar-rs`。
 - [ ] **CI 首跑**：跨平台 build 矩阵与新增的 typecheck 步骤只做过静态修改，
-      首次跑通必须由 CI 证明（本地无法覆盖）。
+      首次跑通必须由 CI 证明（本地无法覆盖）。`release`
+      侧真正发布（`gh
+      release` 上传）与 8 个跨平台 target
+      的二进制加载同样只能由 CI/ 周任务证明；本地能证明的只有 fixture 部分
+      （`bash scripts/ci/test-release-scripts.sh`）。
 
 ### 已知差异（已量化，追平需先逆向公式）
 

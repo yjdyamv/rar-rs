@@ -4,7 +4,8 @@
 > host-specific snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing
-it.
+it. For the CI side — the job graph, what each job is allowed to prove and what
+is deliberately not gated — see [`ci.md`](ci.md).
 
 ## Running
 
@@ -19,8 +20,8 @@ fast (it parallelizes across test binaries instead of running them one after
 another) and prints a per-test timing report — the easiest way to find what got
 slow. It is a local convenience only.
 
-**This is the main test gate.** CI runs a deterministic **smoke** subset in one
-step: `cargo test -p rar-rs --all-features --locked` plus
+**This is the main test gate.** CI runs a deterministic **smoke** subset in the
+`test` job: `cargo test -p rar-rs --all-features --locked` plus
 `cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name`
 plus `cargo test -p rar-rs-napi --lib --locked` — the library and CLI suites,
 with no official-tool interop and no JS/WASI binding suite. That was added
@@ -39,49 +40,70 @@ integration targets are named explicitly — `cli_behavior` (the WinRAR switch
 contract) and `volume_bare_name` (a regression that only surfaced on Unix), so
 adding a hermetic suite cannot silently stay out of CI. `official_interop` and
 `winrar_interop` stay local: they need an installed WinRAR/UnRAR and self-skip,
-so running them here would only produce a wall of skip markers. CI also keeps
-fmt, the host-path guard, clippy (which subsumes `cargo check`), the wasm-target
-`cargo check`, `cargo deny` and rustdoc; the binding's `tsc --noEmit` gate runs
-in the `build` matrix, on the one target whose generated `binding.d.ts` it
-needs.
+so running them here would only produce a wall of skip markers. The static
+counterpart, the `check` job, keeps fmt, the guards, clippy (which subsumes
+`cargo check`), the wasm-target `cargo check`, `cargo deny` and rustdoc; the
+binding's `tsc --noEmit` gate runs in the `build` matrix, on the one target
+whose generated `binding.d.ts` it needs.
 
-The same job carries the checks that need neither an addon nor an official tool:
-the binding's Rust unit tests (`cargo test -p rar-rs-napi --lib`, which pin the
-public error contract),
+The `test` job also carries the checks that need neither an addon nor an
+official tool: the binding's Rust unit tests (`cargo test -p rar-rs-napi --lib`,
+which pin the public error contract),
 `node --test
 crates/rar-napi/__test__/wasi-path-map.test.mjs` (the hand-written
 JS path mapping and the loader's export table — it imports only tracked sources,
 so it cannot flake on a missing build), and
 `bash scripts/ci/test-install-zig.sh` against its fixture server (tarball naming
-variants, checksum failure, mirror race, the `GITHUB_PATH` export). A second
+variants, checksum failure, mirror race, the `GITHUB_PATH` export — it drives
+the zig half of `scripts/ci/install-musl-toolchain.sh`). Two of `test`'s steps
+are `schedule`/tag only because dropping them would drop coverage, not
+duplication: the second pass over the 10 generated-corpus targets, this time
+against a scalar (`default = []`) library build, and — in the Windows job — the
+same corpus with `SA_REQUIRE_WINRAR=1`. The `--all-features` pass on every push
+already executes those suites; the extra passes buy a different library
+configuration for a second compile of the crate plus every test binary. A third
 job, `lint-windows`, runs on `windows-latest` on the same triggers: clippy over
 all features and targets plus `cli_behavior`, `volume_bare_name` and the
 binding's lib tests, and `release` waits on it — everything under
 `#[cfg(windows)]` used to be compiled for the first time by the release matrix
-itself. Everything under "Running" above (including the interop suites and the
+itself. A fourth, `msrv`, installs the `rust-version` read out of `Cargo.toml`
+(1.95) and runs `cargo check --workspace --all-features --locked` with it, so
+the declared floor is executed rather than asserted; `release` waits on it too,
+because publishing a crate whose stated MSRV does not compile is a broken
+promise. Everything under "Running" above (including the interop suites and the
 ignored codec matrix) is still yours to run before tagging a release. The Linux
 half in one command: `bash scripts/wsl/ci-linux.sh` (WSL2 — it _is_ the Linux
 test gate now).
 
-The **static** checks the same job runs — fmt, the host-path guard, the
-wasm-target `cargo check`, clippy over every `rar-rs` feature combination,
-rustdoc, the `cargo deny` gate and the hermetic JS test — are not part of
-`cargo test --workspace`. Run them (and the job's test targets) in one command:
+The **static** checks `check` runs — actionlint over the workflow files,
+shellcheck over `scripts/**/*.sh`, fmt, the host-path guard, the five-place
+version comparison, the wasm-target `cargo check`, clippy over the `rar-rs`
+feature combinations the workspace build cannot cover (the all-features one is
+that build), rustdoc and the `cargo deny` gate — are not part of
+`cargo test --workspace`. `scripts/ci-lint.sh` runs them (and `test`'s targets)
+in one command:
 
 ```sh
-scripts/ci-lint.sh              # static checks + the lint job's test targets
+scripts/ci-lint.sh              # static checks + the `test` job's targets
 scripts/ci-lint.sh --no-tests   # static checks only (fast)
 ```
 
-It mirrors the `lint` job (`.github/workflows/CI.yml` is the source of truth)
-and runs on Linux, macOS and Windows Git Bash, skipping the `cargo deny` and
-node steps when those tools are absent.
+It runs the same checks as the `check` and `test` jobs
+(`.github/workflows/CI.yml` is the source of truth) and runs on Linux, macOS and
+Windows Git Bash, skipping the `cargo deny`, actionlint, shellcheck and node
+steps when those tools are absent (actionlint is the one check it cannot
+download for you — the pinned release tarball there is Linux-only; set
+`ACTIONLINT_BIN` to a local binary to include it). The checks that used to be
+copy-pasted — the host-path guard, the five-place version comparison, the
+`rar-rs` clippy feature matrix and the generated-corpus target list — now live
+in `scripts/ci/` and are called from both sides, so only the orchestration can
+drift:
 
 ## The other two platforms
 
-`lint` runs on Linux and `lint-windows` only covers Windows, so a green run on
-one says nothing about the other two surfaces. They stay local and check-only
-(`clippy`/`check` do not link, so no cross toolchain is needed):
+`check`/`test` run on Linux and `lint-windows` only covers Windows, so a green
+run on one says nothing about the other two surfaces. They stay local and
+check-only (`clippy`/`check` do not link, so no cross toolchain is needed):
 
 ```sh
 rustup target add x86_64-unknown-linux-gnu    # once
@@ -118,16 +140,16 @@ RUSTFLAGS="-D warnings" cargo check -p rar-rs --all-features \
 
 ## Dependency gate
 
-`lint` also runs `cargo deny --all-features --locked check` (the global flags go
-before the subcommand), which judges the _dependency graph_ rather than this
+`check` also runs `cargo deny --all-features --locked check` (the global flags
+go before the subcommand), which judges the _dependency graph_ rather than this
 tree: RustSec advisories, the license allow-list, the registry sources.
 Configuration and the rationale for each allowed license family live in the root
 [`deny.toml`](../deny.toml); a dependency under an unlisted license fails on
 purpose. In-tree `rars` ports are _not_ covered by that file — see
 [`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md). The advisory database
-moves without a commit, so the workflow also runs `lint` on a weekly `schedule`;
-a push-only trigger would notice a new RustSec advisory only after the next
-unrelated change.
+moves without a commit, so the workflow also runs `check` on a weekly
+`schedule`; a push-only trigger would notice a new RustSec advisory only after
+the next unrelated change.
 
 ```sh
 cargo install cargo-deny --locked    # once
@@ -153,11 +175,12 @@ bash scripts/wsl/stage12-linux.sh      # legacy streaming vs official unrar
 `ci-linux.sh [FROM] [TO]` runs the Linux half from WSL2 (default `1 20`): `1-13`
 the checks and the workspace test suite (step 12 is the `cargo deny` gate, 13
 the tests), `14` official interop, `15-19` the binding builds and JS tests, `20`
-the optional fuzz smoke. It used to mirror the workflow step for step; CI no
-longer runs tests, so the script is now the Linux test gate itself. With the
-rarlab tools present it exports `SA_OFFICIAL_*`, so the interop suites run
-instead of skipping — including the binding test that otherwise reports
-`SA_OFFICIAL_UNRAR is not set` (59 passed, 0 skipped, instead of 58 + 1).
+the optional fuzz smoke. It used to mirror the workflow step for step; it is now
+the wider Linux gate — the full workspace suite, the official-tool interop and
+the binding suites, none of which CI runs. With the rarlab tools present it
+exports `SA_OFFICIAL_*`, so the interop suites run instead of skipping —
+including the binding test that otherwise reports `SA_OFFICIAL_UNRAR is not set`
+(59 passed, 0 skipped, instead of 58 + 1).
 
 Mirrors were picked from measurements on the author's box; re-measure before
 trusting them elsewhere. (2026-09-17: 8 MiB ranges of the real `rustc` tarball,
@@ -305,12 +328,13 @@ byte-level mutations of generated output (`generate::patch_unp_ver`,
 `tests/rar13_read.rs`) or by unit tests next to the decoder. `tests/data/` holds
 the two raw payload corpora (no archives).
 
-Consequence for CI: both GitHub jobs run `scripts/fetch_winrar.py` first, so the
-generated suites execute there instead of skipping. `lint-windows` fetches the
-full set and runs them with `SA_REQUIRE_WINRAR=1` (a missing tool or a failed
-generation fails the job); `lint` (Ubuntu) runs the same targets against the
-Linux builds without that flag, because 2.90/3.00 have no Linux release.
-`scripts/wsl/ci-linux.sh` still fetches the tools for the local Linux gate.
+Consequence for CI: `test` and `lint-windows` both run `scripts/fetch_winrar.py`
+first, so the generated suites execute there instead of skipping. `lint-windows`
+fetches the full set and runs them with `SA_REQUIRE_WINRAR=1` (a missing tool or
+a failed generation fails the job); `test` (Ubuntu) runs the same targets
+against the Linux builds without that flag, because 2.90/3.00 have no Linux
+release. `scripts/wsl/ci-linux.sh` still fetches the tools for the local Linux
+gate.
 
 ## Why test targets are optimized
 

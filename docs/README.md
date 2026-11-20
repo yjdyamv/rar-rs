@@ -13,7 +13,9 @@
 5. [`../PLAN.md`](../PLAN.md) — 下一步、开放议题与当前判断。
 6. [`PITFALLS.md`](PITFALLS.md) —
    长期规则与「别改回去」的地雷，**改行为之前先读**。
-7. [`FORMAT_RAR5_RAR7.html`](FORMAT_RAR5_RAR7.html) — 字节级格式参考。
+7. [`ci.md`](ci.md) — CI 的 job 图、每个 job 被允许证明什么、成本模型，以及
+   「刻意没有做什么」。改 `.github/workflows/` 之前先读。
+8. [`FORMAT_RAR5_RAR7.html`](FORMAT_RAR5_RAR7.html) — 字节级格式参考。
 
 ## 单一来源（谁负责什么）
 
@@ -32,6 +34,9 @@
 | 测试怎么跑 / 耗时                             | [`testing.md`](testing.md)                                                                                             |
 | fuzz 目标                                     | [`../fuzz/README.md`](../fuzz/README.md)                                                                               |
 | 法务与许可                                    | [`../NOTICE`](../NOTICE) · [`../THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) · [`../LICENSES/`](../LICENSES/) |
+
+CI 的 job 图、每个 job 的职责与成本见 [`ci.md`](ci.md)（`.github/workflows/`
+的单一来源）。
 
 ## 决策记录与议题
 
@@ -57,17 +62,20 @@
 
 ## 文档格式约定
 
-- **每个 `.md` 必须能被 `dprint` 幂等格式化**：正文尽量每行 ≤ **80 列**。
-  代码块、表格、标题、HTML 块、链接定义与不可断的长 token（长 URL、长行内代码、
-  长路径/标识符串）不参与换行。
-- 配置在 [`dprint.json`](../dprint.json)：markdown 插件
-  0.19.0、`lineWidth: 80`、 `textWrap: always`、`newLineKind: lf`。写作后跑
-  `npx dprint@0.50.2 fmt`；CI 的 `Docs` workflow 跑 `check`，未格式化会让 CI
-  变红。
-- **中文段落不要手工折行**：dprint
-  把折行处的换行当空格，会造成中文之间的假空格。写完跑 `fmt`，由它按空白折行。
+- **正文尽量每行 ≤ 80 列**，便于按列对照 review。代码块、表格、标题、HTML
+  块、链接定义与不可断的长 token（长
+  URL、长行内代码、长路径/标识符串）不参与换行。
+- **没有 CI 门禁**（2026-11 决定）。`dprint` 曾在独立的 `Docs` workflow 里做
+  `check`，已移除：它每次要拉 npm 包与 `plugins.dprint.dev`
+  的插件，任一抖动就是与代码正确性无关的红；它的 markdown 插件按空白折行、不实现
+  CJK 断行（见下），对中文段落基本只制造噪声。配置仍在
+  [`dprint.json`](../dprint.json)（markdown 插件
+  0.19.0、`lineWidth: 80`、`textWrap: always`、`newLineKind: lf`），`npx dprint@0.50.2 fmt`
+  想跑就跑；`scripts/ci-lint.sh` 只在 PATH 上有 `dprint` 时顺手 `check`。
+- **中文段落不要手工折行**：折行处的换行在渲染时是空格，会造成中文之间的假空格。需要窄
+  diff 时用 `dprint` 自己折。
 - **已知限制**：dprint 的 markdown 插件按空白折行，不实现 CJK/UAX #14 断行（见
-  [dprint-plugin-markdown #127][md127]），所以不含空白的纯中文长句只能靠作者在语义边界留空格；少量密集引用行仍可能超
+  [dprint-plugin-markdown #127][md127]），所以不含空白的纯中文长句只能靠作者在语义边界留空格；少量密集引用行可能超
   80 列，属允许的例外。
 
 ## 文档真实性与时效

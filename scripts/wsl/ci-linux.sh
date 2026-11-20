@@ -134,10 +134,11 @@ if want 9; then
 fi
 
 if want 10; then
-  step "10/20 clippy (rar-rs, every feature combination, -D warnings)"
+  step "10/20 clippy (rar-rs, combinations the workspace build misses, -D warnings)"
   # The workspace build unifies features across crates, which hides targets
-  # that use a gated API without declaring `required-features` for it.
-  for features in "" parallel simd parallel,simd; do
+  # that use a gated API without declaring `required-features` for it. The
+  # all-features combination is that build, so it is not repeated here.
+  for features in "" parallel simd; do
     echo "--- features='$features'"
     run cargo clippy -p rar-rs --no-default-features --features "$features" \
       --all-targets --locked -- -D warnings

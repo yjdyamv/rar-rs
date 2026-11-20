@@ -50,8 +50,11 @@ in [PLAN.md](PLAN.md), and the rules that must not be re-litigated in
 
 ## Build
 
-Current stable Rust (`edition = "2024"`); no fixed MSRV is declared and CI runs
-the full stable matrix.
+Rust 1.95 or newer (`rust-version` in `Cargo.toml`, quoted from what the tree
+actually compiles with; the release build and the cross targets use current
+stable). The floor is not cosmetic — `AtomicU32::try_update` in the archive
+reader stabilized in 1.95 — and CI compiles it with exactly that toolchain, so
+the number cannot rot.
 
 ```bash
 cargo build --release --locked
@@ -175,5 +178,6 @@ redistributor has to satisfy both sets. [NOTICE](NOTICE) and
 where; [`LICENSES/`](LICENSES/) holds the standard texts. Full text:
 [LICENSE](LICENSE).
 
-All Markdown is formatted with `dprint` at 80 columns; conventions in
-[docs/README.md](docs/README.md).
+Markdown keeps to 80 columns where it can; conventions in
+[docs/README.md](docs/README.md). `dprint` is a local convenience
+(`npx dprint@0.50.2 fmt`), not a CI gate.

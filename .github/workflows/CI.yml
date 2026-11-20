@@ -3,11 +3,16 @@ env:
   DEBUG: napi:*
   APP_NAME: rar-rs-napi
   MACOSX_DEPLOYMENT_TARGET: '10.13'
-  # CI builds restore a target/ cache (see `rust-cache` in `lint` and the
+  # CI builds restore a target/ cache (see `rust-cache` in `check`/`test` and the
   # `actions/cache` steps in `build`), so incremental compilation buys nothing
   # and writes large, cache-hostile artifact trees; it is also off by default
   # for release builds. Keep it off everywhere.
   CARGO_INCREMENTAL: '0'
+  # The two settings that make a failed run readable without re-running it:
+  # colour is lost in a non-tty log unless forced, and a panic in a test
+  # binary prints "note: run with RUST_BACKTRACE=1" instead of the stack.
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
   # Static musl addons are cross-built with cargo-zigbuild, which needs a
   # `zig`. Pinned here (not by an action) and verified against the SHA-256
   # from ziglang.org's own index: the download stays on the official host,
@@ -21,42 +26,70 @@ env:
   CARGO_ZIGBUILD_VERSION: '0.23.4'
   # Release-grade work — the binding matrix builds and rustdoc — runs on tags
   # and manual dispatches. A push/PR keeps only what catches a broken change
-  # fast: fmt, the host-path guard, clippy (which subsumes `cargo check`),
-  # a deterministic Rust test smoke and cargo-deny.
+  # fast: `check` (fmt, the guards, clippy — which subsumes `cargo check` — and
+  # cargo-deny) and `test` (the deterministic Rust test smoke).
   #
-  # Tests are otherwise a local gate (`cargo test --workspace --all-features`,
-  # see docs/testing.md): the owner asked for that in 2026-09 after the WASI
-  # binding suite blocked a release on a non-reproducible `memory access out of
-  # bounds`. The `lint` job now runs the Rust unit/integration suites as a
-  # smoke (they caught a stale assertion that shipped with 0.12.0); the JS/WASI
-  # binding suites stay local so a red run stays a compile/lint/test-fact
-  # failure rather than a flake.
+  # The rest of the test surface is a local gate (`cargo test --workspace
+  # --all-features`, see docs/testing.md): the owner asked for that in 2026-09
+  # after the WASI binding suite blocked a release on a non-reproducible
+  # `memory access out of bounds`. The `test` job runs the Rust
+  # unit/integration suites as a smoke (they caught a stale assertion that
+  # shipped with 0.12.0); the JS/WASI binding suites stay local so a red run
+  # stays a compile/lint/test-fact failure rather than a flake.
   #
   # Nothing is built twice on a heavy run: the binding's addons and its `tsc`
   # gate live in the `build`/`build-wasm` jobs, which already build them.
+  #
+  # Two release-grade *tests* ride along on that split instead of being dropped,
+  # because dropping them would drop coverage rather than duplication: the
+  # generated corpus against a scalar (`default = []`) build, and the same
+  # corpus on Windows with `SA_REQUIRE_WINRAR=1`. Both are release-shaped — the
+  # Linux one on `schedule` and tags, the Windows one on tags and dispatches —
+  # because the Linux `test` job already runs those suites under `--all-features`
+  # on every push, so what the extra step adds there is a second compile of the
+  # crate plus every test binary.
   RUN_HEAVY: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
 'on':
+  # No `paths-ignore`. A markdown-only push is cheap enough to run `check`,
+  # `test` and `msrv` for, and filtering by path broke two things that are
+  # worse than those minutes: a tag whose diff happens to touch only `*.md`
+  # would skip the workflow entirely and silently publish nothing, and a
+  # docs-only PR would never post the checks branch protection waits for.
+  # Formatting is a local convenience (`dprint`), not a second gate, so this
+  # workflow is the only thing a docs-only change can trip.
   push:
     branches:
       - main
     tags:
       - 'v*'
-    paths-ignore:
-      - '**/*.md'
-      - LICENSE
-      - NOTICE
-      - '**/*.gitignore'
   pull_request:
+  # A plain dispatch builds the matrix (tag-only work) against the default
+  # branch, which is how a workflow change is smoke-tested before it gates a
+  # release. A dispatch that names an existing tag relays that tag's release:
+  # the build jobs check the tag out, and `release` re-publishes it. Without
+  # that input a release that died mid-upload could only be retried by
+  # deleting and re-pushing the tag.
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing tag to (re)release, e.g. v0.15.0 (empty = plain build)'
+        required: false
+        type: string
   # RustSec advisories change without a commit. A weekly run re-evaluates the
   # committed lockfiles against the advisory database so a new advisory is
-  # noticed here instead of on the next unrelated push. Only `lint` runs: the
-  # heavy binding matrix stays tag/dispatch-only via `RUN_HEAVY`.
+  # noticed here instead of on the next unrelated push. Only `check` and `test`
+  # run: the heavy binding matrix stays tag/dispatch-only via `RUN_HEAVY`, and
+  # `lint-windows` opts out of `schedule` for the same cost reason.
   schedule:
     - cron: '0 4 * * 1'
+# One run per ref. PR runs cancel their predecessor — a superseded commit is
+# free to lose. Branch and tag runs queue instead: a cancelled tag run can
+# leave a release with half its assets replaced, and the same group keeps a
+# `release_tag` dispatch from racing the tag push it re-publishes (the dispatch
+# runs on the default branch, so grouping by `github.ref` would separate them).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.inputs.release_tag || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 # Least privilege: every job only reads the repository. `release` opts into
 # `contents: write` for its own job.
 permissions:
@@ -71,56 +104,82 @@ permissions:
 # The binding's JS tests run with `node --test` under crates/rar-napi; they are
 # a local gate, like the Rust suites.
 #
-# Trigger split (see `RUN_HEAVY`): every push/PR runs `lint`; tags and manual
-# dispatches additionally build the binding matrix and check rustdoc.
-# `lint-windows` shares those triggers and gates `release`, so a
+# Trigger split (see `RUN_HEAVY`): every push/PR runs `check`, `test` and
+# `msrv`; tags and manual dispatches additionally build the binding matrix and
+# check rustdoc. `lint-windows` shares those triggers and gates `release`, so a
 # `#[cfg(windows)]` break cannot reach a published tag through the matrix. A
-# weekly `schedule` reruns `lint` because the RustSec advisory database moves
+# weekly `schedule` reruns `check` because the RustSec advisory database moves
 # without a commit.
-# `release` (tags only) assembles the GitHub Release from those artifacts.
+# `release` (tags, or a dispatch naming a tag) assembles the GitHub Release
+# from those artifacts.
 #
 # This file must live at the repository ROOT: GitHub Actions only executes
 # .github/workflows/*.yml from the default branch root; the old copy under
 # crates/rar-napi/.github/workflows/ was never run.
 jobs:
-  lint:
-    name: Lint + checks
+  # Static gate: does the tree compile, format, lint and satisfy policy? Nothing
+  # here runs a test suite — that is `test` — so a red run says which kind of
+  # problem it is without reading the log.
+  check:
+    name: Checks (linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      # First, because it is the cheapest step and the only one that reads the
+      # workflow files themselves. Pinned version and checksum: the download is
+      # verified, so the tool cannot change under the gate.
+      - name: Lint the workflow files (actionlint)
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: bash scripts/ci/run-actionlint.sh
+      # actionlint shellchecks the `run:` blocks in this file; this covers the
+      # scripts those blocks call, which nothing else reads. `-S warning` is the
+      # level where shellcheck finds defects instead of taste (at the default
+      # style level it also flags deliberate constructs, e.g. the literal
+      # backslash pattern in check-host-paths.sh). shellcheck ships on the ubuntu
+      # image, and a missing binary is an error rather than a skip so the gate
+      # cannot quietly disappear.
+      - name: Lint the shell scripts (shellcheck)
+        run: |
+          set -euo pipefail
+          command -v shellcheck >/dev/null || {
+            echo "::error::shellcheck is not on PATH (apt-get install -y shellcheck)"
+            exit 1
+          }
+          shellcheck -S warning scripts/*.sh scripts/ci/*.sh scripts/wsl/*.sh
+      - name: Rehearse the release payload (fixtures)
+        # The `release` job's two scripts run here first, against fixtures built
+        # in a temp directory: the addon/WASI completeness rules, the identical-
+        # loader rule, the flattened-license collision rule and the release-notes
+        # grouping all fail on a pull request instead of on a tag. Seconds, no
+        # toolchain, and it covers the logic that used to be reachable only by
+        # publishing.
+        run: bash scripts/ci/test-release-scripts.sh
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
           targets: wasm32-wasip1-threads
       - name: Cache cargo
-        # `lint` compiles the workspace several times (test profile, clippy
-        # with all features and targets, four isolated feature combinations,
-        # two fuzz builds). Without a restored target/ every push pays the
-        # full cold build. The cache key includes the rustc version, so a
-        # toolchain bump invalidates it instead of mixing artifacts.
+        # `check` compiles the workspace several times (clippy with all features
+        # and targets, four isolated feature combinations, two fuzz builds).
+        # Without a restored target/ every push pays the full cold build. The
+        # cache key includes the rustc version, so a toolchain bump invalidates
+        # it instead of mixing artifacts.
+        #
+        # `shared-key: linux` is shared with `test` on purpose: same toolchain,
+        # same Cargo.lock, so the dependency graph and the downloaded registry
+        # are identical. One entry means the second job of a run restores what
+        # the first one saved instead of fetching and compiling its own copy;
+        # GitHub refuses to overwrite an existing key, so the two cannot
+        # actually corrupt each other — the loser simply keeps the winner's
+        # artifacts. `msrv` stays separate because its key must follow a
+        # different toolchain.
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: lint
-      - name: Cache WinRAR test builds
-        uses: actions/cache@v4
-        with:
-          path: .cache/winrar
-          key: winrar-tools-linux-${{ hashFiles('scripts/fetch_winrar.py') }}
-      - name: Fetch WinRAR test builds
-        # The legacy suites build their archives at run time instead of shipping
-        # blobs. rarlab published Linux tarballs from 3.93 on, so 2.90 and 3.00 —
-        # and every recipe that needs them — self-skip here; `lint-windows` runs
-        # the full set.
-        run: python3 scripts/fetch_winrar.py
-      - name: Verify WinRAR test builds
-        # The suites self-skip on a missing tool, and this job has no
-        # `SA_REQUIRE_WINRAR`, so a gap in the restored cache would quietly
-        # reduce coverage instead of failing. `--check` reports the releases
-        # this host has a build for (2.90/3.00 have no Linux tarball) and fails
-        # on any other that is absent.
-        run: python3 scripts/fetch_winrar.py --check
+          shared-key: linux
       - name: Cargo fmt (workspace + fuzz)
         # `fuzz/` is not a workspace member, so `cargo fmt --all` never covers
         # its targets.
@@ -130,18 +189,22 @@ jobs:
       - name: Host-path separator guard
         # Host paths (disk, destination directory, volumes, -w/-op/--dest)
         # must test separators through `std::path::is_separator`, which is
-        # platform-correct: `/` everywhere, `\` only on Windows. A literal
-        # `ends_with('\\')` is a Windows-only assumption that made
-        # `rar x p.rar dest\` create a literal `dest\` directory on Linux.
-        # Archive-member names may still normalize `\` -> `/` (RAR stores
-        # backslashes), so only the method-on-char-literal shape is guarded.
-        run: |
-          set -euo pipefail
-          printf "ends_with('%s')\nstarts_with('%s')\n" '\\' '\\' > /tmp/host-sep-patterns
-          if grep -rnFf /tmp/host-sep-patterns --include='*.rs' crates/rar-cli/src crates/rar/src; then
-            echo "::error::host paths must use std::path::is_separator, not a literal backslash check"
-            exit 1
-          fi
+        # platform-correct: `/` everywhere, `\` only on Windows. Archive-member
+        # names may still normalize `\` -> `/` (RAR stores backslashes), so only
+        # the method-on-char-literal shape is guarded.
+        #
+        # The check itself lives in the script so `scripts/ci-lint.sh` runs the
+        # same grep instead of a hand-kept copy.
+        run: bash scripts/ci/check-host-paths.sh
+      - name: Workspace versions agree
+        # The release job only compares the tag against `crates/rar-napi`, so the
+        # library and CLI drifted (0.1.2 vs the binding's 0.7.0). Everything here
+        # ships from one tree, so hold all five places to the same version. The
+        # parsing lives in the script, shared with `release` and `ci-lint.sh`;
+        # `release` passes the tag as an argument. Here it runs without one: the
+        # five places must agree with each other, and `release` separately
+        # proves they agree with the tag.
+        run: bash scripts/ci/check-versions.sh
       - name: Cargo check (rar-rs, wasm target, -D warnings)
         # The only `cargo check` left: clippy below already compiles the
         # workspace and every rar-rs feature combination, so a plain host check
@@ -152,84 +215,6 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
         run: cargo check -p rar-rs --all-features --target wasm32-wasip1-threads --locked
-      - name: Cargo test (library + CLI suites)
-        # Tests are a local gate by default (see docs/testing.md), but a stale
-        # test assertion shipped with 0.12.0 because nothing ran them here. This
-        # deterministic smoke — the library and CLI suites, no official-tool
-        # interop, no JS/WASI binding suite (the earlier flake source) — closes
-        # that gap without making a red run ambiguous.
-        #
-        # `parallel`/`simd` are the library's only features and no test is
-        # `cfg(not(feature = ...))`, so `--all-features` executes everything the
-        # split default/feature pair only compiled: before this ran once with
-        # `default = []`, `extract_all_parallel`, `encode_chunked_mt` and the
-        # simd paths were never *run*, which is how a dead progress tracker and a
-        # `Collect` policy that silently behaved like `Abort` reached main. The
-        # ungated build is still compiled, by the clippy matrix below.
-        #
-        # The CLI targets are the two binaries' unit tests, `cli_behavior` (the
-        # WinRAR switch contract, hermetic: temp dirs plus the
-        # `CARGO_BIN_EXE_*` binaries this step builds) and `volume_bare_name`
-        # (a Unix-only regression that no CI step ran). `official_interop` and
-        # `winrar_interop` stay local: they need the official tools and
-        # self-skip, so running them here would only print skip markers.
-        run: |
-          cargo test -p rar-rs --all-features --locked
-          cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
-          cargo test -p rar-rs-napi --lib --locked
-      - name: Cargo test (generated legacy corpus)
-        # The generated-archive suites check the decoders against archives the
-        # official Linux builds write, which is a different byte diet from the
-        # Windows ones (host OS field, path separators, mtime/tz). No
-        # `SA_REQUIRE_WINRAR` here: the releases this host has no build for must
-        # keep skipping instead of failing the job.
-        run: |
-          cargo test -p rar-rs --locked \
-            --test rar4_read --test rar13_read --test rar4_rev3 \
-            --test rar4_edge_cases --test rar_vm_filters \
-            --test streaming_edge_cases --test structured_recovery_mutations \
-            --test archive_editor --test winrar_generation --test rar50_roundtrip
-      - name: Workspace versions agree
-        # The release job only compares the tag against `crates/rar-napi`, so the
-        # library and CLI drifted (0.1.2 vs the binding's 0.7.0). Everything here
-        # ships from one tree, so hold all four files to the same version.
-        run: |
-          set -euo pipefail
-          version() {
-            sed -n '/^\[package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p}' "$1" | head -1
-          }
-          lib=$(version crates/rar/Cargo.toml)
-          cli=$(version crates/rar-cli/Cargo.toml)
-          napi=$(version crates/rar-napi/Cargo.toml)
-          pkg=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
-            crates/rar-napi/package.json | head -1)
-          # The fifth place the version appears: the workspace dependency the
-          # CLI and binding inherit (`cargo package` refuses a mismatch).
-          dep=$(sed -n 's/^rar-rs = { version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
-          printf 'rar-rs=%s rar-cli=%s rar-rs-napi=%s package.json=%s workspace-dep=%s\n' \
-            "$lib" "$cli" "$napi" "$pkg" "$dep"
-          if [ -z "$lib" ] || [ "$lib" != "$cli" ] || [ "$lib" != "$napi" ] \
-            || [ "$lib" != "$pkg" ] || [ "$lib" != "$dep" ]; then
-            echo "::error::library, CLI, binding, package.json and workspace-dependency versions must match"
-            exit 1
-          fi
-        shell: bash
-      - name: Setup node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-      - name: Binding path-mapping tests (pure JS)
-        # `wasi-path-map.test.mjs` imports only tracked sources
-        # (`wasi-path-map.cjs`, `scripts/patch-wasi-loader.mjs`, `rar-rs.js`),
-        # so it needs no addon build and cannot flake. It is the only gate on
-        # the hand-written JS path mapping and on the loader's export table.
-        run: node --test crates/rar-napi/__test__/wasi-path-map.test.mjs
-      - name: Regression test the zig installer
-        # Hermetic fixture server (no 47 MiB download); exercises the naming
-        # variants, checksum failure, mirror race and the GITHUB_PATH export
-        # that a previous release run got wrong. Unset GITHUB_PATH so the
-        # fixture's fake zig is not appended to this job's real PATH.
-        run: env -u GITHUB_PATH REPO="$GITHUB_WORKSPACE" bash scripts/ci/test-install-zig.sh
       - name: Cargo check (fuzz workspace)
         # The fuzz crate must build both ways: without `fuzzing` the targets
         # fall back to their standalone `main` (the stable mode fuzz/README.md
@@ -248,21 +233,11 @@ jobs:
         # Also the workspace's `cargo check`: clippy drives the same build, so a
         # separate check step would only compile the tree twice.
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
-      - name: Clippy (rar-rs, every feature combination)
-        # The workspace build unifies features across crates (rar-rs-napi
-        # pulls in parallel + simd), which hides targets that use a gated API
-        # without declaring `required-features` for it — the mtwin example
-        # failed `cargo check -p rar-rs --all-targets` for that reason while
-        # the workspace check stayed green. Check the library on its own so
-        # each combination is seen in isolation.
-        run: |
-          set -euo pipefail
-          for f in "" parallel simd parallel,simd; do
-            echo "::group::features='$f'"
-            cargo clippy -p rar-rs --no-default-features --features "$f" --all-targets --locked -- -D warnings
-            echo "::endgroup::"
-          done
-        shell: bash
+      - name: Clippy (rar-rs, the combinations the workspace cannot cover)
+        # The library on its own, so each combination is seen in isolation. See
+        # the script for why the workspace-wide check cannot cover this, and
+        # why the all-features combination is already covered by it.
+        run: bash scripts/ci/clippy-feature-matrix.sh
       - name: Dependency advisories, licenses and sources
         # `cargo clippy` checks this tree; this checks the crates it pulls in:
         # RustSec advisories, the license allow-list and the registry sources,
@@ -286,10 +261,146 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
       # The binding is built and typechecked once, in the `build` matrix (its
-      # x86_64-unknown-linux-gnu entry). `lint` used to build the native addon
+      # x86_64-unknown-linux-gnu entry). `check` used to build the native addon
       # for the `tsc` gate and then build the WASI addon, both of which the
       # matrix builds anyway — so a heavy run paid for two extra addon builds.
-  # `lint` runs on Linux only. Everything under `#[cfg(windows)]` — the
+  # Behaviour, split from `check` so a red run names itself: compile, lint and
+  # policy failures come from `check`, a failed test comes from here. Both jobs
+  # compile the same tree into their own `target/` (`shared-key` differs), so
+  # the split costs one extra restore and buys parallel wall clock and an
+  # unambiguous failure kind.
+  test:
+    name: Tests (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        # No clippy/rustfmt components and no wasm target: this job only builds
+        # the test profile. `-D warnings` is `check`'s business — a warning that
+        # matters is already a failure there on the same tree.
+        # Same `shared-key` as `check` (see the comment there): one dependency
+        # cache for both Linux jobs.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux
+      - name: Cache WinRAR test builds
+        uses: actions/cache@v6
+        with:
+          path: .cache/winrar
+          key: winrar-tools-linux-${{ hashFiles('scripts/fetch_winrar.py') }}
+      - name: Fetch WinRAR test builds
+        # The legacy suites build their archives at run time instead of shipping
+        # blobs. rarlab published Linux tarballs from 3.93 on, so 2.90 and 3.00 —
+        # and every recipe that needs them — self-skip here; `lint-windows` runs
+        # the full set.
+        run: python3 scripts/fetch_winrar.py
+      - name: Verify WinRAR test builds
+        # The suites self-skip on a missing tool, and this job has no
+        # `SA_REQUIRE_WINRAR`, so a gap in the restored cache would quietly
+        # reduce coverage instead of failing. `--check` reports the releases
+        # this host has a build for (2.90/3.00 have no Linux tarball) and fails
+        # on any other that is absent.
+        run: python3 scripts/fetch_winrar.py --check
+      - name: Cargo test (library + CLI suites)
+        # Tests are a local gate by default (see docs/testing.md), but a stale
+        # test assertion shipped with 0.12.0 because nothing ran them here. This
+        # deterministic smoke — the library and CLI suites, no official-tool
+        # interop, no JS/WASI binding suite (the earlier flake source) — closes
+        # that gap without making a red run ambiguous.
+        #
+        # `parallel`/`simd` are the library's only features and no test is
+        # `cfg(not(feature = ...))`, so `--all-features` executes everything the
+        # split default/feature pair only compiled: before this ran once with
+        # `default = []`, `extract_all_parallel`, `encode_chunked_mt` and the
+        # simd paths were never *run*, which is how a dead progress tracker and a
+        # `Collect` policy that silently behaved like `Abort` reached main. The
+        # ungated build is still compiled, by the clippy matrix in `check`.
+        #
+        # The CLI targets are the two binaries' unit tests, `cli_behavior` (the
+        # WinRAR switch contract, hermetic: temp dirs plus the
+        # `CARGO_BIN_EXE_*` binaries this step builds) and `volume_bare_name`
+        # (a Unix-only regression that no CI step ran). `official_interop` and
+        # `winrar_interop` stay local: they need the official tools and
+        # self-skip, so running them here would only print skip markers.
+        run: |
+          cargo test -p rar-rs --all-features --locked
+          cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
+          cargo test -p rar-rs-napi --lib --locked
+      - name: Cargo test (generated legacy corpus, scalar features)
+        # The generated-archive suites check the decoders against archives the
+        # official Linux builds write, which is a different byte diet from the
+        # Windows ones (host OS field, path separators, mtime/tz). No
+        # `SA_REQUIRE_WINRAR` here: the releases this host has no build for must
+        # keep skipping instead of failing the job. The target list lives in the
+        # script, shared with `lint-windows` and `scripts/ci-lint.sh`.
+        #
+        # Weekly and on tags only, because the step above already ran these
+        # suites under `--all-features`: this step's added value is the same
+        # assertions against a *scalar* library build (`default = []`), and it
+        # pays for a second compile of the crate plus every test binary. The
+        # feature matrix in `check` keeps the scalar build compiling on every
+        # push; the behaviour it runs, once a week and before a tag, is enough.
+        if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')
+        run: bash scripts/ci/test-generated-corpus.sh
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Binding path-mapping tests (pure JS)
+        # `wasi-path-map.test.mjs` imports only tracked sources
+        # (`wasi-path-map.cjs`, `scripts/patch-wasi-loader.mjs`, `rar-rs.js`),
+        # so it needs no addon build and cannot flake. It is the only gate on
+        # the hand-written JS path mapping and on the loader's export table.
+        run: node --test crates/rar-napi/__test__/wasi-path-map.test.mjs
+      - name: Regression test the zig installer
+        # Hermetic fixture server (no 47 MiB download); exercises the naming
+        # variants, checksum failure, mirror race and the GITHUB_PATH export
+        # that a previous release run got wrong. Unset GITHUB_PATH so the
+        # fixture's fake zig is not appended to this job's real PATH.
+        run: env -u GITHUB_PATH REPO="$GITHUB_WORKSPACE" bash scripts/ci/test-install-zig.sh
+  # The floor declared in Cargo.toml (`rust-version`), compiled by that exact
+  # toolchain. Without this job `rust-version` is a comment: `check`/`test` run
+  # whatever `stable` is today, so a change that quietly requires a newer
+  # compiler passes CI and only breaks consumers. The version is read from
+  # Cargo.toml, not typed again here, so the job cannot drift from the manifest.
+  msrv:
+    name: MSRV (declared floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read the declared MSRV
+        id: msrv
+        # `--no-deps` is the workspace manifests only. Every member inherits
+        # `rust-version.workspace`, so the first value is the workspace's.
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 --locked \
+            | grep -o '"rust_version":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+          if [ -z "$version" ]; then
+            echo "::error::no rust_version in cargo metadata; declare rust-version in Cargo.toml"
+            exit 1
+          fi
+          echo "declared rust-version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install the MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          profile: minimal
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+      - name: Cargo check (workspace, all features)
+        # `--all-features` matters: the crate's `parallel`/`simd` features pull
+        # in deps (rayon, wide) that can raise the floor on their own, so a
+        # default-features check would not prove the declared number.
+        run: cargo check --workspace --all-features --locked
+  # `check` and `test` run on Linux only. Everything under `#[cfg(windows)]` — the
   # WinRAR switch contract in cli_behavior, the separator hazards, the
   # windows-sys code paths — would otherwise be compiled for the first time
   # by the release matrix. Those suites are hermetic (temp dirs plus the
@@ -297,9 +408,12 @@ jobs:
   # builds and runs the generated legacy corpus, which is the only place the
   # RAR 1.5-4.x decode paths are exercised against real archives.
   lint-windows:
-    name: Lint + tests (windows)
+    name: Checks + tests (windows)
     runs-on: windows-latest
     timeout-minutes: 45
+    # The weekly run exists only to re-evaluate RustSec advisories, which
+    # `check` already does; it is not worth a 45-minute Windows run.
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v7
       - name: Install rust toolchain
@@ -311,7 +425,11 @@ jobs:
         with:
           shared-key: lint-windows
       - name: Cache WinRAR test builds
-        uses: actions/cache@v4
+        # Release-shaped runs only: the corpus below is the only consumer, and
+        # the fetch is the most expensive thing this job does on Windows (four
+        # official releases, minutes of download, billed at 4x the Linux rate).
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: actions/cache@v6
         with:
           path: .cache/winrar
           # `-v2`: the previous entry restored without some releases even though
@@ -321,81 +439,94 @@ jobs:
       - name: Fetch WinRAR test builds
         # The legacy suites build their archives with the official tool at run
         # time instead of shipping blobs, so they need the releases on disk.
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: python scripts/fetch_winrar.py
       - name: Verify WinRAR test builds
         # `SA_REQUIRE_WINRAR=1` below turns a missing tool into a panic deep
         # inside the corpus generator. Check the cache right after the fetch so
         # a gap names the release instead.
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: python scripts/fetch_winrar.py --check
       - name: Clippy (workspace, all features and targets)
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Cargo test (library unit tests)
+        # The `#[cfg(windows)]` unit tests: clippy compiles them, only a run
+        # executes them, and they are the part of this job a pull request
+        # actually needs. Split out of the corpus step so that step can be
+        # release-only without taking the unit tests with it.
+        run: cargo test -p rar-rs --lib --locked
       - name: Cargo test (official-tool generated corpus)
+        # Release-shaped runs only, for the reason the cache step above gives.
         # `SA_REQUIRE_WINRAR=1` turns a missing tool or a failed generation into
-        # a test failure, so this job proves the RAR 1.5-4.x decode coverage
+        # a test failure, so this run proves the RAR 1.5-4.x decode coverage
         # actually ran rather than silently skipping.
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         shell: bash
         env:
           SA_REQUIRE_WINRAR: "1"
-        run: |
-          cargo test -p rar-rs --lib --locked
-          cargo test -p rar-rs --locked \
-            --test rar4_read --test rar13_read --test rar4_rev3 \
-            --test rar4_edge_cases --test rar_vm_filters \
-            --test streaming_edge_cases --test structured_recovery_mutations \
-            --test archive_editor --test winrar_generation --test rar50_roundtrip
+        run: bash scripts/ci/test-generated-corpus.sh
       - name: Cargo test (CLI switch contract + binding unit tests)
         # The binding's `error.rs`/`guard.rs` tests pin the public error
         # contract (code + status + marker prefix); clippy only compiles them.
         run: |
           cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
           cargo test -p rar-rs-napi --lib --locked
+  # Chooses the `build` matrix per event. The list itself lives in
+  # scripts/ci/build-matrix.js — one entry per shipped addon, one of them marked
+  # `smoke` — so a pull request rehearses the release pipeline on a single
+  # cheap target (native, no zig) and a tag builds all nine, from one source
+  # that cannot drift.
+  build-matrix:
+    name: select the build matrix
+    # Push to main only retests a tree that a pull request already built.
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      settings: ${{ steps.select.outputs.settings }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+      - id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        # `console.log` of a stringified array cannot emit a newline, which is
+        # what makes a one-line `$GITHUB_OUTPUT` entry safe to `fromJSON` on the
+        # other side. The checks are cheap and they turn a silently empty or
+        # duplicated matrix into a named error instead of a phantom build.
+        run: |
+          node -e '
+            const all = require("./scripts/ci/build-matrix.js");
+            const picked =
+              process.env.EVENT_NAME === "pull_request" ? all.filter((s) => s.smoke) : all;
+            if (picked.length === 0) throw new Error("no matrix entry selected");
+            const seen = new Set();
+            for (const entry of picked) {
+              for (const key of ["host", "target", "addon", "build"]) {
+                if (!entry[key]) throw new Error("matrix entry is missing " + key);
+              }
+              if (seen.has(entry.target)) throw new Error("duplicate target " + entry.target);
+              seen.add(entry.target);
+            }
+            console.error("selected: " + picked.map((s) => s.target).join(", "));
+            console.log("settings=" + JSON.stringify(picked));
+          ' >> "$GITHUB_OUTPUT"
   build:
     name: build - ${{ matrix.settings.target }} - node@24
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: build-matrix
     runs-on: ${{ matrix.settings.host }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        settings:
-          - host: macos-latest
-            target: aarch64-apple-darwin
-            addon: rar-rs-napi.darwin-arm64.node
-            build: npx napi build --platform --release --target aarch64-apple-darwin --js binding.js --dts binding.d.ts
-          - host: windows-latest
-            target: x86_64-pc-windows-msvc
-            addon: rar-rs-napi.win32-x64-msvc.node
-            build: npx napi build --platform --release --target x86_64-pc-windows-msvc --js binding.js --dts binding.d.ts
-          - host: windows-latest
-            target: i686-pc-windows-msvc
-            addon: rar-rs-napi.win32-ia32-msvc.node
-            build: npx napi build --platform --release --target i686-pc-windows-msvc --js binding.js --dts binding.d.ts
-          - host: windows-latest
-            target: aarch64-pc-windows-msvc
-            addon: rar-rs-napi.win32-arm64-msvc.node
-            build: npx napi build --platform --release --target aarch64-pc-windows-msvc --js binding.js --dts binding.d.ts
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            addon: rar-rs-napi.linux-x64-gnu.node
-            build: npx napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross --js binding.js --dts binding.d.ts
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            addon: rar-rs-napi.linux-x64-musl.node
-            build: npx napi build --platform --release --target x86_64-unknown-linux-musl -x --js binding.js --dts binding.d.ts
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            addon: rar-rs-napi.linux-arm64-gnu.node
-            build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross --js binding.js --dts binding.d.ts
-          - host: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            addon: rar-rs-napi.linux-arm64-musl.node
-            build: npx napi build --platform --release --target aarch64-unknown-linux-musl -x --js binding.js --dts binding.d.ts
-          - host: ubuntu-latest
-            target: armv7-unknown-linux-gnueabihf
-            addon: rar-rs-napi.linux-arm-gnueabihf.node
-            build: npx napi build --platform --release --target armv7-unknown-linux-gnueabihf --use-napi-cross --js binding.js --dts binding.d.ts
+        settings: ${{ fromJSON(needs.build-matrix.outputs.settings) }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A `release_tag` dispatch builds that tag; everything else builds the
+          # triggering ref (tag push, branch, PR).
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
       - name: Setup node
         uses: actions/setup-node@v7
         with:
@@ -429,15 +560,20 @@ jobs:
             /usr/local/cargo/bin/cargo-zigbuild
             ~/.cargo/bin/cargo-zigbuild
           key: zig-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}-zigbuild-${{ env.CARGO_ZIGBUILD_VERSION }}
-      - name: Install zig (musl cross builds)
+      - name: Install the musl cross toolchain (zig + cargo-zigbuild)
         if: contains(matrix.settings.target, 'musl')
-        timeout-minutes: 60
+        # One step for both halves because they are only ever needed together:
+        # `napi build -x` is cargo-zigbuild, which drives `zig`. The script
+        # installs whichever half its version variable names, which is what lets
+        # `scripts/ci/test-install-zig.sh` exercise the zig half alone. Twenty
+        # minutes covers a cold `cargo install cargo-zigbuild` (compiled from
+        # source) and a 45 MB tarball behind a warm cache key; the job's own
+        # 45-minute budget is the only limit that used to apply, so a hung
+        # download could eat the whole build.
+        timeout-minutes: 20
         env:
           ZIG_HOME: ${{ runner.temp }}/zig
-        run: bash scripts/ci/install-zig.sh
-      - name: Install cargo-zigbuild
-        if: contains(matrix.settings.target, 'musl')
-        run: bash scripts/ci/install-cargo-zigbuild.sh
+        run: bash scripts/ci/install-musl-toolchain.sh
       - name: Install dependencies
         working-directory: crates/rar-napi
         run: npm ci
@@ -479,13 +615,24 @@ jobs:
             crates/rar-napi/binding.js
             crates/rar-napi/binding.d.ts
           if-no-files-found: error
+          # `release` downloads these in the same run, minutes later; the 90-day
+          # default stores 9 addons for three months in the org's quota for no
+          # reason. A re-release rebuilds them anyway (the matrix runs again).
+          retention-days: 7
   build-wasm:
     name: build - wasm32-wasip1-threads
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # Every event except push to main: the WASI bundle is what the `types` and
+    # `__test__` suites exercise, so a pull request builds it too (~4 minutes,
+    # in parallel) rather than learning about a broken wasi pipeline from a tag.
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Same ref rule as the native matrix: a `release_tag` dispatch builds
+          # that tag's WASI bundle.
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
       - name: Setup node
         uses: actions/setup-node@v7
         with:
@@ -531,13 +678,22 @@ jobs:
             crates/rar-napi/wasi-worker.mjs
             crates/rar-napi/wasi-worker-browser.mjs
           if-no-files-found: error
+          retention-days: 7
   release:
-    name: Release (${{ github.ref_name }})
+    name: Release (${{ github.event.inputs.release_tag || github.ref_name }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: startsWith(github.ref, 'refs/tags/v')
+    # A tag push releases itself; a dispatch releases the tag it names. Both
+    # paths wait for the whole matrix, so a release only ever assembles
+    # artifacts that this run produced. (`check`/`test` validate the dispatch
+    # ref, not the tag; for a re-release that is the point — a tag that passed
+    # CI once must not be blocked by a rule that tightened later. The tag's own
+    # gates are the version check below and the artifact identity checks.)
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
     needs:
-      - lint
+      - check
+      - test
+      - msrv
       - lint-windows
       - build
       - build-wasm
@@ -545,36 +701,35 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - name: Setup node
-        uses: actions/setup-node@v7
         with:
-          node-version: 24
-      - name: Verify tag matches Cargo.toml and package.json versions
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+          # The notes below are generated from the commits between this tag and
+          # the previous one, so the shallow default is not enough.
+          fetch-depth: 0
+      - name: Resolve the release tag
+        id: tag
+        # `github.ref_name` is the tag on a tag push and `main` on a dispatch, so
+        # every later step reads the tag from this one place. A dispatch names
+        # the tag by hand, and a typo or a deleted tag must fail here instead of
+        # publishing under a branch name.
+        env:
+          REQUESTED: ${{ github.event.inputs.release_tag }}
+          PUSHED: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME#v}"
-          CARGO_VERSION="$(
-            awk '
-              $0 == "[package]" { in_package = 1; next }
-              in_package && /^\[/ { in_package = 0 }
-              in_package && /^version[[:space:]]*=/ {
-                gsub(/^[^=]*=[[:space:]]*"/, "")
-                gsub(/"[[:space:]]*$/, "")
-                print
-                exit
-              }
-            ' crates/rar-napi/Cargo.toml
-          )"
-          PACKAGE_VERSION="$(node -p "require('./crates/rar-napi/package.json').version")"
-          if [ -z "$CARGO_VERSION" ]; then
-            echo "::error::could not read crates/rar-napi/Cargo.toml package version"
-            exit 1
-          fi
-          if [ "$TAG" != "$CARGO_VERSION" ] || [ "$TAG" != "$PACKAGE_VERSION" ]; then
-            echo "::error::tag v$TAG, Cargo.toml $CARGO_VERSION, and package.json $PACKAGE_VERSION must match"
-            exit 1
-          fi
-          echo "releasing v$TAG"
+          TAG="${REQUESTED:-$PUSHED}"
+          case "$TAG" in
+            v*) ;;
+            *) echo "::error::release tag must look like v1.2.3, got '$TAG'"; exit 1 ;;
+          esac
+          git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null ||
+            { echo "::error::tag $TAG does not exist in this repository"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Verify tag matches the workspace version
+        # Same five-field check as `check`, plus the tag: the checkout is the tag
+        # itself, so this is the proof that the tag and every manifest agree. One
+        # script, so the two jobs cannot parse the versions differently.
+        run: bash scripts/ci/check-versions.sh "${{ steps.tag.outputs.tag }}"
         shell: bash
       - name: Download the native bindings
         # One directory per artifact, as the release's identity checks expect
@@ -593,100 +748,38 @@ jobs:
           name: bindings-wasm32-wasip1-threads
           path: wasm
       - name: Collect release assets
-        run: |
-          set -euo pipefail
-          export LC_ALL=C
-          mkdir -p release
-
-          EXPECTED_ADDONS=(
-            rar-rs-napi.darwin-arm64.node
-            rar-rs-napi.win32-x64-msvc.node
-            rar-rs-napi.win32-ia32-msvc.node
-            rar-rs-napi.win32-arm64-msvc.node
-            rar-rs-napi.linux-x64-gnu.node
-            rar-rs-napi.linux-x64-musl.node
-            rar-rs-napi.linux-arm64-gnu.node
-            rar-rs-napi.linux-arm64-musl.node
-            rar-rs-napi.linux-arm-gnueabihf.node
-          )
-          mapfile -d '' -t NODE_FILES < <(find bindings -type f -name '*.node' -print0 | sort -z)
-          if (( ${#NODE_FILES[@]} != ${#EXPECTED_ADDONS[@]} )); then
-            echo "::error::expected ${#EXPECTED_ADDONS[@]} native addons, found ${#NODE_FILES[@]}"
-            printf 'found: %s\n' "${NODE_FILES[@]:-<none>}"
-            echo "::error::artifacts downloaded: $(find bindings -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | tr '\n' ' ')"
-            exit 1
-          fi
-          for addon in "${EXPECTED_ADDONS[@]}"; do
-            mapfile -d '' -t matches < <(find bindings -type f -name "$addon" -print0 | sort -z)
-            if (( ${#matches[@]} != 1 )); then
-              echo "::error::expected exactly one $addon artifact, found ${#matches[@]}"
-              exit 1
-            fi
-            cp "${matches[0]}" release/
-          done
-
-          # Every listed WASI file is part of the release contract. A missing
-          # file must fail this step rather than produce a partial release.
-          cp wasm/rar-rs-napi.wasm32-wasi.wasm \
-             wasm/rar-rs-napi.wasm32-wasi.debug.wasm \
-             wasm/rar-rs-napi.wasi.cjs \
-             wasm/rar-rs-napi.wasi.d.cts \
-             wasm/rar-rs-napi.wasi-browser.js \
-             wasm/wasi-path-map.cjs \
-             wasm/wasi-worker.mjs \
-             wasm/wasi-worker-browser.mjs release/
-
-          copy_identical_generated_file() {
-            local name="$1"
-            local source
-            mapfile -d '' -t files < <(find bindings -type f -name "$name" -print0 | sort -z)
-            if (( ${#files[@]} == 0 )); then
-              echo "::error::no $name artifact was downloaded"
-              exit 1
-            fi
-            source="${files[0]}"
-            for candidate in "${files[@]:1}"; do
-              if ! cmp -s "$source" "$candidate"; then
-                echo "::error::$name differs between $source and $candidate"
-                exit 1
-              fi
-            done
-            cp "$source" "release/$name"
-          }
-          # The generated loader and its types are identical on every target,
-          # so the release ships one copy of each.
-          copy_identical_generated_file binding.js
-          copy_identical_generated_file binding.d.ts
-
-          cp LICENSE NOTICE THIRD_PARTY_LICENSES.md release/
-
-          mapfile -d '' -t LICENSE_FILES < <(find LICENSES -type f -print0 | sort -z)
-          if (( ${#LICENSE_FILES[@]} == 0 )); then
-            echo "::error::no identified license-family texts found under LICENSES/"
-            exit 1
-          fi
-          for file in "${LICENSE_FILES[@]}"; do
-            relative="${file#LICENSES/}"
-            flattened="${relative//\//__}"
-            destination="release/THIRD_PARTY_LICENSE-$flattened"
-            if [[ -e "$destination" ]]; then
-              echo "::error::flattened license filename collision: $destination"
-              exit 1
-            fi
-            cp "$file" "$destination"
-          done
-
-          # Write outside release/ so SHA-256SUMS can never hash itself.
-          (cd release && sha256sum *) > SHA-256SUMS.tmp
-          mv SHA-256SUMS.tmp release/SHA-256SUMS
-          ls -la release/
+        # A script, because its rules are what make a release complete: one
+        # addon per platform, every WASI file, byte-identical generated loaders,
+        # no collision when the license tree is flattened. Inline, the first
+        # execution of that logic was a tag; as a script it is fixture-tested on
+        # every push by scripts/ci/test-release-scripts.sh.
+        run: bash scripts/ci/collect-release-assets.sh
         shell: bash
-      - name: Create GitHub Release
+      - name: Generate release notes from commits
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        # Also a script: the grouping, the re-release range (`--merged`) and the
+        # first-release fallback are asserted by the same fixture test.
+        run: bash scripts/ci/release-notes.sh "$TAG" "$RUNNER_TEMP/release-notes.md"
+        shell: bash
+      - name: Publish the GitHub Release
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        # Idempotent: re-running a tag that already has a release replaces the
+        # notes and overwrites the assets (`--clobber`), so a run that died
+        # mid-upload converges instead of leaving a half-populated release.
+        # `--verify-tag` stops a release from being created off a typo'd ref.
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            release/* 2>&1 || \
-            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          set -euo pipefail
+          shopt -s nullglob
+          assets=( release/* )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --title "$TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --verify-tag
+          fi
