@@ -43,6 +43,22 @@ checked-out `rars` repository, so treat a row as the in-tree claim.
 | `crates/rar/src/recovery/rar50/`                         | inline recovery-record codec (`codec/rar50.rs`; ported core in `gf16.rs`) |
 | `crates/rar/src/recovery/legacy.rs`                      | `repair_protect_head_bytes`                                               |
 
+## Test data
+
+The raw byte fixtures the tests read from disk (everything else is generated at
+run time). Two files today, and a new one needs a row here before it is
+committed — see `AGENTS.md`.
+
+| Path                                         | Source          | Terms          | How it is produced                                                                                                       |
+| -------------------------------------------- | --------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `crates/rar/tests/data/dense-x86-prefix.bin` | This repository | `BSD-2-Clause` | `scripts/gen-x86-fixture.sh` compiles `scripts/fixtures/dense-x86-corpus.rs` and keeps the first 129,400 bytes of the PE |
+| `crates/rar/tests/data/tail-match-362.bin`   | This repository | `BSD-2-Clause` | Written for the tail-match test: a 362-byte JSON configuration fragment (rule names and globs only, no code)             |
+
+`dense-x86-prefix.bin` used to be the first 129,400 bytes of a real Windows
+kernel image. That is Microsoft's bytes, not ours, and it had no license to
+offer (issue #2), so it was replaced by the generated corpus in 2026-11 and the
+file was deleted; it is still present in source tarballs up to `v0.15.0`.
+
 ## Other sources
 
 - **libarchive RAR5 reader** (Grzegorz Antoniak, 2018, BSD-2-Clause): analysis

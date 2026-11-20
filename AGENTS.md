@@ -41,6 +41,12 @@ job 能证明什么）与 [`docs/testing.md`](docs/testing.md)（测试分层）
   `AtomicU32::try_update`（1.95 稳定）。更旧的工具链会直接拒绝这个 crate。
 - 构建产物不入库：`crates/rar-napi/*.node`、`binding.js`、`binding.d.ts` 由
   `napi build` 生成（`binding.js` 里还留着生成时的版本号，会过期）。
+- **提交任何二进制/字节语料**（测试 fixture、样例、图片）必须同时在
+  `THIRD_PARTY_LICENSES.md` 的 `## Test data` 表里写清来源、授权与生成方式。
+  优先现场生成字节（`scripts/fixtures/` 下的源码 + 一个 gen 脚本），而不是提交
+  一个来路不明的文件——仓库整体声明 `BSD-2-Clause`，一个没登记的第三方二进制会
+  让这个声明失真（issue #2 就是这么来的：一段 `ntoskrnl.exe` 前缀在
+  `crates/rar/tests/data/` 待了几个月没人问它从哪来）。
 
 ## CI 形态的硬约束
 

@@ -326,7 +326,10 @@ Shapes no writer can emit — a 64-channel delta record, a 32-bit encoded VM
 control word, a mutated `.rev` header, a truncated payload — are produced by
 byte-level mutations of generated output (`generate::patch_unp_ver`,
 `tests/rar13_read.rs`) or by unit tests next to the decoder. `tests/data/` holds
-the two raw payload corpora (no archives).
+the two raw payload corpora (no archives); both are ours, and the provenance
+rows are in `THIRD_PARTY_LICENSES.md` under `## Test data`. The generated one
+(`dense-x86-prefix.bin`) is rebuilt by `scripts/gen-x86-fixture.sh` from
+`scripts/fixtures/dense-x86-corpus.rs` when its shape needs to change.
 
 Consequence for CI: `test` and `lint-windows` both run `scripts/fetch_winrar.py`
 first, so the generated suites execute there instead of skipping. `lint-windows`

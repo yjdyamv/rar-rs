@@ -903,19 +903,28 @@ fn multi_chunk_compressed_file_roundtrips() {
 /// byte-exact. The persistent tree finder used to wipe its link array when
 /// the window grew across a chunk boundary while the head table survived;
 /// every unwritten slot then read as a link to position 0, so a descent
-/// could "match" the member head (here the DOS MZ header) and emit a bogus
-/// match — a silently corrupt member that both unrar and WinRAR rejected
-/// with a checksum error. The fixture is the first 129,400 bytes of a real
-/// Windows kernel image (dense register-register code with disp32s), which
-/// reproduced the corruption at byte 129,334 under dict 2^3 + 64 KiB
-/// chunks. The three guards that close this hole: grow_to copies the old
-/// links, rebase migrates them to their new ring slots, and the collector
-/// byte-verifies every tree report before the parse can price it.
+/// could "match" the member head (the DOS MZ header at offset 0) and emit a
+/// bogus match — a silently corrupt member that both unrar and WinRAR
+/// rejected with a checksum error. The three guards that close this hole:
+/// grow_to copies the old links, rebase migrates them to their new ring
+/// slots, and the collector byte-verifies every tree report before the parse
+/// can price it.
+///
+/// The fixture is the first 129,400 bytes of a PE built by
+/// `scripts/gen-x86-fixture.sh` from `scripts/fixtures/dense-x86-corpus.rs`:
+/// headers (which is what makes offset 0 a candidate) plus about 128 KiB of
+/// compiler-generated register-register code with disp32s, so a small
+/// dictionary slides over a stream that repeats instruction shapes at many
+/// distances. It replaced a prefix of a real Windows kernel image, which has
+/// the same shape but is not ours to ship (issue #2). That prefix was what hit
+/// the growth path at byte 129,334; this stream round-trips cleanly on the
+/// pre-fix finder too, so read this test as "multi-chunk encode of
+/// code-shaped data stays byte-exact", not as a replay of that offset.
 #[test]
 fn dense_x86_multi_chunk_roundtrips_byte_identical() {
     let fixture = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/data/ntoskrnl_dense_prefix.bin"
+        "/tests/data/dense-x86-prefix.bin"
     );
     let data = std::fs::read(fixture).expect("read x86 fixture");
     // Small dict + small chunks make the window grow (and the frame slide)
