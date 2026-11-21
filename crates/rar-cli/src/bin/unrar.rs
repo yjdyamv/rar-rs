@@ -217,13 +217,13 @@ struct ArchiveArgs {
     names: Vec<String>,
 }
 
-/// Archive path plus an optional member to print.
+/// Archive path plus the member(s) to print.
 #[derive(Args)]
 struct PrintArgs {
     #[arg(value_name = "ARCHIVE")]
     archive: String,
     #[arg(value_name = "FILE")]
-    file: Option<String>,
+    files: Vec<String>,
 }
 
 fn main() {
@@ -616,5 +616,5 @@ fn cmd_print(
     max_dict_size: Option<u64>,
 ) -> CliResult<()> {
     let mut rar = ops::open_reader(&args.archive, password)?;
-    ops::print_members(&mut rar, args.file.as_deref(), max_dict_size)
+    ops::print_members(&mut rar, &args.files, max_dict_size)
 }

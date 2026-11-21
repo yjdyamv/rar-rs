@@ -10,7 +10,7 @@ use crate::ops;
 pub(crate) fn cmd_print(args: &PrintArgs) -> CliResult<()> {
     let max_dict_size = dict_cap(args.dict_extract.as_deref())?;
     let mut rar = ops::open_reader(&args.archive, args.password.password.as_deref())?;
-    ops::print_members(&mut rar, args.file.as_deref(), max_dict_size)
+    ops::print_members(&mut rar, &args.files, max_dict_size)
 }
 
 /// `-mdx`: extraction dictionary cap; no unit means GiB (WinRAR).

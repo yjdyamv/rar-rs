@@ -203,7 +203,7 @@ pub(crate) struct RecoveryVolumesArgs {
     pub(crate) count_spec: String,
 }
 
-/// Archive path plus an optional member to print.
+/// Archive path plus the member(s) to print.
 #[derive(Args)]
 pub(crate) struct PrintArgs {
     #[command(flatten)]
@@ -211,7 +211,7 @@ pub(crate) struct PrintArgs {
     #[arg(value_name = "ARCHIVE")]
     pub(crate) archive: String,
     #[arg(value_name = "FILE")]
-    pub(crate) file: Option<String>,
+    pub(crate) files: Vec<String>,
     /// Extraction dictionary cap (like `-mdx<size>`; no unit means GiB)
     #[arg(long = "dict-extract", value_name = "SIZE")]
     pub(crate) dict_extract: Option<String>,

@@ -193,6 +193,66 @@ fn cli_stdout_extract_writes_members_to_stdout() {
     assert_eq!(out.stdout, expected, "-so must concatenate all members");
 }
 
+/// `rar p` / `unrar p` take one *or more* member names and print their union
+/// to stdout in archive order, like `Rar`/`UnRAR` (which print in archive
+/// order, not the order the names were given in). A name that matches
+/// nothing is exit 10.
+#[test]
+fn cli_print_takes_multiple_members_in_archive_order() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"AAA").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"BBB").unwrap();
+    let archive = dir.path().join("print.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .args(["a.txt", "b.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    for binary in [RAR_CLI, env!("CARGO_BIN_EXE_unrar")] {
+        // Several names print their union in archive order, not in the order
+        // they were given in.
+        let out = std::process::Command::new(binary)
+            .args(["p", "-inul"])
+            .arg(&archive)
+            .args(["b.txt", "a.txt"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{binary} p with two names: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            out.stdout, b"AAABBB",
+            "{binary} p must print in archive order"
+        );
+
+        // A single name still works.
+        let out = std::process::Command::new(binary)
+            .args(["p", "-inul"])
+            .arg(&archive)
+            .arg("b.txt")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{binary} p single name");
+        assert_eq!(out.stdout, b"BBB");
+
+        // A name that matches nothing is exit 10, like the official tools.
+        let out = std::process::Command::new(binary)
+            .args(["p", "-inul"])
+            .arg(&archive)
+            .arg("nope.txt")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(10), "{binary} p unmatched name");
+        assert!(out.stdout.is_empty());
+    }
+}
+
 /// `-se` / `-sv` / `-sd` (WinRAR `-s` modifiers that split the solid chain)
 /// are accepted and behave: `-sd` keeps the statistics across the archive
 /// (default), `-sv` resets them at every volume boundary, `-se` resets on a

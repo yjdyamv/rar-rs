@@ -1219,31 +1219,28 @@ fn extract_to_stdout(
     out.flush().map_err(CliError::from)
 }
 
-/// Print one member, or every file member when `file` is `None`, to stdout
-/// (`p`). The selector follows the shared member-selection rules (stored
-/// path, mask or directory prefix).
+/// Print the selected members -- every file member when `files` is empty --
+/// to stdout in archive order (`p`). The selectors follow the shared
+/// member-selection rules (stored path, mask or directory prefix); several
+/// names print their union, like `Rar`/`UnRAR` (which also emit archive
+/// order, not the order the names were given in).
 pub fn print_members(
     rar: &mut ArchiveReader,
-    file: Option<&str>,
+    files: &[String],
     max_dict_size: Option<u64>,
 ) -> CliResult<()> {
-    let wanted: Vec<_> = if let Some(file) = file {
-        crate::selector::select_entries(
-            rar.entries()
-                .filter(|entry| !entry.is_dir())
-                .map(|entry| (entry.id(), entry.metadata().name())),
-            std::slice::from_ref(&file.to_string()),
-        )
-    } else {
+    let wanted: Vec<_> = crate::selector::select_entries(
         rar.entries()
             .filter(|entry| !entry.is_dir())
-            .map(|entry| entry.id())
-            .collect()
-    };
-    if wanted.is_empty() && file.is_some() {
-        let file = file.unwrap_or_default();
+            .map(|entry| (entry.id(), entry.metadata().name())),
+        files,
+    );
+    if wanted.is_empty() && !files.is_empty() {
         return Err(CliError::with_code(
-            format!("no archive members matched the requested name(s): {file}"),
+            format!(
+                "no archive members matched the requested name(s): {}",
+                files.join(", ")
+            ),
             crate::error::EXIT_NO_FILES,
         ));
     }
