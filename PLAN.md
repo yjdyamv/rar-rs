@@ -35,6 +35,15 @@
   成员同样排序（`-m0`/`-ds` 保持收集顺序），目录成员不带尾分隔符（RAR5
   `FILE_FLAG_DIRECTORY`、RAR4 `0x10`），`rarfiles.lst` 的优先级与子集规则照抄。
   契约见 [`docs/PITFALLS.md`](docs/PITFALLS.md)「solid 成员的顺序」。
+- **solid 共享窗口按全批最大成员定档**（2026-11-21）：RAR5 solid 链的字典取
+  **全批最大成员**的 2× 档（`add_batch` 记 `CompressionSettings::dict_basis`，
+  `solid_dict_params` 据此建链首字典），与 WinRAR 一致（实测官方 2×600 KiB
+  的两个成员挑 `-md=2m` 而非请求的 32m，故是「最大成员」而非「首个成员」也不是
+  「总量」）；链内每个成员都声明链首字典（读者只按链首建一个窗口）。此前链首取
+  写完的**首个**成员，8 个 System32 DLL 的 `-s -md32m` 因此被压成 8m。实测
+  87 MB 语料 `-m3 -s -mt1` 38,681,741 → 37,761,273 B（−2.4%，且优于官方固实的
+  37,222,347 与自己的非固实 37,518,912）。回归
+  `rar50_roundtrip::solid_multivolume_roundtrips_with_exact_volumes`。
 - **对外两组 API**：Rust 库是角色门面（`ArchiveReader` / `ArchiveWriter` /
   `ArchiveEditor`）；Node 绑定（`crates/rar-napi`）**手写入口 `rar-rs.js` +
   `rar-rs.d.ts`**，生成物只叫 `binding.*`，`tsc --noEmit` 在 CI
@@ -109,7 +118,22 @@
       `FUN_14005be6c` 对每卷调用它、大小取自 `[base+vol*0x40+0x30]`。**预留量
       算术在该数组的上游填充**（某个通用容器/分配例程，尚未定位）；`Rar7.exe`
       已导入 Ghidra（UI 文本在 `rarlng.dll`，二进制字符串/常量被剥离）。
-      纯字节收益，属“有意不追平”，留作后续专门逆向。
+       纯字节收益，属“有意不追平”，留作后续专门逆向。
+
+- [ ] **solid 里的「子区滤波记录」会解码失败**（未修，仍在整员 fallback）：非
+      solid 的逐 64 KiB 块选择器（`best_combined_specs`）在 solid 成员上产生读端
+      拒绝的流——近随机数据首块 delta 假赢，整员被压到约 64 KiB，读者报
+      `match distance 262144 exceeds the 65536-byte window`（单卷即可复现；`-s
+      -mc-`、非 solid 同数据都正常，故问题在 solid 链如何携带子区记录本身）。
+      因此 solid 仍走整员探针 `solid_filter_specs`，代价约 0.6 MB/87 MB DLL 语料
+      （它在那里放行 x86 而逐块扫描能选中）。修的是携带方式，不是记录；修好后
+      solid 体积可再降约 1.6%。
+
+- [ ] **`-mt` 的 solid 体积差主要是 walk 解析档**（非 solid 同样存在）：`-m3
+      -s -mt24` 41.4 MB vs `-mt1` 37.8 MB（官方 mt24 37.2 MB）。MT 各档走
+      walk（`-m3` 位置链深度 8），顺序档走定价 DP，二者在 DLL 语料上差约 9%；
+      `RAR_RS_MT_DP=1` 可把 MT 拉回 DP：`-m5 -s -mt24` 36.75 MB（官方 36.86 MB，
+      代价 1.6–2.1x 时间）。这是 issue 09/15 的已知权衡，不是 solid 特有。
 
 ### 性能（进行中，未关闭议题）
 

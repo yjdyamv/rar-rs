@@ -299,6 +299,14 @@ pub(crate) struct CompressionSettings {
     /// Force RAR7 (v70) member headers even below the 4 GiB threshold
     /// (test seam; see `CreateOptions::force_v70`).
     pub force_v70: bool,
+    /// Largest member input size of the current batch (`add_batch`), in bytes.
+    ///
+    /// WinRAR sizes a solid chain's shared dictionary from the **largest**
+    /// member of the set, not the first member written: the reader builds one
+    /// window from the chain head's declared dictionary, so a head-sized
+    /// window starves every later (larger) member. `None` for the single-member
+    /// streaming API, which keeps each member's own selection.
+    pub dict_basis: Option<u64>,
     /// Compression filter policy (`-mc`): automatic, disabled or forced
     /// delta / x86 filters.
     pub filters: crate::options::FilterOptions,

@@ -186,25 +186,46 @@ fn owner_extra_for(cx: &dyn Engine, meta: &fs::Metadata) -> Option<Vec<u8>> {
 /// distances that window cannot resolve, so it inherits the chain-start
 /// parameters instead. A chain head (or a non-solid member) records its
 /// own selection as the window for the run.
+///
+/// The head itself is sized from the **largest member of the set**, not from
+/// the first member written: WinRAR caps a solid dictionary at twice the
+/// biggest member (`add_batch` records it as `CompressionSettings::dict_basis`),
+/// and the run's one window comes from this head, so a head-sized window would
+/// starve every larger member that follows. Without a basis (the single-member
+/// streaming API) the member's own selection stands.
 fn solid_dict_params(cx: &mut dyn Engine, dsl: u8, dict_bytes: Option<u64>) -> (u8, Option<u64>) {
     if !cx.write_ctx().solid.mode {
         return (dsl, dict_bytes);
     }
     if cx.write_ctx().solid.encoder_state.is_none() {
+        let basis = cx.write_ctx().compression.dict_basis;
+        let (dsl, dict_bytes) = match basis {
+            Some(basis) => super::layout::dict_params_for(
+                usize::try_from(basis).unwrap_or(usize::MAX),
+                cx.write_ctx().compression.dict_size_log,
+                cx.write_ctx().compression.dict_size_bytes,
+                0,
+                cx.write_ctx().compression.force_v70,
+            ),
+            None => (dsl, dict_bytes),
+        };
         cx.write_ctx_mut().solid.chain_dict = Some((dsl, dict_bytes));
         return (dsl, dict_bytes);
     }
-    let Some((head_dsl, head_bytes)) = cx.write_ctx().solid.chain_dict else {
+    let Some(head) = cx.write_ctx().solid.chain_dict else {
         // Chain state seeded by a path that did not record a head
         // (surgical rewrite): leave the member's own selection.
         return (dsl, dict_bytes);
     };
-    let window = |log: u8, bytes: Option<u64>| bytes.unwrap_or((128u64 * 1024) << log);
-    if window(dsl, dict_bytes) > window(head_dsl, head_bytes) {
-        (head_dsl, head_bytes)
-    } else {
-        (dsl, dict_bytes)
-    }
+    // Every member of the run uses the head's parameters, matching WinRAR
+    // (which declares one dictionary for the whole set): the reader builds the
+    // run's single window from the head, so a member that declared its own
+    // larger dictionary could emit distances that window cannot resolve, and a
+    // member that declared a smaller one would cap its own encoder window below
+    // the shared one — silently losing the cross-member reach the chain exists
+    // for (the head is already the largest member's selection, so it is never
+    // too small).
+    head
 }
 
 /// Try the compression filters under the `-mc` policy, returning the
@@ -238,6 +259,17 @@ fn try_auto_filters(
 /// a solid chain. The chosen record covers the whole member; the transform
 /// output continues the same LZ window, which the decoder mirrors (its
 /// pending filters add the member start to the recorded positions).
+///
+/// The per-block picker the non-solid path uses ([`best_combined_specs`]) is
+/// deliberately not used here: it selects delta/x86 per 64 KiB block, and a
+/// *sub-region* filter record carried by a solid member comes back out broken
+/// (measured: a near-random member whose first 64 KiB block spuriously wins a
+/// delta trial packs to ~64 KiB that the reader then rejects with "match
+/// distance 262144 exceeds the 65536-byte window"; `-s -mc-` and non-solid
+/// members show the per-block records themselves are fine). So this stays a
+/// correctness-first stopgap and costs ratio where the per-block scan would
+/// take x86 (measured ~0.6 MB on the DLL corpus). The bug is in how the solid
+/// chain carries sub-region records, not in the records.
 fn try_solid_filters(
     cx: &mut dyn Engine,
     data: &[u8],
@@ -248,16 +280,6 @@ fn try_solid_filters(
 ) -> RarResult<Option<Vec<u8>>> {
     let variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
     let filters = cx.write_ctx().compression.filters;
-    // The whole-member probe picker, not the per-block one the non-solid path
-    // uses. A filter record from `combined_filter_specs` comes back out of a
-    // solid chain broken — a 512 KiB member fails with "match distance 524288
-    // exceeds the 128-byte window", and the official reader reports checksum
-    // errors on the same archives — while the whole-member records below
-    // round-trip. That costs ratio, because this picker declines x86 where the
-    // per-block scan takes it (600 KiB per solid member on ntoskrnl), so treat
-    // it as a correctness-first stopgap: `-s -mc-` and non-solid members show
-    // the per-block records themselves are fine, and the bug is in how a solid
-    // chain carries them.
     let Some(specs) = lzss_huff::solid_filter_specs(data, method, dsl, variant, &filters)? else {
         return Ok(None);
     };
