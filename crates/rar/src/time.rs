@@ -218,12 +218,18 @@ mod tests {
     #[test]
     fn epoch_and_civil_conversions_are_inverse_and_clamped() {
         use super::{epoch_to_local_civil, local_civil_to_epoch};
+        let offset = local_offset_secs();
+        let max = i64::from(u32::MAX);
         for secs in [0u32, 1, 1_000_000, 1_700_000_000, u32::MAX - 1] {
-            // Near the top the offset may saturate, so only the safe range
-            // round-trips.
-            if secs < u32::MAX - 100_000 {
-                assert_eq!(local_civil_to_epoch(epoch_to_local_civil(secs)), secs);
+            // `epoch_to_local_civil` clamps at both ends, so the pair is only
+            // an inverse while `secs + offset` is still representable. A
+            // negative offset (e.g. TZ=Etc/GMT+12) clamps small inputs to 0;
+            // a positive one clamps values near `u32::MAX`.
+            let shifted = i64::from(secs) + offset;
+            if !(0..=max).contains(&shifted) {
+                continue;
             }
+            assert_eq!(local_civil_to_epoch(epoch_to_local_civil(secs)), secs);
         }
         // Saturating, not wrapping.
         assert!(epoch_to_local_civil(u32::MAX) >= epoch_to_local_civil(0));
