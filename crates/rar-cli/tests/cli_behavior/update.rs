@@ -3,6 +3,15 @@ use rar_rs::{CompressionLevel, EntryWriteOptions};
 use crate::support::{
     RAR_CLI, UNRAR_CLI, make_temp_dir, pseudo_random_bytes, set_mtime_ago, write_rep_text,
 };
+
+/// Member names in stored (archive) order.
+fn names_in_order(archive: &std::path::Path) -> Vec<String> {
+    rar_rs::ArchiveReader::open(archive)
+        .unwrap()
+        .entries()
+        .map(|entry| entry.name().to_string())
+        .collect()
+}
 // ── update/freshen and miscellaneous switches ─────────────────────────────
 
 #[test]
@@ -1039,4 +1048,79 @@ fn cli_a_replacing_last_member_keeps_archive_metadata() {
         let entry = reader.unique_entry("a.bin").unwrap();
         assert_eq!(reader.read_entry(entry).unwrap(), replacement, "{format}");
     }
+}
+
+/// Recorded divergence (PLAN "已知小差异"): `rar u`/`f` replace members by
+/// delete + append, so a refreshed member moves to the *end* of the archive
+/// and a newly added member lands *after* the trailing directory entries --
+/// where `Rar.exe` replaces in place and always keeps directory entries last
+/// (the append-block sort in `update.rs` cannot fix that, because the block
+/// is appended behind the existing members). When nothing needs updating the
+/// official tools exit 10 ("no files") while we exit 0. Nothing is corrupt
+/// and the archive still verifies; this pins the current shape so a change
+/// is deliberate.
+#[test]
+fn cli_update_member_order_and_noop_exit_are_recorded_divergences() {
+    let dir = make_temp_dir();
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"old").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"bee").unwrap();
+    std::fs::write(dir.path().join("sub/s.txt"), b"ess").unwrap();
+    set_mtime_ago(&dir.path().join("a.txt"), 120);
+    set_mtime_ago(&dir.path().join("sub/s.txt"), 120);
+
+    let archive = dir.path().join("order.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .args(["a.txt", "b.txt", "sub"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Refreshing a.txt moves it to the end (Rar.exe keeps it in place).
+    std::fs::write(dir.path().join("a.txt"), b"newer").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let names = names_in_order(&archive);
+    assert_eq!(names.last().map(String::as_str), Some("a.txt"), "{names:?}");
+
+    // A newly added member appends behind the trailing `sub` directory entry
+    // (Rar.exe keeps directory entries last).
+    std::fs::write(dir.path().join("c.txt"), b"see").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-idq"])
+        .arg(&archive)
+        .arg("c.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let names = names_in_order(&archive);
+    assert_eq!(names.last().map(String::as_str), Some("c.txt"), "{names:?}");
+    let dir_pos = names.iter().position(|name| name == "sub").unwrap();
+    let added_pos = names.iter().position(|name| name == "c.txt").unwrap();
+    assert!(dir_pos < added_pos, "{names:?}");
+
+    // An update with nothing newer to store exits 0 here (official exits 10).
+    set_mtime_ago(&dir.path().join("a.txt"), 600);
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-idq"])
+        .arg(&archive)
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a no-op update exits 0 here (official exits 10)"
+    );
 }
