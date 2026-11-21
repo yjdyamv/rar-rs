@@ -1055,12 +1055,11 @@ fn cli_a_replacing_last_member_keeps_archive_metadata() {
 /// and a newly added member lands *after* the trailing directory entries --
 /// where `Rar.exe` replaces in place and always keeps directory entries last
 /// (the append-block sort in `update.rs` cannot fix that, because the block
-/// is appended behind the existing members). When nothing needs updating the
-/// official tools exit 10 ("no files") while we exit 0. Nothing is corrupt
-/// and the archive still verifies; this pins the current shape so a change
-/// is deliberate.
+/// is appended behind the existing members). The no-op exit code is aligned
+/// (both exit 10). Nothing is corrupt and the archive still verifies; this
+/// pins the order shape so a change is deliberate.
 #[test]
-fn cli_update_member_order_and_noop_exit_are_recorded_divergences() {
+fn cli_update_member_order_divergence_is_recorded() {
     let dir = make_temp_dir();
     std::fs::create_dir_all(dir.path().join("sub")).unwrap();
     std::fs::write(dir.path().join("a.txt"), b"old").unwrap();
@@ -1109,7 +1108,7 @@ fn cli_update_member_order_and_noop_exit_are_recorded_divergences() {
     let added_pos = names.iter().position(|name| name == "c.txt").unwrap();
     assert!(dir_pos < added_pos, "{names:?}");
 
-    // An update with nothing newer to store exits 0 here (official exits 10).
+    // An update with nothing newer to store exits 10, like `Rar.exe`.
     set_mtime_ago(&dir.path().join("a.txt"), 600);
     let status = std::process::Command::new(RAR_CLI)
         .args(["u", "-idq"])
@@ -1120,7 +1119,7 @@ fn cli_update_member_order_and_noop_exit_are_recorded_divergences() {
         .unwrap();
     assert_eq!(
         status.code(),
-        Some(0),
-        "a no-op update exits 0 here (official exits 10)"
+        Some(10),
+        "a no-op update must exit 10 like Rar.exe"
     );
 }

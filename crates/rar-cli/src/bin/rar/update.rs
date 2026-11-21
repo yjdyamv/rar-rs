@@ -157,8 +157,12 @@ fn cmd_update_freshen(
     }
 
     if to_delete.is_empty() && to_add.is_empty() && redirects.is_empty() {
-        info!("{}: no files to {verb}", archive_path.display());
-        return Ok(());
+        // Nothing needs updating: WinRAR reports "No files" and exits 10
+        // (`Rar.exe u`/`f` both do; our old code exited 0).
+        return Err(CliError::with_code(
+            format!("{}: no files to {verb}", archive_path.display()),
+            crate::error::EXIT_NO_FILES,
+        ));
     }
     // -log: capture the names before the transactional closure consumes the
     // candidate lists.

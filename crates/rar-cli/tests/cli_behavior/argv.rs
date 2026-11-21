@@ -259,10 +259,13 @@ fn cli_update_and_move_accept_compression_switches() {
         "-m0 must store the appended member"
     );
 
+    // A genuinely new member: a bare re-run would be a no-op, which now exits
+    // 10 like `Rar.exe`.
+    std::fs::write(dir.path().join("f2b.txt"), b"two-b").unwrap();
     let status = std::process::Command::new(RAR_CLI)
         .args(["u", "-s", "-idq"])
         .arg(&archive)
-        .arg("f2.txt")
+        .arg("f2b.txt")
         .current_dir(dir.path())
         .status()
         .unwrap();
