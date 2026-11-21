@@ -120,14 +120,17 @@
       已导入 Ghidra（UI 文本在 `rarlng.dll`，二进制字符串/常量被剥离）。
        纯字节收益，属“有意不追平”，留作后续专门逆向。
 
-- [ ] **solid 里的「子区滤波记录」会解码失败**（未修，仍在整员 fallback）：非
-      solid 的逐 64 KiB 块选择器（`best_combined_specs`）在 solid 成员上产生读端
-      拒绝的流——近随机数据首块 delta 假赢，整员被压到约 64 KiB，读者报
-      `match distance 262144 exceeds the 65536-byte window`（单卷即可复现；`-s
-      -mc-`、非 solid 同数据都正常，故问题在 solid 链如何携带子区记录本身）。
-      因此 solid 仍走整员探针 `solid_filter_specs`，代价约 0.6 MB/87 MB DLL 语料
-      （它在那里放行 x86 而逐块扫描能选中）。修的是携带方式，不是记录；修好后
-      solid 体积可再降约 1.6%。
+- [x] **solid 里的滤波：换逐块选择器（2026-11-21）**：solid 成员改用非 solid 的
+      逐 64 KiB 块选择器（`best_combined_specs`），拿回整员探针漏掉的 x86——87 MB
+      DLL 语料 `-m3 -s -mt1` 37,761,273 → 37,167,723 B（比官方固实 37,222,347
+      小）。切换时暴露并修掉了一个链 bug：`try_solid_filters` 在共享链状态上编码，
+      候选**落败**时调用方的无滤波通路会从这个已被推进的状态继续编码，于是打包器
+      发出读端没见过的距离（`match distance 262144 exceeds the 65536-byte window`，
+      近随机成员首块 delta 假赢即可复现，单卷即触发）。现在落败候选**就地 reset
+      链状态**（链首字典保留），改走 STORE，不再产出坏档。逐块选择器**整员全否**时
+      回退整员探针 `solid_filter_specs`（覆盖率启发式漏掉某些 `E8 rel32` 串，整员
+      探针仍能选中）。回归：
+      `rar5_edge_cases::rar5_solid_filters::solid_archive_filters_are_applied_and_roundtrip`。
 
 - [ ] **`-mt` 的 solid 体积差主要是 walk 解析档**（非 solid 同样存在）：`-m3
       -s -mt24` 41.4 MB vs `-mt1` 37.8 MB（官方 mt24 37.2 MB）。MT 各档走
