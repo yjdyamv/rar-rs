@@ -42,8 +42,8 @@ RAR/UNRAR binary is required at runtime.
   (Windows reserved names, trailing dots/spaces, `:`; `-oni` keeps device
   names), size limits (opt-in `--max-unpacked` / `--max-total-unpacked`), atomic
   staging, cooperative cancellation.
-- **Bindings** — Node.js native and WASI bindings under `crates/rar-napi`
-  (see [`crates/rar-napi/README.md`](crates/rar-napi/README.md)).
+- **Bindings** — Node.js native and WASI bindings under `crates/rar-napi` (see
+  [`crates/rar-napi/README.md`](crates/rar-napi/README.md)).
 
 Behavior is validated against WinRAR/UnRAR; current status and next steps live
 in [PLAN.md](PLAN.md), and the rules that must not be re-litigated in

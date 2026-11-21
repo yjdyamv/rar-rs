@@ -253,28 +253,33 @@ napi-rs 的产物此前只挂在 GitHub Release 上，npm
       比我们**多约 20–22 字节**（`-v64k` 纯档末卷官方 29468 / 我们 29446，
       `-rr5%` 官方 40346 / 我们 40326）——即官方在非末卷少写那 N 字节数据、
       留到末卷，所以**末卷大小差 ~20–22 字节**。多次实测的「`-rr` 松弛量不规则」
-      （32 KiB 卷 `-rr1/3/5/20%` 都 7 字节、`-rr10%` 393 字节；256 KiB 卷 5 字节）
-      是同一现象。两边都能被官方 `t`/`x`/`rc` 接受，`.rev` 本体逐字节相同。
-      **更细实测（刻画的规律，尚未定论）**：非末卷 pad——纯档 fh1=**8**、fh2=**14**；
-      `-rr5%` fh1=**15**、fh2=**21**。两个简单假设已被实测**证伪**：①「头数线性」——
-      多个**普通**小成员头（1–4 个）的卷 pad 恒 **8**；②「每条续块 +6」——单个跨卷
-      成员的 4 卷每卷 pad 也恒 **8**。故 pad 与「卷内**多个不同成员** + RR」的某种
-      组合相关，尚未收敛为闭式。
-      **逆向状态**：Ghidra 项目里已导入 `Rar7.exe`（7-23）；但 WinRAR 的 UI 文本在
-      `rarlng.dll`、二进制字符串被剥离（`QO|RR|ENDARC|volume` 全 0 命中），只能按
-      结构定位写卷路径——已确认 `FUN_140036378`（seek/skip 包装）、`FUN_140036994`
-      （WriteFile 错误重试封装）、`FUN_1400926a8`（控制台/文件输出流）等都是通用 I/O
+      （32 KiB 卷 `-rr1/3/5/20%` 都 7 字节、`-rr10%` 393 字节；256 KiB 卷 5
+      字节） 是同一现象。两边都能被官方 `t`/`x`/`rc` 接受，`.rev`
+      本体逐字节相同。 **更细实测（刻画的规律，尚未定论）**：非末卷 pad——纯档
+      fh1=**8**、fh2=**14**； `-rr5%`
+      fh1=**15**、fh2=**21**。两个简单假设已被实测**证伪**：①「头数线性」——
+      多个**普通**小成员头（1–4 个）的卷 pad 恒 **8**；②「每条续块
+      +6」——单个跨卷 成员的 4 卷每卷 pad 也恒 **8**。故 pad
+      与「卷内**多个不同成员** + RR」的某种 组合相关，尚未收敛为闭式。
+      **逆向状态**：Ghidra 项目里已导入 `Rar7.exe`（7-23）；但 WinRAR 的 UI
+      文本在 `rarlng.dll`、二进制字符串被剥离（`QO|RR|ENDARC|volume` 全 0
+      命中），只能按 结构定位写卷路径——已确认 `FUN_140036378`（seek/skip
+      包装）、`FUN_140036994` （WriteFile
+      错误重试封装）、`FUN_1400926a8`（控制台/文件输出流）等都是通用 I/O
       助手；ENDARC 的 8 字节（`1D 77 56 51 03 05 04 00`）在二进制里 **0 命中**
-      （CRC 运行期算、立即数拼装），签名常量也 0 命中，不能用常量定位。**但已追到
-      卷驱动层**：`FUN_14003631c(stream,size)` = seek 到 size + `SetEndOfFile`
-      （**整卷预分配**，扩展部分即那截零尾）；多卷驱动 `FUN_14005be6c` 在 L428 对
-      **每卷**调用它、大小取自 `[driver+0x30+vol]` 数组——即**先规划各卷大小、再预
-      分配**。预留量算术在「规划各卷大小」（填充 `[base+vol*0x40+0x30]`）的那一步，
-      但该 0x40 字节每卷结构数组由某个**通用容器/分配例程**构建（`FUN_140021aec`
-      编排器 → `FUN_14005a578`/`FUN_14005a3dc` 都不直接写它），尚未定位到填充点。
-      **又一批实测**：`padfit`（单个跨卷成员 + 若干普通小成员）**每个非末卷 pad 恒 8**，
-      与卷内文件头数（1–4）、`CONTINUES`(0x08)/`CONTINUE_TO`(0x10) 标志都无关；只有
-      `plain` 的 part2（一个**续块结束 + 新成员开始**）为 14，`-rr5%` 再 +7——规律仍
+      （CRC 运行期算、立即数拼装），签名常量也 0
+      命中，不能用常量定位。**但已追到 卷驱动层**：`FUN_14003631c(stream,size)`
+      = seek 到 size + `SetEndOfFile`
+      （**整卷预分配**，扩展部分即那截零尾）；多卷驱动 `FUN_14005be6c` 在 L428
+      对 **每卷**调用它、大小取自 `[driver+0x30+vol]`
+      数组——即**先规划各卷大小、再预 分配**。预留量算术在「规划各卷大小」（填充
+      `[base+vol*0x40+0x30]`）的那一步， 但该 0x40
+      字节每卷结构数组由某个**通用容器/分配例程**构建（`FUN_140021aec` 编排器 →
+      `FUN_14005a578`/`FUN_14005a3dc` 都不直接写它），尚未定位到填充点。
+      **又一批实测**：`padfit`（单个跨卷成员 + 若干普通小成员）**每个非末卷 pad
+      恒 8**， 与卷内文件头数（1–4）、`CONTINUES`(0x08)/`CONTINUE_TO`(0x10)
+      标志都无关；只有 `plain` 的 part2（一个**续块结束 + 新成员开始**）为
+      14，`-rr5%` 再 +7——规律仍
       未闭合。纯字节收益，属“有意不追平”，留作后续专门逆向。
 
 ### 性能（进行中，未关闭议题）
@@ -593,7 +598,14 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 
 ## 已知小差异（记录，互操作无碍）
 
-- **`lb` 与分卷成员（已对齐）**：`lb` 对跨卷成员在**首卷**打印一次、在**每个后续卷**也打印该成员名（该卷只有这一个名字）。实测 WinRAR **4.20/6.23/7.23** 的 `Rar.exe` 与 `UnRAR.exe` 全都如此，与我们一致（旧记录「`Rar.exe lb` 不打印跨卷成员」对有符号版本不成立，已更正；回归测试 `cli_bare_list_prints_split_member_on_every_volume`）。唯一残留：我们 `lb` 也接受套系的**基名**（`set.rar`，经 `discover_volumes` 解析），官方对新编号套系要求 `set.part1.rar`（基名退 10）——属放宽便利。
+- **`lb` 与分卷成员（已对齐）**：`lb`
+  对跨卷成员在**首卷**打印一次、在**每个后续卷**也打印该成员名（该卷只有这一个名字）。实测
+  WinRAR **4.20/6.23/7.23** 的 `Rar.exe` 与 `UnRAR.exe`
+  全都如此，与我们一致（旧记录「`Rar.exe lb`
+  不打印跨卷成员」对有符号版本不成立，已更正；回归测试
+  `cli_bare_list_prints_split_member_on_every_volume`）。唯一残留：我们 `lb`
+  也接受套系的**基名**（`set.rar`，经 `discover_volumes`
+  解析），官方对新编号套系要求 `set.part1.rar`（基名退 10）——属放宽便利。
 - **同一次 `a` 里的重复成员**：同一个文件既当显式参数、又落在目录参数里时，
   官方按 `-o+` 的覆盖语义把它挪到末尾，我们保留原位（其余排序规则已对齐， 见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「solid 成员的顺序」）。
@@ -602,22 +614,81 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 - **RAR5 主头 locator 偏移宽度（CLI 已全路径一致）**：不传
   `WriterOptions::estimated_size` 时主头 locator 偏移字段取**默认 5 字节**
-  （`DEFAULT_OFFSET_WIDTH`，不是「最小 3」），官方按**输入总大小**分档（3/4/5/6）。
-  CLI 的 `a` **和 `m`** 都把输入文件大小求和后传进去（压缩只会变小，输入总量是安全
-  上界；`m` 同时按 `a` 默认开 quick-open），所以**所有 CLI 建档路径**都逐字节一致
-  （实测 ours `a`/`m` 与 6.23/7.23 的 `a`/`m` sha256 相同）。只有**库调用者不传**
+  （`DEFAULT_OFFSET_WIDTH`，不是「最小
+  3」），官方按**输入总大小**分档（3/4/5/6）。 CLI 的 `a` **和 `m`**
+  都把输入文件大小求和后传进去（压缩只会变小，输入总量是安全 上界；`m` 同时按
+  `a` 默认开 quick-open），所以**所有 CLI 建档路径**都逐字节一致 （实测 ours
+  `a`/`m` 与 6.23/7.23 的 `a`/`m` sha256 相同）。只有**库调用者不传**
   `estimated_size` 时才看得到差异——且库**无法自行推导**：主头在成员之前写入，
   写头时还不知道总量。
 - **Windows 联接点的 redirect 目标字符串**：见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
-- **`u`/`f` 的成员顺序（已对齐，含 solid）**：`rar u`/`f` 对**单卷 RAR5** 档**就地替换**被刷新的成员（保持原位、内容/CRC/mtime 更新），与官方 6.23/7.23 一致——**含 solid 档**：被替换成员所在的 solid 链会被**就地重压**（先解码旧内容推进共享**解码**窗口，再用新内容推进共享**编码**窗口，后继成员仍正确解码）。回归测试：`cli_update_keeps_refreshed_member_in_place`、`cli_update_solid_refresh_keeps_member_in_place`、库 `editor_replaces_a_member_in_place`、`editor_replaces_a_solid_member_in_place`。实现：`EditPlan::replace` / `RewriteOp::Replace` + `SolidChainState::replace_solid_member`。新增成员仍**追加到既有成员之后**（目录条目最后）。**仍回退「删旧+追加」**（被刷新成员落到档尾）：多卷、`-ol`/`-oh`/`-oi` 链接重定向、`-ver` 版本控制、目录成员、重名成员——`t` 通过、数据无损。
-- **`p`/`-so` 的残余差异**：成员选择器我们更宽松——`selector.rs` 统一把 `\` 与 `/` 归一后再匹配，所以 `p sub/c.txt`（正斜杠）能命中官方需反斜杠的归档名（官方 6.23/7.23 都要求**分隔符精确**，`p sub/c.txt` 退 10）；这是刻意的跨平台便利（Unix 档存 `/`）。`-so` 是我们的**扩展**（等价 `p`）：7.23 `Rar.exe` **与** `UnRAR.exe` 都报 `Unknown option: so`（退 7），6.23 忽略该未知开关径自解到磁盘——保留作便利，不追。（头加密归档缺口令的退出码**已对齐**：现在退 12，与 7.23 一致；密码错仍退 11。）
-- **`-oh` 硬链接 redirect 的声明大小（已对齐）**：把硬链接存为 redirect 时，官方把该成员的平铺大小写为**目标文件大小**（`lt` 显示 `Size: 19`、`Packed size: 0`）；我们现在也写目标大小（`LinkRedirect.size`），`lt` 与官方逐字段一致。解压出的硬链接在两边都正确共享 inode（`fsutil hardlink list` 均两条）。`-ol` 的符号链接（固定 mtime + 相对目标）元数据与官方逐字段一致。
-- **SFX 产物扩展名（已对齐）**：`rar s` 现在写 `<base>.exe`——与官方 **3.93/4.20/6.23/7.23** 一致（也与本仓库 create-time `-sfx` 一致）；`s-` 同时识别 `.exe`/`.EXE`/`.sfx`/`.SFX`。同时对齐了官方两处安全行为：`s` 在无 `-y` 时不覆盖已存在的 `<base>.exe`（官方非交互下保留原文件，我们此前会静默覆盖真实程序）；`s-` 先校验签名之后确有**合法主头**才写，非 SFX 的可执行文件（哪怕偶然含 RAR 魔数）不再产出垃圾 `.rar`（官方报 `Bad archive`）。`sfx_offset_of` 亦识别 7 字节 RAR4 签名，`s-` 因此能剥离 RAR4 SFX（`s` 本就接受 RAR4）。回归测试：`cli_sfx_roundtrip_with_module`、`cli_sfx_strip_rejects_non_archive`、`cli_sfx_refuses_to_clobber_existing_exe`、`cli_sfx_roundtrip_rar4`。
-- **SFX 内嵌档案的字节（官方 `s` 会「重序列化」内嵌档）**：我们 `s` 把 stub **原样前置**到原始档案（`a` 本身两边逐字节相同）。官方 `s` 不是就地改两个字节，而是**重写内嵌档的头**：①把每个 FILE_HEAD 的 `DataSize`/`UnpackedSize` 从保留宽度（值 13 写成 `8D 00`）改到**最短**（`0D`），重算该头 `HeaderSize`+CRC；②**重算主头 LOCATOR 偏移**（`big9k` 实测 `8C→88`，大成员档偏移更宽）；③最小化**服务块**（QO/RR）的尺寸字段（`big9k` 整档少 52 字节）；④**重建/丢弃**内联恢复记录（`-rr5%` 档内嵌后与「无 RR」一致，少 186 字节）。因此逐字节贴平要**复刻官方的重序列化**，且含 RR 时因「`-rr` 零尾未追平」本就不可得。故仍记录为已知差异；两者都合法、解压与提取内容完全一致。
-- **`-os` NTFS 流（STM）（语义已对齐）**：两边 STM 服务块名字/`unpSize`/`dataCrc` 相同；`compInfo` 现在**都是 `384`**（version 0、solid 0、**method=3**）——`write_stream_record` 先用 method 3（dict log 0）压缩流数据，`-p`/`-hp` 时再逐流加密（加密在压缩之后，CRC 仍为明文 CRC；不受 `-m0` 影响）。**packed 字节仍不同**（自研编码器输出长度与 WinRAR 差若干字节，如 3800 字节流我们 37、官方 36），故归档/`s` 仍非逐字节一致；但**语义一致**、`compInfo`/明文 CRC/解出的 ADS 逐字节相同、**双向互操作**（官方 6.23/7.23 `UnRAR` 能还原我们的压缩流、`Rar t` 通过；我们也能解官方的压缩流）。回归：`os_stream_data_is_compressed`、`os_streams_interop_with_winrar`。
-- **文件头编码与 WinRAR 版本无关**：固定 mtime 下，ours / WinRAR **6.23 / 7.23** 的 RAR5 `-m0` 档案 **sha256 完全相同**（保留的 2 字节 vint、Windows FILETIME 的 FILE_TIME 记录、`compInfo=0` 三方一致）；RAR4 文件头 **4.20 与 6.23 也逐字节相同**。差 2 字节只出在「官方 `s` 会重序列化内嵌档（最小化尺寸字段并重算 LOCATOR，见上）」；`-os` 流现在两边都用 method 3，差别只剩编码器输出字节，与版本无关。（缓存里没有 5.x；4.20 不认 `-ma4`、7.23 已移除 `-ma4`，故 RAR4 只能拿 4.20 默认档与 6.23 比。）
-- **RAR4 奇数秒 mtime 的 `FHD_EXTTIME`（按容器版本决定）**：extended-time 区是 RAR 3.0+ **容器**特性，判据应是容器 `unp_ver`（`rar4_unp_ver`），而不是成员 codec 版本。`-ma4`（容器 29，即使 `-m0` store 成员的 codec 版本是 20）现在对奇数秒 mtime 写 2 字节 `PRESENT|ADD_SECOND`——与官方 4.20/6.23 **逐字节相同**、解压还原奇数秒；`-ma2`/`-ma15`（pre-3.0 容器 20/15）不写，保持 2 秒精度，使 RAR/UnRAR **2.90** 仍能读（2.90 见到 v20+EXTTIME 会报「the file header is corrupt」，实测）。因此只有含奇数秒成员的 `-ma4` 档会让 2.90 报 corrupt——与官方 `-ma4` 行为一致；偶数秒 `-ma4` 与 `-ma2`/`-ma15` 不受影响，无需开关。
+- **`u`/`f` 的成员顺序（已对齐，含 solid）**：`rar u`/`f` 对**单卷 RAR5**
+  档**就地替换**被刷新的成员（保持原位、内容/CRC/mtime 更新），与官方 6.23/7.23
+  一致——**含 solid 档**：被替换成员所在的 solid
+  链会被**就地重压**（先解码旧内容推进共享**解码**窗口，再用新内容推进共享**编码**窗口，后继成员仍正确解码）。回归测试：`cli_update_keeps_refreshed_member_in_place`、`cli_update_solid_refresh_keeps_member_in_place`、库
+  `editor_replaces_a_member_in_place`、`editor_replaces_a_solid_member_in_place`。实现：`EditPlan::replace`
+  / `RewriteOp::Replace` +
+  `SolidChainState::replace_solid_member`。新增成员仍**追加到既有成员之后**（目录条目最后）。**仍回退「删旧+追加」**（被刷新成员落到档尾）：多卷、`-ol`/`-oh`/`-oi`
+  链接重定向、`-ver` 版本控制、目录成员、重名成员——`t` 通过、数据无损。
+- **`p`/`-so` 的残余差异**：成员选择器我们更宽松——`selector.rs` 统一把 `\` 与
+  `/` 归一后再匹配，所以 `p sub/c.txt`（正斜杠）能命中官方需反斜杠的归档名（官方
+  6.23/7.23 都要求**分隔符精确**，`p sub/c.txt` 退
+  10）；这是刻意的跨平台便利（Unix 档存 `/`）。`-so` 是我们的**扩展**（等价
+  `p`）：7.23 `Rar.exe` **与** `UnRAR.exe` 都报 `Unknown option: so`（退
+  7），6.23
+  忽略该未知开关径自解到磁盘——保留作便利，不追。（头加密归档缺口令的退出码**已对齐**：现在退
+  12，与 7.23 一致；密码错仍退 11。）
+- **`-oh` 硬链接 redirect 的声明大小（已对齐）**：把硬链接存为 redirect
+  时，官方把该成员的平铺大小写为**目标文件大小**（`lt` 显示
+  `Size: 19`、`Packed size: 0`）；我们现在也写目标大小（`LinkRedirect.size`），`lt`
+  与官方逐字段一致。解压出的硬链接在两边都正确共享 inode（`fsutil hardlink list`
+  均两条）。`-ol` 的符号链接（固定 mtime + 相对目标）元数据与官方逐字段一致。
+- **SFX 产物扩展名（已对齐）**：`rar s` 现在写 `<base>.exe`——与官方
+  **3.93/4.20/6.23/7.23** 一致（也与本仓库 create-time `-sfx` 一致）；`s-`
+  同时识别 `.exe`/`.EXE`/`.sfx`/`.SFX`。同时对齐了官方两处安全行为：`s` 在无
+  `-y` 时不覆盖已存在的
+  `<base>.exe`（官方非交互下保留原文件，我们此前会静默覆盖真实程序）；`s-`
+  先校验签名之后确有**合法主头**才写，非 SFX 的可执行文件（哪怕偶然含 RAR
+  魔数）不再产出垃圾 `.rar`（官方报 `Bad archive`）。`sfx_offset_of` 亦识别 7
+  字节 RAR4 签名，`s-` 因此能剥离 RAR4 SFX（`s` 本就接受
+  RAR4）。回归测试：`cli_sfx_roundtrip_with_module`、`cli_sfx_strip_rejects_non_archive`、`cli_sfx_refuses_to_clobber_existing_exe`、`cli_sfx_roundtrip_rar4`。
+- **SFX 内嵌档案的字节（官方 `s` 会「重序列化」内嵌档）**：我们 `s` 把 stub
+  **原样前置**到原始档案（`a` 本身两边逐字节相同）。官方 `s`
+  不是就地改两个字节，而是**重写内嵌档的头**：①把每个 FILE_HEAD 的
+  `DataSize`/`UnpackedSize` 从保留宽度（值 13 写成
+  `8D 00`）改到**最短**（`0D`），重算该头 `HeaderSize`+CRC；②**重算主头 LOCATOR
+  偏移**（`big9k` 实测
+  `8C→88`，大成员档偏移更宽）；③最小化**服务块**（QO/RR）的尺寸字段（`big9k`
+  整档少 52 字节）；④**重建/丢弃**内联恢复记录（`-rr5%` 档内嵌后与「无
+  RR」一致，少 186 字节）。因此逐字节贴平要**复刻官方的重序列化**，且含 RR
+  时因「`-rr`
+  零尾未追平」本就不可得。故仍记录为已知差异；两者都合法、解压与提取内容完全一致。
+- **`-os` NTFS 流（STM）（语义已对齐）**：两边 STM
+  服务块名字/`unpSize`/`dataCrc` 相同；`compInfo` 现在**都是 `384`**（version
+  0、solid 0、**method=3**）——`write_stream_record` 先用 method 3（dict log
+  0）压缩流数据，`-p`/`-hp` 时再逐流加密（加密在压缩之后，CRC 仍为明文 CRC；不受
+  `-m0` 影响）。**packed 字节仍不同**（自研编码器输出长度与 WinRAR
+  差若干字节，如 3800 字节流我们 37、官方 36），故归档/`s`
+  仍非逐字节一致；但**语义一致**、`compInfo`/明文 CRC/解出的 ADS
+  逐字节相同、**双向互操作**（官方 6.23/7.23 `UnRAR` 能还原我们的压缩流、`Rar t`
+  通过；我们也能解官方的压缩流）。回归：`os_stream_data_is_compressed`、`os_streams_interop_with_winrar`。
+- **文件头编码与 WinRAR 版本无关**：固定 mtime 下，ours / WinRAR **6.23 / 7.23**
+  的 RAR5 `-m0` 档案 **sha256 完全相同**（保留的 2 字节 vint、Windows FILETIME
+  的 FILE_TIME 记录、`compInfo=0` 三方一致）；RAR4 文件头 **4.20 与 6.23
+  也逐字节相同**。差 2 字节只出在「官方 `s`
+  会重序列化内嵌档（最小化尺寸字段并重算 LOCATOR，见上）」；`-os` 流现在两边都用
+  method 3，差别只剩编码器输出字节，与版本无关。（缓存里没有 5.x；4.20 不认
+  `-ma4`、7.23 已移除 `-ma4`，故 RAR4 只能拿 4.20 默认档与 6.23 比。）
+- **RAR4 奇数秒 mtime 的 `FHD_EXTTIME`（按容器版本决定）**：extended-time 区是
+  RAR 3.0+ **容器**特性，判据应是容器 `unp_ver`（`rar4_unp_ver`），而不是成员
+  codec 版本。`-ma4`（容器 29，即使 `-m0` store 成员的 codec 版本是
+  20）现在对奇数秒 mtime 写 2 字节 `PRESENT|ADD_SECOND`——与官方 4.20/6.23
+  **逐字节相同**、解压还原奇数秒；`-ma2`/`-ma15`（pre-3.0 容器 20/15）不写，保持
+  2 秒精度，使 RAR/UnRAR **2.90** 仍能读（2.90 见到 v20+EXTTIME 会报「the file
+  header is corrupt」，实测）。因此只有含奇数秒成员的 `-ma4` 档会让 2.90 报
+  corrupt——与官方 `-ma4` 行为一致；偶数秒 `-ma4` 与 `-ma2`/`-ma15`
+  不受影响，无需开关。
 
 ## 发布清单（改版本号时逐项过）
 

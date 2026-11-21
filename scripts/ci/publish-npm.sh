@@ -119,15 +119,20 @@ cp "$package_dir/LICENSE" "$stage_pkg/LICENSE"
 
 # Every entry of `files` must resolve, and the payload decides what the bytes
 # are. Three exceptions: the native artifacts are globbed by `files` and copied
-# from `napi.targets` below, the README lives at the repository root (one README
-# for the crate, the CLI and npm), and `browser.js` is the one-line re-export
-# `napi build` writes only when it compiles a target — the publish job never
-# does.
+# from `napi.targets` below, the README is the package's own
+# (`crates/rar-napi/README.md`) when present and otherwise the repository root
+# README shared with the crate and the CLI, and `browser.js` is the one-line
+# re-export `napi build` writes only when it compiles a target — the publish job
+# never does.
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
   case "$entry" in
     README.md)
-      cp "$root/README.md" "$stage_pkg/README.md"
+      if [ -e "$package_dir/README.md" ]; then
+        cp "$package_dir/README.md" "$stage_pkg/README.md"
+      else
+        cp "$root/README.md" "$stage_pkg/README.md"
+      fi
       ;;
     browser.js)
       # Bundlers reach the WASI build through this file, so it has to point at

@@ -279,7 +279,7 @@ fi
 # publish-npm.sh: one package carrying every platform binary. What a fixture
 # proves is exactly what a real tag would get wrong — a target shipping without
 # its addon, an artifact that never reaches the tarball, a notice dropped from
-# `files`, a README not taken from the repository root, or a staged manifest
+# `files`, a README that ignores the package's own copy, or a staged manifest
 # that still names per-platform packages nobody publishes any more.
 # ---------------------------------------------------------------------------
 npm_publish="$here/publish-npm.sh"
@@ -403,6 +403,15 @@ check 'publish-npm: browser.js re-exports the local WASI loader' \
 check 'publish-npm: the notices travel with the package' NOTICE "$(ls "$staged")"
 check 'publish-npm: the license texts travel with the package' MIT.txt \
   "$(ls "$staged/LICENSES")"
+
+# A package README (`crates/rar-napi/README.md`, the Node-facing one) wins over
+# the repository root README when it exists; the fixture above has none, so the
+# check just above proves the root fallback.
+printf '# rar-rs (node)\n\nPACKAGE-README marker.\n' >"$npm_package/README.md"
+: >"$log"
+run_npm >"$tmp/npm2.log"
+check 'publish-npm: the package README wins when present' PACKAGE-README \
+  "$(cat "$staged/README.md")"
 
 # A version already on the registry is a skip, not a failure: npm owns a
 # version number forever, so re-running a half-finished publish has to work.

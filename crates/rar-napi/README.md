@@ -1,9 +1,9 @@
 # rar-rs for Node.js
 
-[`@yjdyamv/rar-rs`](https://www.npmjs.com/package/@yjdyamv/rar-rs) is the Node.js
-binding of **rar-rs**, a pure-Rust RAR toolkit: it creates, reads, extracts,
-tests, modifies and repairs **RAR5/RAR7** archives and legacy **RAR 1.3–4.x**
-archives with **no external `rar`/`unrar` binary**.
+[`@yjdyamv/rar-rs`](https://www.npmjs.com/package/@yjdyamv/rar-rs) is the
+Node.js binding of **rar-rs**, a pure-Rust RAR toolkit: it creates, reads,
+extracts, tests, modifies and repairs **RAR5/RAR7** archives and legacy **RAR
+1.3–4.x** archives with **no external `rar`/`unrar` binary**.
 
 It is a [napi-rs](https://napi.rs) addon: a native `.node` on every supported
 platform, plus a WebAssembly (WASI) build for bundlers.
@@ -107,25 +107,25 @@ either lands or fails); use `extractArchive` when you need progress.
 
 ## API
 
-| Function | Returns |
-| --- | --- |
-| `createArchive(opts, onProgress?, signal?)` | `{ files: string[] }` — every file produced (the whole set for multi-volume) |
-| `appendEntries(opts, onProgress?, signal?)` | `{ files: string[] }` — single-volume archives only |
-| `listEntries(path, password?)` | `string[]` — names in archive order |
-| `listEntriesDetailed(path, password?)` | `EntryInfo[]` |
-| `listEntriesQuick(path, password?)` | `EntryInfo[]` — uses the quick-open record when present |
-| `readMember(path, name, password?)` | `Buffer` — uncompressed bytes of one member |
-| `extractMember(path, name, destDir, password?, signal?)` | `string` — resolved output path |
-| `extractArchive(path, opts, onProgress?, signal?)` | `ExtractionResult` |
-| `testArchive(path, password?)` | `[checked, failed]` |
-| `deleteEntries(path, names, password?, onProgress?, signal?)` | `number` deleted |
-| `renameEntries(path, renames, password?, signal?)` | `number` renamed |
-| `setComment(path, comment?, password?)` | `void` — `null`/`undefined` clears it |
-| `setMemberComment(path, member, comment?, password?)` | `void` — RAR 1.5–4.x only |
-| `setRecovery(path, percent, password?)` | `void` — inline recovery record, 0–100 |
-| `lockArchive(path, password?)` | `void` — refuses further modification |
-| `repairArchive(input, output, onProgress?, signal?)` | `boolean` — `false` when already intact (nothing written) |
-| `rebuildMissingVolumes(firstVolume, onProgress?, signal?)` | `string[]` — `.rev`-rebuilt volumes, in order |
+| Function                                                      | Returns                                                                      |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `createArchive(opts, onProgress?, signal?)`                   | `{ files: string[] }` — every file produced (the whole set for multi-volume) |
+| `appendEntries(opts, onProgress?, signal?)`                   | `{ files: string[] }` — single-volume archives only                          |
+| `listEntries(path, password?)`                                | `string[]` — names in archive order                                          |
+| `listEntriesDetailed(path, password?)`                        | `EntryInfo[]`                                                                |
+| `listEntriesQuick(path, password?)`                           | `EntryInfo[]` — uses the quick-open record when present                      |
+| `readMember(path, name, password?)`                           | `Buffer` — uncompressed bytes of one member                                  |
+| `extractMember(path, name, destDir, password?, signal?)`      | `string` — resolved output path                                              |
+| `extractArchive(path, opts, onProgress?, signal?)`            | `ExtractionResult`                                                           |
+| `testArchive(path, password?)`                                | `[checked, failed]`                                                          |
+| `deleteEntries(path, names, password?, onProgress?, signal?)` | `number` deleted                                                             |
+| `renameEntries(path, renames, password?, signal?)`            | `number` renamed                                                             |
+| `setComment(path, comment?, password?)`                       | `void` — `null`/`undefined` clears it                                        |
+| `setMemberComment(path, member, comment?, password?)`         | `void` — RAR 1.5–4.x only                                                    |
+| `setRecovery(path, percent, password?)`                       | `void` — inline recovery record, 0–100                                       |
+| `lockArchive(path, password?)`                                | `void` — refuses further modification                                        |
+| `repairArchive(input, output, onProgress?, signal?)`          | `boolean` — `false` when already intact (nothing written)                    |
+| `rebuildMissingVolumes(firstVolume, onProgress?, signal?)`    | `string[]` — `.rev`-rebuilt volumes, in order                                |
 
 ### Entries (`EntryInput`)
 
