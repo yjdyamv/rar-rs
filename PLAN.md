@@ -593,6 +593,8 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 - **SFX 产物扩展名**：`rar s` 我们写 `<base>.sfx`（仓库测试 `base.sfx must be created` 钉住），官方写 `<base>.exe`。两者都能被双方 `rar`/`UnRAR`/`Rar` 的 `t` 读取、`s-` 都能剥离回 `<base>.rar`，仅扩展名不同（官方命名在 Windows 上可直接双击运行）。
 - **SFX 内嵌档案的字节**：我们 `s` 把 stub **原样前置**到原始档案；官方 `s` 会把文件头里两处**保留的 2 字节 vint**（`DataSize`/`UnpackedSize` 对值 13 写成 `8D 00`）**规范化为最短 1 字节**（`0D`），`HeaderSize` 33→31、整档少 2 字节。`a` 本身两边逐字节相同；两者都合法、互操作与提取完全一致。
 - **`-os` NTFS 流（STM）的字节**：两边的 STM 服务块名字/`unpSize`(=11)/`dataCrc` 相同，但 `compInfo` 不同——官方 `384`（按 `mod.rs` 的位域：version 0、solid 0、**method=3**）、`dataSize=23`（压缩后），我们 `0`（method 0 store）、`dataSize=11`（原样明文）。即**官方对流数据按其默认压缩(method 3)、不受 `-m0` 影响**，我们按存储。解出的 ADS 内容**逐字节相同**，互操作无碍。
+- **文件头编码与 WinRAR 版本无关**：固定 mtime 下，ours / WinRAR **6.23 / 7.23** 的 RAR5 `-m0` 档案 **sha256 完全相同**（保留的 2 字节 vint、Windows FILETIME 的 FILE_TIME 记录、`compInfo=0` 三方一致）；RAR4 文件头 **4.20 与 6.23 也逐字节相同**。差 2 字节只出在「官方 `s` 会规范化那两个保留 vint」和「官方对流数据用 method 3」，与版本无关。（缓存里没有 5.x；4.20 不认 `-ma4`、7.23 已移除 `-ma4`，故 RAR4 只能拿 4.20 默认档与 6.23 比。）
+- **RAR4 `-m0`（`unp_ver` 20）奇数秒 mtime 的 `FHD_EXTTIME`**：官方 4.20/6.23 会给奇数秒的 v20 store 成员写 2 字节 EXTTIME（`PRESENT|ADD_SECOND`，现代工具解压能还原奇数秒）；我们**刻意不写**（`build_member_ext_time` 只对 v29 产出），因为 UnRAR/Rar **2.90** 读到这种成员会报「the file header is corrupt」（实测 exit 1，且 2.90 也还原不出奇数秒）。代价：我们的 RAR4 store 档比官方小 2 字节、现代工具解出的奇数秒向下取整**丢 1 秒**。这是有意的旧读取器兼容取舍（见 `format/rar4/write/mod.rs` 注释），不是版本编码差异。
 
 ## 发布清单（改版本号时逐项过）
 
