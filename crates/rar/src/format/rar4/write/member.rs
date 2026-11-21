@@ -407,8 +407,11 @@ pub(crate) fn add_rar4_data(
         level,
         cx.password().is_some_and(|pw| !pw.is_empty()),
     );
-    let ext_time =
-        crate::format::rar4::write::build_member_ext_time(member_unp_ver, mtime, Some(mtime_ns));
+    let ext_time = crate::format::rar4::write::build_member_ext_time(
+        cx.write_ctx().solid.rar4_unp_ver,
+        mtime,
+        Some(mtime_ns),
+    );
 
     // Member-level encryption (WinRAR `-p`), dispatched on the cipher
     // generation (see `rar4_member_encrypt`). The header carries the

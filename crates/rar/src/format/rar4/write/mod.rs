@@ -389,22 +389,26 @@ pub(crate) fn build_ext_time(mtime: u32, mtime_ns: Option<u32>) -> Option<Vec<u8
     Some(ext)
 }
 
-/// `FHD_EXTTIME` record for a member of a container whose member version is
-/// `unp_ver`.
+/// `FHD_EXTTIME` record for a member of a legacy container whose
+/// **container** version is `container_unp_ver` (not the member's codec
+/// version).
 ///
-/// RAR 1.5/2.x (`unp_ver` 15/20) predate the extended-time area: their readers
-/// size a plain file header as `32 + name` (no record), so an extra one shifts
-/// the data offset and the header CRC no longer covers what they expect —
-/// UnRAR 2.90 reports "the file header is corrupt" on such a member (verified
-/// against the reference build). Only v29 members carry the record.
+/// The extended-time area is a RAR 3.0+ header feature. WinRAR 4.20/6.23
+/// write it for a `-ma4` store member even though that member's codec
+/// `unp_ver` is 20 (the container is 29), so gating on the *member* version
+/// suppressed the odd-second ADD_SECOND that the official tools emit. RAR
+/// 1.5/2.x containers (`-ma2`/`-ma15`) must stay without it: pre-3.0 readers
+/// (RAR/UnRAR 2.90) size a 2.x file header as `32 + name` and report "the
+/// file header is corrupt" when the area is present (verified; 2.90 also
+/// cannot restore the odd second anyway). Emitting only when the mtime
+/// actually needs it (odd second or sub-second) is exactly the official
+/// behaviour, so RAR 1.5/2.x archives keep 2.90 compatibility.
 pub(crate) fn build_member_ext_time(
-    unp_ver: u8,
+    container_unp_ver: u8,
     mtime: u32,
     mtime_ns: Option<u32>,
 ) -> Option<Vec<u8>> {
-    if crate::version::LegacyCodec::from_unp_ver(unp_ver)
-        != Some(crate::version::LegacyCodec::Rar29)
-    {
+    if container_unp_ver < 29 {
         return None;
     }
     build_ext_time(mtime, mtime_ns)
@@ -650,13 +654,15 @@ mod tests {
         );
     }
 
-    /// The extended-time area is a RAR 3.0+ (`v29`) construct: RAR 1.5/2.x
-    /// readers size a plain file header as `32 + name` (no record), so a
-    /// record there shifts their data offset and the header CRC no longer
-    /// covers what they expect (UnRAR 2.90 reported "the file header is
-    /// corrupt"). Only v29 members may carry one.
+    /// The extended-time area is a RAR 3.0+ (`v29`) *container* construct:
+    /// RAR 1.5/2.x readers size a plain file header as `32 + name` (no
+    /// record), so a record there shifts their data offset and the header CRC
+    /// no longer covers what they expect (UnRAR 2.90 reported "the file
+    /// header is corrupt"). The official tools write it for a `-ma4` store
+    /// member despite its codec `unp_ver` of 20, so the gate reads the
+    /// container version, not the member's.
     #[test]
-    fn member_ext_time_is_v29_only() {
+    fn member_ext_time_needs_a_v29_container() {
         let odd = local_civil_to_epoch(1_700_000_001); // odd local second
         let even = local_civil_to_epoch(1_700_000_002);
         assert!(build_member_ext_time(29, odd, None).is_some());

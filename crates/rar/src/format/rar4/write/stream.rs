@@ -269,8 +269,11 @@ pub(super) fn add_rar4_file_streaming(
         level,
         password,
     );
-    let ext_time =
-        crate::format::rar4::write::build_member_ext_time(member_unp_ver, mtime, Some(mtime_ns));
+    let ext_time = crate::format::rar4::write::build_member_ext_time(
+        cx.write_ctx().solid.rar4_unp_ver,
+        mtime,
+        Some(mtime_ns),
+    );
     let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
     let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(name);
     let unpacked_size = file_size;
