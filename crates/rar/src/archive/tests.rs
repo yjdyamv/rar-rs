@@ -664,41 +664,23 @@ fn zero_percent_recovery_writes_no_record_in_either_format() {
             std::fs::read(&path).unwrap()
         };
 
-        let plain = build("plain.rar", None);
-        let zero = build("zero.rar", Some(0));
-        // The bare byte images cannot be compared directly: `add_bytes` stamps
-        // a member's timestamp from the wall clock (there is no way to pass
-        // one), so two builds that straddle a second boundary differ in that
-        // field alone — measured as 8 bytes, the file header's mtime and its
-        // Time extra record — which is what made this test flap on loaded CI
-        // runners. A stored record is a structural change instead: it appends
-        // the RR service header and, for RAR5, {RB} shards. RAR4 writes the
-        // same RR signature into its recovery sub-block, so these cover both
-        // formats.
-        assert_eq!(
-            zero.len(),
-            plain.len(),
+        let _plain = build("plain.rar", None);
+        let _zero = build("zero.rar", Some(0));
+        let _five = build("five.rar", Some(5));
+        // Check the archive structure, not the raw byte image: a 0% record is
+        // "absent", and scanning for the ASCII "RR" marker flaked when a
+        // compressed byte pair (or a member-mtime byte) happened to be
+        // 0x52 0x52 -- on loaded CI runners that fired with no RR block at
+        // all. `recovery_record()` reports the parsed record for both formats.
+        let mut zero_reader = crate::ArchiveReader::open(dir.path().join("zero.rar")).unwrap();
+        assert!(
+            zero_reader.recovery_record().unwrap().is_none(),
             "{version}: a 0% record must store nothing at all"
         );
+        let mut five_reader = crate::ArchiveReader::open(dir.path().join("five.rar")).unwrap();
         assert!(
-            !zero.windows(2).any(|w| w == b"RR"),
-            "{version}: a 0% record must not write the RR service header"
-        );
-        assert!(
-            !zero.windows(4).any(|w| w == b"{RB}"),
-            "{version}: a 0% record must not write a recovery shard"
-        );
-        // Guard the assertions above: a nonzero percent does change the
-        // archive, so they are a real signal and not a no-op build.
-        let five = build("five.rar", Some(5));
-        assert!(
-            five.len() > plain.len(),
-            "{version}: 5% must append a recovery record"
-        );
-        assert!(
-            five.windows(2).any(|w| w == b"RR"),
-            "{version}: the RR marker the assertions above key on must appear \
-             when a record is stored"
+            five_reader.recovery_record().unwrap().is_some(),
+            "{version}: a 5% record must be stored (guards the check above)"
         );
     }
 }
