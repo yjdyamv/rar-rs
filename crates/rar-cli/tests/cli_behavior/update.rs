@@ -1050,16 +1050,13 @@ fn cli_a_replacing_last_member_keeps_archive_metadata() {
     }
 }
 
-/// Recorded divergence (PLAN "已知小差异"): `rar u`/`f` replace members by
-/// delete + append, so a refreshed member moves to the *end* of the archive
-/// and a newly added member lands *after* the trailing directory entries --
-/// where `Rar.exe` replaces in place and always keeps directory entries last
-/// (the append-block sort in `update.rs` cannot fix that, because the block
-/// is appended behind the existing members). The no-op exit code is aligned
-/// (both exit 10). Nothing is corrupt and the archive still verifies; this
-/// pins the order shape so a change is deliberate.
+/// `rar u`/`f` refresh a member **in place**, like `Rar.exe`: the refreshed
+/// member keeps its slot (delete + append would move it to the end), and a
+/// newly added member still lands after the existing members, directory
+/// entries last. A member that cannot be replaced in place (a solid chain, a
+/// link redirect, a multi-volume set) falls back to delete + append.
 #[test]
-fn cli_update_member_order_divergence_is_recorded() {
+fn cli_update_keeps_refreshed_member_in_place() {
     let dir = make_temp_dir();
     std::fs::create_dir_all(dir.path().join("sub")).unwrap();
     std::fs::write(dir.path().join("a.txt"), b"old").unwrap();
@@ -1078,7 +1075,7 @@ fn cli_update_member_order_divergence_is_recorded() {
         .unwrap();
     assert!(status.success());
 
-    // Refreshing a.txt moves it to the end (Rar.exe keeps it in place).
+    // Refreshing a.txt keeps it in its slot (`Rar.exe` behaviour).
     std::fs::write(dir.path().join("a.txt"), b"newer").unwrap();
     let status = std::process::Command::new(RAR_CLI)
         .args(["u", "-idq"])
@@ -1089,7 +1086,15 @@ fn cli_update_member_order_divergence_is_recorded() {
         .unwrap();
     assert!(status.success());
     let names = names_in_order(&archive);
-    assert_eq!(names.last().map(String::as_str), Some("a.txt"), "{names:?}");
+    assert_eq!(
+        names.first().map(String::as_str),
+        Some("a.txt"),
+        "{names:?}"
+    );
+    assert_eq!(names.last().map(String::as_str), Some("sub"), "{names:?}");
+    let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let a_id = rar.unique_entry("a.txt").unwrap();
+    assert_eq!(rar.read_entry(a_id).unwrap(), b"newer");
 
     // A newly added member appends behind the trailing `sub` directory entry
     // (Rar.exe keeps directory entries last).

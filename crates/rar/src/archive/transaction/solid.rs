@@ -14,7 +14,7 @@ use crate::error::RarResult;
 use crate::format::rar5::COMP_METHOD_STORE;
 use crate::format::rar5::headers::retain_extra_records;
 use crate::format::rar5::payload::ChunkReader;
-use crate::format::rar5::{EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH};
+use crate::format::rar5::{EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH, EXTRA_FILE_TIME};
 
 /// Shared window/encoder state of the solid chain being rewritten.
 ///
@@ -201,6 +201,107 @@ impl RarArchive {
             crate::format::shared::extract::max_packed_bytes(self),
             || Ok(()),
         )
+    }
+
+    /// Replace member `idx`'s content in place: recompress `data` standalone
+    /// (a fresh non-solid window) and emit the rebuilt header at the member's
+    /// own slot. `mtime`/`mtime_ns` stamp the new header; the member's other
+    /// metadata records (OWNER, ...) are carried over.
+    pub(super) fn emit_replacement(
+        &mut self,
+        idx: usize,
+        data: &[u8],
+        mtime: u32,
+        mtime_ns: u64,
+    ) -> RarResult<()> {
+        if crate::format::rar5::extract::solid::is_solid_chain_member(self, idx) {
+            return Err(crate::error::RarError::unsupported(
+                "cannot replace a member of a solid chain in place",
+            ));
+        }
+        let hdr = self.entries[idx].header.clone();
+        if hdr.is_directory {
+            return Err(crate::error::RarError::unsupported(
+                "cannot replace a directory member in place",
+            ));
+        }
+        let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
+        let mut enc = EncoderState::default();
+        let packed = compression::encode_chunked(
+            data,
+            compression::EncodeOptions {
+                state: Some(&mut enc),
+                is_final: true,
+                variant,
+                ..compression::EncodeOptions::new(hdr.comp_method, encoder_dict_log(&hdr))
+            },
+        )?;
+        let (method, dict_size_log, dict_size_bytes, payload) = if packed.len() >= data.len() {
+            (COMP_METHOD_STORE, 0u8, None, data.to_vec())
+        } else {
+            (
+                hdr.comp_method,
+                hdr.comp_dict_size,
+                hdr.dict_size_bytes,
+                packed,
+            )
+        };
+        let member_encrypted = crate::crypto::parse_encryption_extra(&hdr.extra_data)?.is_some();
+        let password = if member_encrypted {
+            self.password.as_deref()
+        } else {
+            None
+        };
+        let plain_crc = crc32fast::hash(data);
+        let plain_blake = hdr
+            .hash_value
+            .map(|_| crate::format::rar5::blake2sp::hash(data));
+        let (header_crc, mut extra_data, stored_hash, encr) =
+            crate::format::rar5::write::emit::payload_extra_and_crc(
+                password,
+                plain_crc,
+                plain_blake,
+            );
+        // Carry the member's metadata records over, but drop the old time
+        // record: the mtime changed, so rebuild it from the new time when it
+        // carried sub-second precision.
+        let kept = retain_extra_records(
+            &hdr.extra_data,
+            &[EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH, EXTRA_FILE_TIME],
+        );
+        extra_data.extend_from_slice(&kept);
+        // On Windows (and for sub-second times) the time travels in a
+        // FILE_TIME record, not the 4-byte Unix field, so the reader would
+        // otherwise see mtime 0; rebuild the record from the new mtime.
+        if crate::format::rar5::write::emit::time_uses_windows_record() || mtime_ns != 0 {
+            extra_data.extend_from_slice(
+                &crate::format::rar5::headers::file_time_extra_record_windows(
+                    Some((u64::from(mtime), mtime_ns as u32)),
+                    None,
+                    None,
+                ),
+            );
+        }
+        let payload =
+            crate::format::rar5::write::emit::encrypt_payload_with(encr.as_ref(), &payload);
+        crate::format::rar5::write::emit::write_file_entry(
+            self,
+            &MemberPlan {
+                name: hdr.name.clone(),
+                unpacked_size: data.len() as u64,
+                file_crc: header_crc,
+                method,
+                dict_size_log,
+                dict_size_bytes,
+                extra_data,
+                attrs: hdr.attributes,
+                mtime,
+                solid: false,
+                stored_hash,
+            },
+            &payload,
+        )?;
+        Ok(())
     }
 }
 

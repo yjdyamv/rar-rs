@@ -140,7 +140,7 @@ impl RarArchive {
                 .iter()
                 .map(|op| match op {
                     RewriteOp::CopyBlock { len, .. } => *len,
-                    RewriteOp::Recompress { .. } => 0,
+                    RewriteOp::Recompress { .. } | RewriteOp::Replace { .. } => 0,
                 })
                 .sum();
             if total_copy >= PARALLEL_MIN_COPY && plan.ops.len() >= 4 {
@@ -152,7 +152,7 @@ impl RarArchive {
                             src: *src_data,
                             len: *len,
                         }),
-                        RewriteOp::Recompress { .. } => None,
+                        RewriteOp::Recompress { .. } | RewriteOp::Replace { .. } => None,
                     })
                     .collect();
                 pipeline = Some(CopyPipeline::start(src_path, &jobs));
@@ -170,6 +170,7 @@ impl RarArchive {
             .map(|op| match op {
                 RewriteOp::CopyBlock { len, .. } => *len,
                 RewriteOp::Recompress { idx, .. } => self.entries[*idx].header.unpacked_size,
+                RewriteOp::Replace { data, .. } => data.len() as u64,
             })
             .sum();
         let mut processed = 0u64;
@@ -253,6 +254,15 @@ impl RarArchive {
                         state.recompress_member(self, &mut source, *idx, &name)?;
                     }
                     processed += self.entries[*idx].header.unpacked_size;
+                }
+                RewriteOp::Replace {
+                    idx,
+                    data,
+                    mtime,
+                    mtime_ns,
+                } => {
+                    self.emit_replacement(*idx, data, *mtime, *mtime_ns)?;
+                    processed += data.len() as u64;
                 }
             }
         }

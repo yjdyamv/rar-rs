@@ -48,6 +48,25 @@ enum RewriteOp {
         is_deleted: bool,
         chain_head: bool,
     },
+    /// Replace member `idx`'s content in place: recompress `data` at the
+    /// member's own slot with a fresh (non-solid) encoder, rebuilding the
+    /// header from the original entry with the new size, CRC and mtime.
+    /// Only valid for a member that is not part of a solid chain.
+    Replace {
+        idx: usize,
+        data: Vec<u8>,
+        mtime: u32,
+        mtime_ns: u64,
+    },
+}
+
+/// New content for one in-place member replacement (see
+/// [`RewriteOp::Replace`]): the member's new plaintext and the mtime to
+/// stamp on the rebuilt header.
+pub(crate) struct Replacement {
+    pub data: Vec<u8>,
+    pub mtime: u32,
+    pub mtime_ns: u64,
 }
 
 /// The result of planning a rewrite: the blocks to emit, in order.

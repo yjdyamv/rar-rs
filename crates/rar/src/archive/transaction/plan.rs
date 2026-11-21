@@ -28,6 +28,7 @@ impl RarArchive {
         force_rr: Option<u8>,
         rename_map: Option<&std::collections::HashMap<usize, String>>,
         version_map: Option<&std::collections::HashMap<usize, u64>>,
+        replacements: &std::collections::HashMap<usize, Replacement>,
         comment: Option<&[u8]>,
     ) -> RarResult<RewritePlan> {
         let file_len = reader.metadata().map_err(RarError::Io)?.len();
@@ -70,6 +71,20 @@ impl RarArchive {
                 BLOCK_TYPE_FILE_HEADER => {
                     let idx = entry_idx;
                     entry_idx += 1;
+                    // An in-place replacement keeps the member at its own
+                    // slot: emit the new content here instead of copying the
+                    // old block. Replacements never overlap a deleted member
+                    // or an affected solid chain (validated in `edit_plan`).
+                    if let Some(replacement) = replacements.get(&idx) {
+                        ops.push(RewriteOp::Replace {
+                            idx,
+                            data: replacement.data.clone(),
+                            mtime: replacement.mtime,
+                            mtime_ns: replacement.mtime_ns,
+                        });
+                        prev_file_deleted = false;
+                        continue;
+                    }
                     if !chain_active
                         && let Some(&(s, e)) = chains.get(chain_cursor)
                         && s == idx

@@ -99,6 +99,20 @@ impl ArchiveEditor {
         }
         Ok(first.id())
     }
+
+    /// Whether member `id` can be replaced in place (see [`EditPlan::replace`]):
+    /// false for a member of a solid chain, whose content change would break
+    /// its own or its successor's shared window.
+    pub fn member_is_replaceable(&self, id: EntryId) -> RarResult<bool> {
+        let idx = self.resolve_id(id)?;
+        Ok(self.archive.member_replaceable_at(idx))
+    }
+
+    /// Whether this archive uses the RAR5 container — the only family that
+    /// supports in-place member replacement ([`EditPlan::replace`]).
+    pub fn is_rar5(&self) -> bool {
+        !self.archive.is_rar4() && !self.archive.is_rar13()
+    }
 }
 
 /// One structural edit in an [`EditPlan`].
@@ -114,6 +128,11 @@ pub enum EditOp {
     /// `-ver`): its RAR5 header gets a VERSION extra record with this number.
     /// RAR 1.5–4.x has no such record and rejects the op.
     SetFileVersion(EntryId, u64),
+    /// Replace the member's content in place (`Vec<u8>` plaintext, mtime
+    /// seconds, mtime nanoseconds), like WinRAR's `u`/`f`: the member keeps
+    /// its slot and name and its header is rebuilt with the new size and
+    /// CRC. RAR5 only, single-volume, and never a member of a solid chain.
+    Replace(EntryId, Vec<u8>, u32, u64),
     /// Replace the archive comment (like `rar c`); empty bytes remove the
     /// existing comment. Only valid on single-volume archives.
     SetComment(Vec<u8>),
@@ -173,6 +192,17 @@ impl EditPlan {
     #[must_use]
     pub fn set_file_version(mut self, id: EntryId, version: u64) -> Self {
         self.ops.push(EditOp::SetFileVersion(id, version));
+        self
+    }
+
+    /// Queue an in-place content replacement of the member identified by
+    /// `id` (like WinRAR's `u`/`f`): the member keeps its slot and name, its
+    /// header is rebuilt from the new `data`, the `mtime`/`mtime_ns` stamp,
+    /// and a fresh CRC. RAR5 single-volume only; the member must not be part
+    /// of a solid chain (see [`ArchiveEditor::member_is_replaceable`]).
+    #[must_use]
+    pub fn replace(mut self, id: EntryId, data: Vec<u8>, mtime: u32, mtime_ns: u64) -> Self {
+        self.ops.push(EditOp::Replace(id, data, mtime, mtime_ns));
         self
     }
 
@@ -285,6 +315,8 @@ impl ArchiveEditor {
         let mut versions = Vec::with_capacity(plan.ops.len());
         let mut comment: Option<Vec<u8>> = None;
         let mut force_rr: Option<u8> = None;
+        let mut replacements: std::collections::HashMap<usize, super::transaction::Replacement> =
+            std::collections::HashMap::new();
         for op in &plan.ops {
             match op {
                 EditOp::Delete(id) => deletes.push(self.resolve_id(*id)?),
@@ -293,6 +325,17 @@ impl ArchiveEditor {
                 }
                 EditOp::SetFileVersion(id, version) => {
                     versions.push((self.resolve_id(*id)?, *version))
+                }
+                EditOp::Replace(id, data, mtime, mtime_ns) => {
+                    let idx = self.resolve_id(*id)?;
+                    replacements.insert(
+                        idx,
+                        super::transaction::Replacement {
+                            data: data.clone(),
+                            mtime: *mtime,
+                            mtime_ns: *mtime_ns,
+                        },
+                    );
                 }
                 EditOp::SetComment(bytes) => {
                     if comment.is_some() {
@@ -334,9 +377,14 @@ impl ArchiveEditor {
                 }
             }
         }
-        let summary =
-            self.archive
-                .edit_plan(&deletes, &renames, &versions, force_rr, comment.as_deref())?;
+        let summary = self.archive.edit_plan(
+            &deletes,
+            &renames,
+            &versions,
+            &replacements,
+            force_rr,
+            comment.as_deref(),
+        )?;
         self.archive.reset_catalog_token()?;
         Ok(EditReport {
             deleted: summary.deleted,
@@ -370,6 +418,11 @@ impl ArchiveEditor {
                     // versions in the member name there.
                     return Err(RarError::unsupported(
                         "file versions are only supported for RAR5 archives; RAR 1.5-4.x keeps ;N in the name",
+                    ));
+                }
+                EditOp::Replace(_, _, _, _) => {
+                    return Err(RarError::unsupported(
+                        "in-place member replacement is only supported for RAR5 archives",
                     ));
                 }
                 EditOp::SetComment(bytes) => {

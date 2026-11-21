@@ -13,6 +13,13 @@ use crate::format::rar5::{
 };
 use crate::model::{DataChunk, FileHeader};
 
+/// Whether member times are carried by a FILE_TIME extra record (WinRAR's
+/// Windows form) rather than the 4-byte Unix mtime field. The in-place
+/// replacement asks this so a rebuilt header keeps its mtime visible.
+pub(crate) fn time_uses_windows_record() -> bool {
+    crate::platform::file_time_is_windows()
+}
+
 /// Which half of a split chunk the per-chunk source closure is asked for.
 /// The loop invokes it once in [SplitPhase::Crc] (before the block header is
 /// emitted) and again in [SplitPhase::Write] (after it), so a phase-returning

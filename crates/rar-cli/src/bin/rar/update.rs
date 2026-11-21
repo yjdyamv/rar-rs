@@ -205,8 +205,68 @@ fn cmd_update_freshen(
     } else {
         Vec::new()
     };
+    let volume_set = rar_rs::discover_volumes(archive_path).len() > 1;
     let apply = |staged_path: &std::path::Path| -> CliResult<()> {
-        if !to_delete.is_empty() {
+        // Refresh members in place when possible: WinRAR keeps a refreshed
+        // member in its own slot, while delete + append moves it to the end.
+        // Fall back to delete + append whenever an in-place replace is not
+        // possible (solid chain, multi-volume, link/identical redirects,
+        // version control, a directory member or a duplicate name).
+        let mut replaced_in_place = false;
+        if !to_delete.is_empty()
+            && !volume_set
+            && misc.version_control.is_none()
+            && redirects.is_empty()
+        {
+            let mut editor = open_editor(staged_path, password.as_deref())
+                .map_err(|error| error.context("open staged archive"))?;
+            let mut plan = rar_rs::EditPlan::new();
+            let mut usable = editor.is_rar5();
+            if usable {
+                for name in &to_delete {
+                    let Ok(id) = editor.unique_entry(name) else {
+                        usable = false;
+                        break;
+                    };
+                    if !editor.member_is_replaceable(id).unwrap_or(false) {
+                        usable = false;
+                        break;
+                    }
+                    let Some(item) = to_add.iter().find(|item| &item.name == name) else {
+                        usable = false;
+                        break;
+                    };
+                    if item.is_dir {
+                        usable = false;
+                        break;
+                    }
+                    let data = std::fs::read(&item.path).map_err(|error| {
+                        CliError::from(error)
+                            .context(format!("read source {}", item.path.display()))
+                    })?;
+                    let modified = std::fs::metadata(&item.path)
+                        .and_then(|metadata| metadata.modified())
+                        .map_err(|error| CliError::from(error).context("read source metadata"))?;
+                    let since = modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let secs = u32::try_from(since.as_secs()).unwrap_or(u32::MAX);
+                    let ns = if ts.precision_seconds {
+                        0
+                    } else {
+                        u64::from(since.subsec_nanos())
+                    };
+                    plan = plan.replace(id, data, secs, ns);
+                }
+            }
+            if usable && !plan.is_empty() {
+                editor
+                    .apply(plan)
+                    .map_err(|error| CliError::from(error).context("replace staged members"))?;
+                replaced_in_place = true;
+            }
+        }
+        if !replaced_in_place && !to_delete.is_empty() {
             if let Some(version_spec) = &misc.version_control {
                 // Version control chains renames inside one call with
                 // map-aware resolution (a.txt -> a.txt;1 -> a.txt;2), then
@@ -235,77 +295,92 @@ fn cmd_update_freshen(
             }
         }
 
-        let mut staged = if staged_path.exists() {
-            let mut append_opts = rar_rs::AppendOptions::new();
-            if let Some(value) = password {
-                append_opts = append_opts.password(value.clone());
-            }
-            if let Some(size) = dictionary {
-                append_opts = append_opts.dictionary_size(size);
-            }
-            crate::ops::append_writer(staged_path, append_opts)
-                .map_err(|error| CliError::from(error).context("open staged archive for append"))?
+        // Append the brand-new members (and any redirects). When members were
+        // replaced in place, the refreshed ones are already in their slots, so
+        // only the genuinely new members are appended here.
+        let write_items: Vec<&_> = if replaced_in_place {
+            to_add
+                .iter()
+                .filter(|item| !to_delete.contains(&item.name))
+                .collect()
         } else {
-            let mut writer_opts = rar_rs::WriterOptions::new()
-                .compression(version)
-                .save_ctime(ts.save_ctime)
-                .save_atime(ts.save_atime)
-                .save_mtime(ts.save_mtime)
-                .save_owner(misc.owner)
-                .save_streams(misc.save_streams)
-                .filters(match args.mc_params.as_deref() {
-                    Some(spec) => crate::args::parse_mc_params(spec),
-                    None => Default::default(),
-                })
-                .time_precision_seconds(ts.precision_seconds);
-            if let Some(value) = password {
-                writer_opts = writer_opts.password(value.clone());
-            }
-            if let Some(size) = dictionary {
-                writer_opts = writer_opts.dictionary_size(size);
-            }
-            crate::ops::create_writer(staged_path, writer_opts)
-                .map_err(|error| CliError::from(error).context("recreate staged archive"))?
+            to_add.iter().collect()
         };
-        let mut write_entries: Vec<rar_rs::WriteEntry<'_>> = Vec::with_capacity(to_add.len());
-        for item in &to_add {
-            let options = rar_rs::EntryWriteOptions::new().compression_level(
-                rar_rs::CompressionLevel::try_from(item.level)
-                    .map_err(|error| CliError::from(error).context("level"))?,
-            );
-            if item.is_dir {
-                write_entries.push(rar_rs::WriteEntry::Directory {
-                    path: &item.path,
-                    name: Some(&item.name),
-                });
+        if !write_items.is_empty() || !redirects.is_empty() {
+            let mut staged = if staged_path.exists() {
+                let mut append_opts = rar_rs::AppendOptions::new();
+                if let Some(value) = password {
+                    append_opts = append_opts.password(value.clone());
+                }
+                if let Some(size) = dictionary {
+                    append_opts = append_opts.dictionary_size(size);
+                }
+                crate::ops::append_writer(staged_path, append_opts).map_err(|error| {
+                    CliError::from(error).context("open staged archive for append")
+                })?
             } else {
-                write_entries.push(rar_rs::WriteEntry::File {
-                    path: &item.path,
-                    name: Some(&item.name),
-                    options,
-                });
+                let mut writer_opts = rar_rs::WriterOptions::new()
+                    .compression(version)
+                    .save_ctime(ts.save_ctime)
+                    .save_atime(ts.save_atime)
+                    .save_mtime(ts.save_mtime)
+                    .save_owner(misc.owner)
+                    .save_streams(misc.save_streams)
+                    .filters(match args.mc_params.as_deref() {
+                        Some(spec) => crate::args::parse_mc_params(spec),
+                        None => Default::default(),
+                    })
+                    .time_precision_seconds(ts.precision_seconds);
+                if let Some(value) = password {
+                    writer_opts = writer_opts.password(value.clone());
+                }
+                if let Some(size) = dictionary {
+                    writer_opts = writer_opts.dictionary_size(size);
+                }
+                crate::ops::create_writer(staged_path, writer_opts)
+                    .map_err(|error| CliError::from(error).context("recreate staged archive"))?
+            };
+            let mut write_entries: Vec<rar_rs::WriteEntry<'_>> =
+                Vec::with_capacity(write_items.len());
+            for item in write_items {
+                let options = rar_rs::EntryWriteOptions::new().compression_level(
+                    rar_rs::CompressionLevel::try_from(item.level)
+                        .map_err(|error| CliError::from(error).context("level"))?,
+                );
+                if item.is_dir {
+                    write_entries.push(rar_rs::WriteEntry::Directory {
+                        path: &item.path,
+                        name: Some(&item.name),
+                    });
+                } else {
+                    write_entries.push(rar_rs::WriteEntry::File {
+                        path: &item.path,
+                        name: Some(&item.name),
+                        options,
+                    });
+                }
             }
-        }
-        staged
-            .add_batch(&write_entries)
-            .map_err(|error| CliError::from(error).context("append staged members"))?;
-        for redirect in &redirects {
             staged
-                .add_redirect_with_time_and_size(
-                    &redirect.name,
-                    redirect.redir_type,
-                    &redirect.target,
-                    redirect.size,
-                    redirect.mtime,
-                    (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
-                )
-                .map_err(|error| {
-                    CliError::from(error).context(format!("link {}", redirect.name))
-                })?;
+                .add_batch(&write_entries)
+                .map_err(|error| CliError::from(error).context("append staged members"))?;
+            for redirect in &redirects {
+                staged
+                    .add_redirect_with_time_and_size(
+                        &redirect.name,
+                        redirect.redir_type,
+                        &redirect.target,
+                        redirect.size,
+                        redirect.mtime,
+                        (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
+                    )
+                    .map_err(|error| {
+                        CliError::from(error).context(format!("link {}", redirect.name))
+                    })?;
+            }
+            staged
+                .finish()
+                .map_err(|error| CliError::from(error).context("close staged archive"))?;
         }
-        staged
-            .finish()
-            .map_err(|error| CliError::from(error).context("close staged archive"))?;
 
         if let Some(modified) = tk_date.or(original_mtime) {
             std::fs::File::options()
@@ -316,7 +391,6 @@ fn cmd_update_freshen(
         }
         Ok(())
     };
-    let volume_set = rar_rs::discover_volumes(archive_path).len() > 1;
     if volume_set {
         update_volume_set_transactionally(archive_path, apply)?;
     } else {

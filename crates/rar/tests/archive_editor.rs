@@ -1589,3 +1589,71 @@ fn rar4_solid_legacy_members_repack_on_delete_and_append() {
         assert_eq!(reader.read_entry(id).unwrap(), p2, "{version:?}");
     }
 }
+
+/// `EditPlan::replace` rewrites a member's content **in place**: the member
+/// keeps its slot and name, its header is rebuilt with the new bytes, CRC and
+/// mtime, and every other member's block is copied verbatim.
+#[test]
+fn editor_replaces_a_member_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replace.rar");
+    let mut writer = ArchiveWriter::create(&path).unwrap();
+    writer.add_bytes("a.txt", b"aaaa", stored()).unwrap();
+    writer.add_bytes("b.txt", b"bbbb", stored()).unwrap();
+    writer.add_bytes("c.txt", b"cccc", stored()).unwrap();
+    writer.finish().unwrap();
+    let before = names(&path);
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let id = editor.unique_entry("b.txt").unwrap();
+    assert!(editor.member_is_replaceable(id).unwrap());
+    editor
+        .apply(EditPlan::new().replace(id, b"BBBBBBBB".to_vec(), 1_700_000_000, 0))
+        .unwrap();
+    drop(editor);
+
+    assert_eq!(names(&path), before, "a replaced member keeps its slot");
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let a = reader.unique_entry("a.txt").unwrap();
+    assert_eq!(reader.read_entry(a).unwrap(), b"aaaa");
+    let b = reader.unique_entry("b.txt").unwrap();
+    assert_eq!(reader.read_entry(b).unwrap(), b"BBBBBBBB");
+    let c = reader.unique_entry("c.txt").unwrap();
+    assert_eq!(reader.read_entry(c).unwrap(), b"cccc");
+    let mtime = reader
+        .entries()
+        .find(|entry| entry.name() == "b.txt")
+        .unwrap()
+        .mtime();
+    assert_eq!(mtime, 1_700_000_000, "the new mtime is stamped");
+}
+
+/// A solid member cannot be replaced in place: the content change would break
+/// its own or its successor's shared window, so the op is refused.
+#[test]
+fn editor_refuses_to_replace_a_solid_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("solid.rar");
+    {
+        let mut archive = ArchiveWriter::create_with(
+            &path,
+            WriterOptions::new().solid_mode(SolidMode::Continuous),
+        )
+        .unwrap();
+        archive
+            .add_bytes("m0.bin", &vec![b'a'; 48 * 1024], level(1))
+            .unwrap();
+        archive
+            .add_bytes("m1.bin", &vec![b'b'; 48 * 1024], level(1))
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    let mut editor = ArchiveEditor::open(&path).unwrap();
+    let id = editor.unique_entry("m1.bin").unwrap();
+    assert!(!editor.member_is_replaceable(id).unwrap());
+    let error = editor
+        .apply(EditPlan::new().replace(id, b"BBBB".to_vec(), 1, 0))
+        .unwrap_err();
+    assert!(matches!(error, RarError::Unsupported(_)), "{error}");
+}

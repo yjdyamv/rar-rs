@@ -15,11 +15,20 @@ use crate::format::rar5::headers::{
 use crate::format::rar5::{ARCHIVE_FLAG_LOCKED, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_SERVICE_HEADER};
 
 impl RarArchive {
+    /// Whether member `idx` can be replaced in place: false for a member of a
+    /// solid chain, whose content change would break its own or its
+    /// successor's shared window. Sits here (not in the editor facade) so the
+    /// facade need not reach into the format layer.
+    pub(crate) fn member_replaceable_at(&self, idx: usize) -> bool {
+        !crate::format::rar5::extract::solid::is_solid_chain_member(self, idx)
+    }
+
     pub(crate) fn edit_plan(
         &mut self,
         delete_indexes: &[usize],
         renames: &[(usize, String)],
         versions: &[(usize, u64)],
+        replacements: &std::collections::HashMap<usize, Replacement>,
         force_rr: Option<u8>,
         comment: Option<&[u8]>,
     ) -> RarResult<EditSummary> {
@@ -45,7 +54,11 @@ impl RarArchive {
             ));
         }
         self.ensure_write_ctx();
-        if (!renames.is_empty() || !versions.is_empty() || force_rr.is_some() || comment.is_some())
+        if (!renames.is_empty()
+            || !versions.is_empty()
+            || !replacements.is_empty()
+            || force_rr.is_some()
+            || comment.is_some())
             && self.main_header_is_locked()?
         {
             return Err(RarError::ArchiveLocked);
@@ -88,8 +101,31 @@ impl RarArchive {
         }
 
         let (map, renamed_count) = super::super::rename::build_rename_map(&self.entries, renames)?;
+        // In-place replacements: the member keeps its slot and name, so it
+        // must not also be deleted, and its content change must not break a
+        // neighbouring solid window (its own or its successor's).
+        for &idx in replacements.keys() {
+            if idx >= self.entries.len() {
+                return Err(RarError::StaleEntryId);
+            }
+            if deleted[idx] {
+                return Err(RarError::invalid_option(
+                    "cannot replace a member that the same edit deletes",
+                ));
+            }
+            if crate::format::rar5::extract::solid::is_solid_chain_member(&*self, idx) {
+                return Err(RarError::unsupported(
+                    "cannot replace a member of a solid chain in place",
+                ));
+            }
+        }
         let renamed_count = renamed_count + version_map.len();
-        if deleted_count == 0 && renamed_count == 0 && force_rr.is_none() && comment.is_none() {
+        if deleted_count == 0
+            && renamed_count == 0
+            && replacements.is_empty()
+            && force_rr.is_none()
+            && comment.is_none()
+        {
             return Err(RarError::format("no members to edit"));
         }
 
@@ -151,7 +187,15 @@ impl RarArchive {
             }
         }
 
-        self.rewrite_edit(deleted, &chains, &map, &version_map, force_rr, comment)?;
+        self.rewrite_edit(
+            deleted,
+            &chains,
+            &map,
+            &version_map,
+            replacements,
+            force_rr,
+            comment,
+        )?;
         Ok(EditSummary {
             deleted: deleted_count,
             renamed: renamed_count,
@@ -240,12 +284,14 @@ impl RarArchive {
     /// rewritten through a sibling file that replaces the original only on
     /// success; multi-volume archives are re-split at their volume size and
     /// their .rev recovery volumes regenerated.
+    #[allow(clippy::too_many_arguments)] // mirrors the edit state machine
     fn rewrite_edit(
         &mut self,
         deleted: Vec<bool>,
         chains: &[(usize, usize)],
         map: &std::collections::HashMap<usize, String>,
         versions: &std::collections::HashMap<usize, u64>,
+        replacements: &std::collections::HashMap<usize, Replacement>,
         force_rr: Option<u8>,
         comment: Option<&[u8]>,
     ) -> RarResult<()> {
@@ -257,6 +303,11 @@ impl RarArchive {
             if version_map.is_some() {
                 return Err(RarError::unsupported(
                     "file versions are not supported on multi-volume sets",
+                ));
+            }
+            if !replacements.is_empty() {
+                return Err(RarError::unsupported(
+                    "in-place member replacement is not supported on multi-volume sets",
                 ));
             }
             // Probe the main header before the multi-volume rewrite. The
@@ -286,6 +337,7 @@ impl RarArchive {
                 force_rr,
                 rename_map,
                 version_map,
+                replacements,
                 comment,
                 &src_path,
                 &tmp_path,
@@ -452,6 +504,7 @@ impl RarArchive {
         force_rr: Option<u8>,
         rename_map: Option<&std::collections::HashMap<usize, String>>,
         version_map: Option<&std::collections::HashMap<usize, u64>>,
+        replacements: &std::collections::HashMap<usize, Replacement>,
         comment: Option<&[u8]>,
         src_path: &Path,
         tmp_path: &Path,
@@ -463,6 +516,7 @@ impl RarArchive {
             force_rr,
             rename_map,
             version_map,
+            replacements,
             comment,
         )?;
         self.execute_rewrite(&plan, src_path, tmp_path)?;
