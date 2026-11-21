@@ -111,6 +111,46 @@ fn cli_repeated_switches_last_wins() {
         .unwrap();
     assert!(status.success(), "rar x -y -y must succeed");
     assert_eq!(std::fs::read(out_dir.join("f.txt")).unwrap(), b"x");
+
+    // Repeated single-value switches do not hard-fail; the last one wins. A
+    // repeated numeric option is accepted...
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-md1m", "-md2m", "-idq"])
+        .arg(dir.path().join("rep-md.rar"))
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rar a -md1m -md2m must succeed");
+
+    // ...and the -o order decides the overwrite policy (the last one wins),
+    // like WinRAR: `-o+ -o-` keeps the existing file, `-o- -o+` replaces it.
+    for (flags, kept_stale) in [(["-o+", "-o-"], true), (["-o-", "-o+"], false)] {
+        let dest = dir
+            .path()
+            .join(if kept_stale { "o-never" } else { "o-always" });
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("f.txt"), b"STALE").unwrap();
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["x"])
+            .args(flags)
+            .arg("-idq")
+            .arg(&solid)
+            .arg(format!("{}\\", dest.display()))
+            .status()
+            .unwrap();
+        let got = std::fs::read(dest.join("f.txt")).unwrap();
+        if kept_stale {
+            // The last -o is `-o-` (never): the existing file is kept and the
+            // run reports "no files" (10), exactly like `Rar x -o-`.
+            assert_eq!(got, b"STALE", "{flags:?}: the last -o (never) must win");
+            assert_eq!(status.code(), Some(10), "{flags:?}: a full skip exits 10");
+        } else {
+            // The last -o is `-o+` (always): the existing file is replaced.
+            assert_eq!(got, b"x", "{flags:?}: the last -o (always) must win");
+            assert!(status.success(), "{flags:?}: an overwrite succeeds");
+        }
+    }
 }
 
 /// `--no-config` disables the configuration sources exactly like `-cfg-`,

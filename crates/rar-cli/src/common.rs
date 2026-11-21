@@ -67,17 +67,31 @@ pub fn merge_default_switches(
 /// wins over `rar.ini`, matching WinRAR's source priority. Repeatable
 /// switches and stray values keep their order.
 fn dedupe_defaults(defaults: Vec<String>, value_options: &HashSet<String>) -> Vec<String> {
+    let keep: HashSet<String> = REPEATABLE_LONG.iter().map(|s| (*s).to_string()).collect();
+    dedupe_last_wins(defaults, value_options, &keep)
+}
+
+/// Collapse repeated single-value switches to their **last** occurrence,
+/// WinRAR's "the last switch wins" rule: `-o+ -o-` overwrites never, `-md1m
+/// -md2m` uses 2m. Repeatable options (`keep`, by name without the `--`) and
+/// stray values keep their order. A split value (`--dest a --dest b`) drops
+/// with its switch, so it never strands as a positional.
+fn dedupe_last_wins(
+    list: Vec<String>,
+    value_options: &HashSet<String>,
+    keep: &HashSet<String>,
+) -> Vec<String> {
     let mut spans: HashMap<String, (usize, usize)> = HashMap::new();
-    let mut drop = vec![false; defaults.len()];
+    let mut drop = vec![false; list.len()];
     let mut index = 0;
-    while index < defaults.len() {
-        let arg = &defaults[index];
+    while index < list.len() {
+        let arg = &list[index];
         let mut end = index + 1;
         if let Some(key) = long_key(arg)
-            && !REPEATABLE_LONG.contains(&key.as_str())
+            && !keep.contains(&key)
         {
             if !arg.contains('=') && value_options.contains(&format!("--{key}")) {
-                end = (index + 2).min(defaults.len());
+                end = (index + 2).min(list.len());
             }
             if let Some((start, stop)) = spans.insert(key, (index, end)) {
                 for slot in &mut drop[start..stop] {
@@ -87,8 +101,7 @@ fn dedupe_defaults(defaults: Vec<String>, value_options: &HashSet<String>) -> Ve
         }
         index = end;
     }
-    defaults
-        .into_iter()
+    list.into_iter()
         .enumerate()
         .filter_map(|(index, arg)| (!drop[index]).then_some(arg))
         .collect()
@@ -158,6 +171,30 @@ pub fn value_options(cmd: &clap::Command) -> HashSet<String> {
     out
 }
 
+/// Option names that may legitimately repeat: repeatable `Vec`-backed
+/// arguments (clap `Append`/`Count`) plus [`REPEATABLE_LONG`]. Everything else
+/// is collapsed to its last occurrence by [`dedupe_last_wins`], WinRAR's "the
+/// last switch wins". Names are without the leading `--`.
+pub fn repeatable_names(cmd: &clap::Command) -> HashSet<String> {
+    fn walk(cmd: &clap::Command, out: &mut HashSet<String>) {
+        for arg in cmd.get_arguments() {
+            if matches!(
+                arg.get_action(),
+                clap::ArgAction::Append | clap::ArgAction::Count
+            ) && let Some(long) = arg.get_long()
+            {
+                out.insert(long.to_string());
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            walk(sub, out);
+        }
+    }
+    let mut out: HashSet<String> = REPEATABLE_LONG.iter().map(|s| (*s).to_string()).collect();
+    walk(cmd, &mut out);
+    out
+}
+
 /// Every subcommand name and alias of `cmd`, used to decide whether a
 /// token can be a command when reordering switches that precede it.
 pub fn subcommand_names(cmd: &clap::Command) -> HashSet<String> {
@@ -210,7 +247,10 @@ pub fn command_name(args: &[String], value_options: &HashSet<String>) -> Option<
 /// are left untouched: their remaining arguments are not parsed as
 /// switches.
 pub fn switches_after_command(args: Vec<String>, cmd: &clap::Command) -> Vec<String> {
-    drop_undeclared(reorder_switches(args, cmd), cmd)
+    let value_options = value_options(cmd);
+    let keep = repeatable_names(cmd);
+    let args = drop_undeclared(reorder_switches(args, cmd), cmd);
+    dedupe_last_wins(args, &value_options, &keep)
 }
 
 /// The reordering half of [`switches_after_command`].
