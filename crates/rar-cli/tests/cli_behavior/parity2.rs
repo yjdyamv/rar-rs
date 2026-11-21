@@ -1116,3 +1116,66 @@ fn cli_extracts_a_junction_as_a_real_mount_point() {
         "the extracted junction must resolve to the archived target"
     );
 }
+
+/// Set a file's modification time to an absolute Unix second, so two runs
+/// produce byte-identical headers.
+fn set_absolute_mtime(path: &std::path::Path, secs: u64) {
+    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(time))
+        .unwrap();
+}
+
+/// `rar m` creating an archive produces the same bytes as `rar a` (and so as
+/// official WinRAR): quick-open is on and the main header's locator offset
+/// fields use the input-total width, not the 5-byte default.
+#[test]
+fn cli_move_created_archive_matches_add() {
+    let dir = make_temp_dir();
+    let a_dir = dir.path().join("a");
+    let m_dir = dir.path().join("m");
+    std::fs::create_dir_all(&a_dir).unwrap();
+    std::fs::create_dir_all(&m_dir).unwrap();
+    let members: [(&str, &[u8]); 2] = [
+        ("f.txt", b"hello world payload"),
+        ("g.bin", b"GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"),
+    ];
+    for (name, body) in members {
+        std::fs::write(a_dir.join(name), body).unwrap();
+        std::fs::write(m_dir.join(name), body).unwrap();
+        set_absolute_mtime(&a_dir.join(name), 1_600_000_000);
+        set_absolute_mtime(&m_dir.join(name), 1_600_000_000);
+    }
+
+    let a_archive = a_dir.join("out.rar");
+    assert!(
+        std::process::Command::new(RAR_CLI)
+            .args(["a", "-m0", "-idq"])
+            .arg(&a_archive)
+            .args(["f.txt", "g.bin"])
+            .current_dir(&a_dir)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let m_archive = m_dir.join("out.rar");
+    assert!(
+        std::process::Command::new(RAR_CLI)
+            .args(["m", "-m0", "-idq"])
+            .arg(&m_archive)
+            .args(["f.txt", "g.bin"])
+            .current_dir(&m_dir)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    assert_eq!(
+        std::fs::read(&a_archive).unwrap(),
+        std::fs::read(&m_archive).unwrap(),
+        "`m` must create the same archive as `a`"
+    );
+}

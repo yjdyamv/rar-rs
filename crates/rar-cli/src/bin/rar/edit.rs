@@ -334,6 +334,9 @@ pub(crate) fn cmd_move(
         let mut writer_opts = rar_rs::WriterOptions::new()
             .compression(version)
             .solid_mode(solid_mode)
+            // `a` defaults quick-open to automatic and reserves the main
+            // header's locator; `m` creates the same archive shape.
+            .quick_open_automatic(true)
             .save_ctime(ts.save_ctime)
             .save_atime(ts.save_atime)
             .save_mtime(ts.save_mtime)
@@ -349,6 +352,16 @@ pub(crate) fn cmd_move(
         }
         if let Some(size) = dictionary {
             writer_opts = writer_opts.dictionary_size(size);
+        }
+        // WinRAR sizes the main header's locator offset fields from the input
+        // total (the packed size only shrinks it; see `create.rs`). The same
+        // rule applies when `m` has to create the archive.
+        let input_total: u64 = files
+            .iter()
+            .map(|file| source_size(std::path::Path::new(file)))
+            .sum();
+        if input_total > 0 && !version.is_legacy() && !version.is_rar13() {
+            writer_opts = writer_opts.estimated_size(input_total);
         }
         crate::ops::create_writer(archive_path, writer_opts)
             .map_err(|e| CliError::from(e).context("create"))?
@@ -384,6 +397,24 @@ pub(crate) fn cmd_move(
     }
     info!("Moved {moved} file(s) to {archive_path}");
     Ok(())
+}
+
+/// Total size of `path` — the file's length, or the recursive sum of its
+/// descendants for a directory. Feeds the locator-width estimate when `m`
+/// creates the archive (WinRAR bases that width on the input total).
+fn source_size(path: &std::path::Path) -> u64 {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => meta.len(),
+        Ok(meta) if meta.is_dir() => std::fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| source_size(&entry.path()))
+                    .sum()
+            })
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 /// Remove every file under `dir` (recursively) but leave the directory tree

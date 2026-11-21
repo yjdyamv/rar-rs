@@ -578,11 +578,14 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 - **`-ts` 的「字母+数字」组合**、**`-rr<N>%` 取整**、**`rar rr` 恒 3%**、
   **`rar r` 不写 `fixed.<name>`**、**无控制台时的覆盖询问**：口径与理由见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
-- **RAR5 元数据仍差一处**（字节外观，双向读写一致）：不传
-  `WriterOptions::estimated_size` 时主头 locator 偏移字段取最小宽度 3，官方按
-  **输入总大小**分档（3/4/5/6）。CLI 会把文件大小求和后传进去（压缩只会变小，
-  输入总量是安全上界），所以命令行建出来的归档已逐字节一致；只有库调用者不传
-  这个估算值时才看得到差异。
+- **RAR5 主头 locator 偏移宽度（CLI 已全路径一致）**：不传
+  `WriterOptions::estimated_size` 时主头 locator 偏移字段取**默认 5 字节**
+  （`DEFAULT_OFFSET_WIDTH`，不是「最小 3」），官方按**输入总大小**分档（3/4/5/6）。
+  CLI 的 `a` **和 `m`** 都把输入文件大小求和后传进去（压缩只会变小，输入总量是安全
+  上界；`m` 同时按 `a` 默认开 quick-open），所以**所有 CLI 建档路径**都逐字节一致
+  （实测 ours `a`/`m` 与 6.23/7.23 的 `a`/`m` sha256 相同）。只有**库调用者不传**
+  `estimated_size` 时才看得到差异——且库**无法自行推导**：主头在成员之前写入，
+  写头时还不知道总量。
 - **Windows 联接点的 redirect 目标字符串**：见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 - **`u`/`f` 的成员顺序（已对齐，含 solid）**：`rar u`/`f` 对**单卷 RAR5** 档**就地替换**被刷新的成员（保持原位、内容/CRC/mtime 更新），与官方 6.23/7.23 一致——**含 solid 档**：被替换成员所在的 solid 链会被**就地重压**（先解码旧内容推进共享**解码**窗口，再用新内容推进共享**编码**窗口，后继成员仍正确解码）。回归测试：`cli_update_keeps_refreshed_member_in_place`、`cli_update_solid_refresh_keeps_member_in_place`、库 `editor_replaces_a_member_in_place`、`editor_replaces_a_solid_member_in_place`。实现：`EditPlan::replace` / `RewriteOp::Replace` + `SolidChainState::replace_solid_member`。新增成员仍**追加到既有成员之后**（目录条目最后）。**仍回退「删旧+追加」**（被刷新成员落到档尾）：多卷、`-ol`/`-oh`/`-oi` 链接重定向、`-ver` 版本控制、目录成员、重名成员——`t` 通过、数据无损。
