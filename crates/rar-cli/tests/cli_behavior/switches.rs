@@ -2195,6 +2195,38 @@ fn cli_non_empty_directory_is_a_create_error() {
     );
 }
 
+/// A header-encrypted archive opened with no password exits 12 (password
+/// required) in 7.23, while a wrong password stays 11.
+#[test]
+fn cli_missing_password_exits_12_like_winrar() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"body").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-hpsecret", "-idq", "hp.rar", "f.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["t", "-idq", "hp.rar"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(12),
+        "a missing password must exit 12 like Rar.exe"
+    );
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["t", "-pwrong", "-idq", "hp.rar"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(11), "a wrong password must exit 11");
+}
+
 /// Library error categories survive the CLI's error seam: a wrong password and
 /// a locked archive keep exit 11 / 4 on every command, not only the ones whose
 /// path already used the typed conversion.

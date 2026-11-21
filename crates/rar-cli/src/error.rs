@@ -29,6 +29,9 @@ pub const EXIT_MEMORY: i32 = 8;
 pub const EXIT_CREATE: i32 = 9;
 pub const EXIT_NO_FILES: i32 = 10;
 pub const EXIT_WRONG_PASSWORD: i32 = 11;
+/// A password is required but none was supplied (WinRAR 7.23 exits 12 here,
+/// distinct from the wrong-password code 11).
+pub const EXIT_PASSWORD_REQUIRED: i32 = 12;
 pub const EXIT_DELETE: i32 = 14;
 pub const EXIT_TIMEOUT: i32 = 15;
 pub const EXIT_USER_BREAK: i32 = 255;
@@ -123,7 +126,10 @@ impl From<RarError> for CliError {
 /// Map a library error category onto the WinRAR-compatible exit code.
 pub fn exit_code_for(code: ErrorCode) -> i32 {
     match code {
-        ErrorCode::WrongPassword | ErrorCode::Encrypted => EXIT_WRONG_PASSWORD,
+        ErrorCode::WrongPassword => EXIT_WRONG_PASSWORD,
+        // An encrypted archive opened with no `-p` (no interactive prompt to
+        // answer): WinRAR 7.23 exits 12, not 11.
+        ErrorCode::Encrypted => EXIT_PASSWORD_REQUIRED,
         ErrorCode::CrcMismatch | ErrorCode::HashMismatch => EXIT_CRC,
         ErrorCode::ArchiveLocked => EXIT_LOCKED,
         ErrorCode::Cancelled => EXIT_USER_BREAK,
