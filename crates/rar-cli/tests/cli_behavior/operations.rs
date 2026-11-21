@@ -246,6 +246,31 @@ fn cli_exclude_prefix_ep4_strips_prefix() {
     );
     let dir_id = rar.unique_entry("dir/f.txt").unwrap();
     assert_eq!(rar.read_entry(dir_id).unwrap(), b"data");
+    drop(rar);
+
+    // A member whose name is exactly the excluded prefix keeps its own entry
+    // (the `sub` directory, or a file named `sub`) instead of being cleared
+    // and dropped -- matching WinRAR.
+    let dir_archive = dir.path().join("ep4-dir.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ep4sub", "-idq"])
+        .arg(&dir_archive)
+        .arg("sub")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rar = rar_rs::ArchiveReader::open(&dir_archive).unwrap();
+    let names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
+    assert!(
+        names.iter().any(|name| name == "sub"),
+        "the prefix directory entry must be kept: {names:?}"
+    );
+    assert!(names.iter().any(|name| name == "dir/f.txt"), "{names:?}");
+    assert!(
+        !names.iter().any(|name| name.starts_with("sub/")),
+        "the path prefix must still be stripped from members: {names:?}"
+    );
 }
 
 /// `-as` synchronizes an existing archive: members not in the file list

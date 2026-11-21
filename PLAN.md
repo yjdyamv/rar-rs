@@ -587,7 +587,6 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
 - **`u`/`f`/`m` 的成员顺序**：这三个命令以「删除旧成员 + 追加新成员」实现替换，被刷新的成员因此落到**归档末尾**（官方**就地保留**原位），新成员也落在既有**目录条目之后**（官方始终**目录条目最后**）。`update.rs` 只对追加块排序，达不到它注释里写的意图；`-m0`/`-ds`/默认档都一样。数据无损、`t` 通过，回归测试 `cli_update_member_order_and_noop_exit_are_recorded_divergences` 钉住现状。
 - **`u`/`f` 无事可做时的退出码**：源比归档旧、或 `f` 遇到不在档的文件时我们退 0，官方退 10（`No files`）。
-- **`-ep4<dir>`**：官方保留被剥前缀的**目录条目**，我们丢弃（`-ep4sub` → 我们只剩 `s.txt`，官方 `s.txt` + `sub`）。
 - **`p`/`-so` 的残余差异**：成员选择器我们更宽松——`p sub/c.txt`（正斜杠）能命中官方需反斜杠的归档名（官方退 10，我们命中）；`-so` 是 `rar`/`unrar` 都有的便利开关，官方只有 `UnRAR` 认（`Rar.exe x -so` 报 `Unknown option: so`，退 7）；头加密归档缺口令时我们退 11、官方退 12。均属放宽/退出码分类，互操作无碍。（`p` 接受**多个**成员名并按归档序打印已与官方对齐，见 `cli_print_takes_multiple_members_in_archive_order`。）
 - **`-oh` 硬链接 redirect 的声明大小**：把硬链接存为 redirect 时，官方把该成员的平铺大小写为**目标文件大小**（`lt` 显示 `Size: 19`），我们写 0（`Packed size`/CRC 两边都是 0，类型与目标一致）。解压出的硬链接在两边都正确共享 inode（`fsutil hardlink list` 均两条），仅 `l`/`lt` 显示的大小不同。`-ol` 的符号链接（固定 mtime + 相对目标）元数据与官方逐字段一致。
 - **SFX 产物扩展名**：`rar s` 我们写 `<base>.sfx`（仓库测试 `base.sfx must be created` 钉住），官方写 `<base>.exe`。两者都能被双方 `rar`/`UnRAR`/`Rar` 的 `t` 读取、`s-` 都能剥离回 `<base>.rar`，仅扩展名不同（官方命名在 Windows 上可直接双击运行）。

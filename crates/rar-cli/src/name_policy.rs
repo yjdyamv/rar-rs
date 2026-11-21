@@ -79,10 +79,12 @@ impl NamePolicy {
         if let Some(prefix) = &self.exclude_prefix {
             let prefix = prefix.trim_end_matches('/');
             let with_slash = format!("{prefix}/");
+            // Only a *path* prefix (`sub/...`) is stripped. A member whose name
+            // is exactly the prefix (the `sub` directory entry itself, or a file
+            // named `sub`) is kept unchanged, matching WinRAR -- clearing it
+            // dropped the directory entry from the archive.
             if name.starts_with(&with_slash) {
                 name = name[with_slash.len()..].to_string();
-            } else if name == prefix {
-                name.clear();
             }
         }
         if let Some(kind) = self.case {
