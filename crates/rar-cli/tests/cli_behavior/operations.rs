@@ -389,13 +389,16 @@ fn cli_or_auto_renames_colliding_destinations() {
     );
 }
 
-/// `rar s` converts an archive to SFX (prepending an SFX module found in
-/// the WinRAR installation on Windows) and `rar s-` strips it back; the
-/// .sfx file must still extract byte-identically.
+/// `rar s` converts an archive to SFX (prepending an SFX module) and `rar s-`
+/// strips it back; the resulting `.exe` must still extract byte-identically.
+/// A self-made module keeps the test independent of a WinRAR installation.
 #[test]
 fn cli_sfx_roundtrip_with_module() {
     let dir = make_temp_dir();
     std::fs::write(dir.path().join("f.txt"), b"sfx payload").unwrap();
+    let module = dir.path().join("module.sfx");
+    std::fs::write(&module, b"DUMMY-SFX-STUB-BYTES").unwrap();
+
     let archive = dir.path().join("base.rar");
     let status = std::process::Command::new(RAR_CLI)
         .args(["a", "-idq"])
@@ -407,22 +410,19 @@ fn cli_sfx_roundtrip_with_module() {
     assert!(status.success());
 
     let status = std::process::Command::new(RAR_CLI)
-        .args(["s"])
+        .args(["s", "--sfx-module"])
+        .arg(&module)
         .arg("base.rar")
         .current_dir(dir.path())
         .status()
         .unwrap();
-    if !status.success() {
-        // No SFX module available (non-Windows without one installed):
-        // the command itself is what we test, so a clean failure is fine.
-        return;
-    }
-    let sfx = dir.path().join("base.sfx");
-    assert!(sfx.exists(), "base.sfx must be created");
+    assert!(status.success(), "s must convert the archive to SFX");
+    let sfx = dir.path().join("base.exe");
+    assert!(sfx.exists(), "base.exe must be created");
     let sfx_len = std::fs::metadata(&sfx).unwrap().len();
     assert!(sfx_len > std::fs::metadata(&archive).unwrap().len());
 
-    // The .sfx file extracts byte-identically (our extractor skips the
+    // The .exe file extracts byte-identically (our extractor skips the
     // module prefix).
     let out = dir.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
@@ -433,13 +433,13 @@ fn cli_sfx_roundtrip_with_module() {
         .arg(&out)
         .status()
         .unwrap();
-    assert!(status.success(), "unrar must extract the .sfx file");
+    assert!(status.success(), "unrar must extract the .exe file");
     assert_eq!(std::fs::read(out.join("f.txt")).unwrap(), b"sfx payload");
 
     // `rar s-` strips the module back to a plain archive.
     let status = std::process::Command::new(RAR_CLI)
         .args(["s-"])
-        .arg("base.sfx")
+        .arg("base.exe")
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -447,6 +447,128 @@ fn cli_sfx_roundtrip_with_module() {
     let mut rar = rar_rs::ArchiveReader::open(dir.path().join("base.rar")).unwrap();
     let f_id = rar.unique_entry("f.txt").unwrap();
     assert_eq!(rar.read_entry(f_id).unwrap(), b"sfx payload");
+}
+
+/// `rar s-` on a file that is not an SFX archive must fail without writing a
+/// bogus `.rar` -- including when the file merely happens to contain the RAR
+/// signature (WinRAR reports "Bad archive" here and leaves no output).
+#[test]
+fn cli_sfx_strip_rejects_non_archive() {
+    let dir = make_temp_dir();
+
+    // (a) an executable with no RAR signature at all
+    std::fs::write(dir.path().join("nosfx.exe"), b"MZ just a program").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s-", "nosfx.exe"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(!status.success(), "s- must fail on a non-SFX executable");
+    assert!(
+        !dir.path().join("nosfx.rar").exists(),
+        "s- must not write a bogus .rar"
+    );
+
+    // (b) an executable that merely contains the 8-byte RAR5 signature
+    let mut fake = vec![0x41u8; 64];
+    fake.extend_from_slice(b"Rar!\x1a\x07\x01\x00");
+    fake.extend_from_slice(&[0x42u8; 64]);
+    std::fs::write(dir.path().join("fake.exe"), &fake).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s-", "fake.exe"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(!status.success(), "s- must reject an incidental signature");
+    assert!(
+        !dir.path().join("fake.rar").exists(),
+        "s- must not slice at a stray signature"
+    );
+}
+
+/// `rar s` must not silently overwrite an existing `<base>.exe` (WinRAR asks
+/// first): a plain `s` refuses and leaves the file, `-y` overwrites it.
+#[test]
+fn cli_sfx_refuses_to_clobber_existing_exe() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"sfx payload").unwrap();
+    let module = dir.path().join("module.sfx");
+    std::fs::write(&module, b"DUMMY-SFX-STUB-BYTES").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(dir.path().join("base.rar"))
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    std::fs::write(dir.path().join("base.exe"), b"EXISTING-PROGRAM").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s", "--sfx-module"])
+        .arg(&module)
+        .arg("base.rar")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(
+        !status.success(),
+        "s must refuse to clobber an existing .exe"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("base.exe")).unwrap(),
+        b"EXISTING-PROGRAM",
+        "the existing .exe must be untouched"
+    );
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s", "-y", "--sfx-module"])
+        .arg(&module)
+        .arg("base.rar")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "s -y must overwrite");
+    assert_ne!(
+        std::fs::read(dir.path().join("base.exe")).unwrap(),
+        b"EXISTING-PROGRAM"
+    );
+}
+
+/// `rar s`/`s-` round-trips a RAR 1.5-4.x archive too: `s-` must find the
+/// 7-byte RAR4 signature, not only RAR5's.
+#[test]
+fn cli_sfx_roundtrip_rar4() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"rar4 sfx").unwrap();
+    let module = dir.path().join("module.sfx");
+    std::fs::write(&module, b"DUMMY-SFX-STUB-BYTES").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-idq"])
+        .arg(dir.path().join("base.rar"))
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s", "--sfx-module"])
+        .arg(&module)
+        .arg("base.rar")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::fs::remove_file(dir.path().join("base.rar")).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s-", "base.exe"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "s- must strip a RAR4 SFX");
+    let mut rar = rar_rs::ArchiveReader::open(dir.path().join("base.rar")).unwrap();
+    let f_id = rar.unique_entry("f.txt").unwrap();
+    assert_eq!(rar.read_entry(f_id).unwrap(), b"rar4 sfx");
 }
 
 /// `unrar x -ep` (and the `--flat` spelling) extracts basenames without the

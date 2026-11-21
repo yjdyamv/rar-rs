@@ -164,7 +164,7 @@ fn run(cli: Cli, command: Option<&str>) -> CliResult<()> {
         Command::RecoveryVolumes(args) => recovery::cmd_recovery_volumes(&args),
         Command::Repair(args) => recovery::cmd_repair(&args),
         Command::RebuildVolumes(args) => recovery::cmd_rebuild_volumes(&args),
-        Command::Sfx(args) => sfx::cmd_sfx(&args),
+        Command::Sfx(args) => sfx::cmd_sfx(&args, cli.yes),
         Command::SfxStrip(args) => sfx::cmd_sfx_strip(&args),
         Command::CommentSet(args) => comment::cmd_comment_set(&args, misc),
         Command::CommentWrite(args) => comment::cmd_comment_write(&args),

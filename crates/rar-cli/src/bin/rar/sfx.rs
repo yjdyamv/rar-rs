@@ -9,19 +9,30 @@ pub(crate) fn cmd_sfx_strip(args: &ArchiveArgs) -> CliResult<()> {
     let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
     let sfx_offset = rar_rs::sfx_offset_of(&input)
         .ok_or_else(|| format!("{archive_path} is not an SFX archive"))?;
-    let base = archive_path
-        .strip_suffix(".sfx")
-        .or_else(|| archive_path.strip_suffix(".SFX"))
+    // A signature is not an archive: a random executable can contain the 8-byte
+    // magic, and slicing there would write a bogus `.rar`. Validate that a real
+    // main header follows before writing (WinRAR reports "Bad archive" here and
+    // leaves no output).
+    let payload = &input[sfx_offset..];
+    if !looks_like_archive(payload) {
+        return Err(format!(
+            "{archive_path} is not an SFX archive (no valid RAR archive after the module)"
+        )
+        .into());
+    }
+    let base = [".exe", ".EXE", ".sfx", ".SFX"]
+        .into_iter()
+        .find_map(|suffix| archive_path.strip_suffix(suffix))
         .map(|b| b.to_string())
         .unwrap_or_else(|| format!("{archive_path}.plain"));
     let out_path = format!("{base}.rar");
-    std::fs::write(&out_path, &input[sfx_offset..]).map_err(|e| format!("write: {e}"))?;
+    std::fs::write(&out_path, payload).map_err(|e| format!("write: {e}"))?;
     info!("Removed SFX module: {out_path}");
     Ok(())
 }
 
 /// Convert an archive to SFX (like `rar s`).
-pub(crate) fn cmd_sfx(args: &SfxArgs) -> CliResult<()> {
+pub(crate) fn cmd_sfx(args: &SfxArgs, assume_yes: bool) -> CliResult<()> {
     let archive_path = &args.archive;
     let input = std::fs::read(archive_path).map_err(|e| format!("read: {e}"))?;
     if input.starts_with(rar_rs::detect::RAR13_SIGNATURE) {
@@ -42,13 +53,52 @@ pub(crate) fn cmd_sfx(args: &SfxArgs) -> CliResult<()> {
         .file_stem()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "archive".to_string());
-    let out_path = format!("{base}.sfx");
+    let out_path = format!("{base}.exe");
+    // Never clobber an existing executable -- and `<base>.exe` is very likely
+    // someone's program -- without `-y`, matching WinRAR's overwrite query.
+    if !assume_yes && std::path::Path::new(&out_path).exists() {
+        return Err(format!("{out_path} already exists (use -y to overwrite)").into());
+    }
     let mut out = Vec::with_capacity(module_bytes.len() + input.len());
     out.extend_from_slice(&module_bytes);
     out.extend_from_slice(&input);
     std::fs::write(&out_path, &out).map_err(|e| format!("write: {e}"))?;
     info!("Created {out_path}");
     Ok(())
+}
+
+/// Whether `payload` begins with a valid RAR main header (not merely the
+/// signature), so `s-` refuses a non-SFX executable that happens to contain
+/// the magic bytes. RAR5 is checked by parsing (and CRC-verifying) the first
+/// block; RAR 1.5-4.x is checked by the main header's type and size field.
+fn looks_like_archive(payload: &[u8]) -> bool {
+    use std::io::{Cursor, Seek, SeekFrom};
+    const RAR5: [u8; 8] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00];
+    const RAR4: [u8; 7] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00];
+    if payload.starts_with(&RAR5) {
+        let mut cursor = Cursor::new(payload);
+        if cursor.seek(SeekFrom::Start(8)).is_err() {
+            return false;
+        }
+        // Block type 1 = main header, 4 = plaintext encryption header (the
+        // first block of a header-encrypted archive). `read_block` checks the
+        // header CRC, so random bytes after the signature are rejected.
+        return matches!(
+            rar_rs::wire::read_block(&mut cursor, None),
+            Ok(Some(block)) if block.block_type == 1 || block.block_type == 4
+        );
+    }
+    if payload.starts_with(&RAR4) {
+        // Main header: HEAD_CRC(2) HEAD_TYPE(1)=0x73 HEAD_FLAGS(2) HEAD_SIZE(2).
+        if payload.len() < 15 || payload[9] != 0x73 {
+            return false;
+        }
+        let head_size = u16::from_le_bytes([payload[12], payload[13]]) as usize;
+        return head_size >= 13 && head_size <= payload.len() - 7;
+    }
+    // RAR 1.3/1.4 (`RE~^`): `s` refuses to create these, but tolerate an
+    // existing one rather than mangling it.
+    payload.starts_with(rar_rs::detect::RAR13_SIGNATURE)
 }
 
 /// Prepend the SFX module to an existing archive *in place* (create-time

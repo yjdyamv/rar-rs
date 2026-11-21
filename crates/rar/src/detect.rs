@@ -57,10 +57,20 @@ pub(crate) fn find_archive_start(input: &[u8], max_scan: usize) -> Option<(Archi
 /// (the same bound the reference readers use).
 pub const SFX_SCAN_LIMIT: usize = 8 * 1024 * 1024;
 
-/// Byte offset where the RAR5 archive begins inside an SFX file (the end
-/// of the embedded stub). Returns `None` when no signature is found.
+/// Byte offset where the RAR archive begins inside an SFX file (the end of the
+/// embedded stub). Returns `None` when no signature is found.
+///
+/// Both strong signatures are searched and the earliest wins, so `rar s-`
+/// can strip a RAR 1.5-4.x SFX as well as a RAR5 one (the `RE~^` signature is
+/// too weak to scan for here).
 pub fn sfx_offset_of(input: &[u8]) -> Option<usize> {
-    find_bytes(input, RAR5_SIGNATURE)
+    match (
+        find_bytes(input, RAR5_SIGNATURE),
+        find_bytes(input, RAR4_SIGNATURE),
+    ) {
+        (Some(rar5), Some(rar4)) => Some(rar5.min(rar4)),
+        (rar5, rar4) => rar5.or(rar4),
+    }
 }
 
 /// Find the first occurrence of `needle` in `haystack`.
