@@ -280,6 +280,8 @@ impl ExtractArchiveOptions {
       freshen: self.freshen.unwrap_or(false),
       update: self.update.unwrap_or(false),
       keep_broken: self.keep_broken.unwrap_or(false),
+      // The JS API does not expose `-ts-`; mtime is always restored.
+      set_mtime: true,
       set_creation_time: self.set_creation_time.unwrap_or(false),
       set_access_time: self.set_access_time.unwrap_or(false),
       skip_links: self.skip_links.unwrap_or(false),

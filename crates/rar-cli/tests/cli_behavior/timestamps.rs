@@ -283,3 +283,72 @@ fn cli_rar_extract_ts_restores_creation_time() {
         );
     }
 }
+
+/// `-ts-` / `-tsm-` on extraction suppress the modification-time restore:
+/// the extracted file keeps the current time instead of the stored one
+/// (WinRAR restores mtime by default, `-ts-` turns that off). Previously the
+/// flag was parsed but ignored -- mtime was always restored.
+#[test]
+fn cli_extract_ts_minus_suppresses_the_modification_time_restore() {
+    let dir = make_temp_dir();
+    let file = dir.path().join("t.txt");
+    std::fs::write(&file, b"payload").unwrap();
+    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+
+    let archive = dir.path().join("ts.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg("t.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Default extraction restores the stored modification time.
+    let plain = dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["x", "-o+", "-idq"])
+        .arg(&archive)
+        .arg(format!("{}\\", plain.display()))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::metadata(plain.join("t.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        old,
+        "the default must restore the stored modification time"
+    );
+
+    // `-ts-` leaves the current time in place: there is nothing to restore.
+    for (binary, sub) in [(RAR_CLI, "off"), (UNRAR_CLI, "off-unrar")] {
+        let dest = dir.path().join(sub);
+        std::fs::create_dir_all(&dest).unwrap();
+        let status = std::process::Command::new(binary)
+            .args(["x", "-o+", "-ts-", "-idq"])
+            .arg(&archive)
+            .arg(format!("{}\\", dest.display()))
+            .status()
+            .unwrap();
+        assert!(status.success(), "{binary} x -ts- must succeed");
+        let got = std::fs::metadata(dest.join("t.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_ne!(got, old, "{binary}: -ts- must not restore the stored mtime");
+        assert!(
+            got > old + std::time::Duration::from_secs(86_400),
+            "{binary}: -ts- leaves the current time, got {got:?}"
+        );
+    }
+}

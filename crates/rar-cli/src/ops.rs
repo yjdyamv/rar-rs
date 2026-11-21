@@ -919,6 +919,9 @@ pub struct ExtractRequest {
     pub update: bool,
     /// Keep partially extracted files on decode failure (like `-kb`).
     pub keep_broken: bool,
+    /// Restore the modification time from the header (WinRAR's default;
+    /// `-ts-`/`-tsm-` clear it).
+    pub set_mtime: bool,
     /// Skip link/copy redirect members (like `-ol-`).
     pub skip_links: bool,
     /// Extract links with dangerous targets as-is (like `-ola`).
@@ -972,6 +975,7 @@ impl ExtractRequest {
             freshen: self.freshen,
             update: self.update,
             keep_broken: self.keep_broken,
+            set_mtime: self.set_mtime,
             set_creation_time: self.set_creation_time,
             set_access_time: self.set_access_time,
             skip_links: self.skip_links,
@@ -1295,6 +1299,7 @@ mod tests {
             freshen: false,
             update: false,
             keep_broken: false,
+            set_mtime: true,
             skip_links: false,
             allow_unsafe_links: false,
             set_creation_time: false,

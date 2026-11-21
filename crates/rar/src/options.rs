@@ -588,6 +588,9 @@ pub struct ExtractOptions {
     /// Keep partially extracted files when a member fails to decode
     /// (like `-kb`): the incomplete output is left on disk.
     pub keep_broken: bool,
+    /// Restore the modification time from the member header on extraction
+    /// (WinRAR's default; `-ts-`/`-tsm-` clear it). Defaults to true.
+    pub set_mtime: bool,
     /// Also restore the creation time (Windows) from the FILE_TIME extra
     /// record (like WinRAR's `-tsc` on extraction). Ignored on Unix,
     /// where the change time cannot be set.
@@ -704,6 +707,7 @@ impl PartialEq for ExtractOptions {
             freshen,
             update,
             keep_broken,
+            set_mtime,
             set_creation_time,
             set_access_time,
             max_dict_size,
@@ -728,6 +732,7 @@ impl PartialEq for ExtractOptions {
             && *freshen == other.freshen
             && *update == other.update
             && *keep_broken == other.keep_broken
+            && *set_mtime == other.set_mtime
             && *set_creation_time == other.set_creation_time
             && *set_access_time == other.set_access_time
             && *max_dict_size == other.max_dict_size
@@ -759,6 +764,7 @@ impl std::fmt::Debug for ExtractOptions {
             .field("freshen", &self.freshen)
             .field("update", &self.update)
             .field("keep_broken", &self.keep_broken)
+            .field("set_mtime", &self.set_mtime)
             .field("set_creation_time", &self.set_creation_time)
             .field("set_access_time", &self.set_access_time)
             .field("max_dict_size", &self.max_dict_size)
@@ -795,6 +801,7 @@ impl Default for ExtractOptions {
             freshen: false,
             update: false,
             keep_broken: false,
+            set_mtime: true,
             set_creation_time: false,
             set_access_time: false,
             max_dict_size: Some(Self::DEFAULT_MAX_DICT_SIZE),
