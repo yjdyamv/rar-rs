@@ -260,3 +260,36 @@ fn om_mark_of_the_web_matches_winrar() {
         }
     }
 }
+
+/// A member's stream data is written with the normal compression method (3),
+/// like WinRAR's `-os`, not stored: a compressible stream does not bloat the
+/// archive. (The exact packed bytes differ from WinRAR's encoder, but the
+/// `compInfo` method, plaintext CRC and the restored data all match.)
+#[test]
+fn os_stream_data_is_compressed() {
+    let dir = temp_dir();
+    let src = dir.path().join("big.bin");
+    std::fs::write(&src, b"main").unwrap();
+    let stream = b"repeat-me-".repeat(2000); // ~20 KB, highly compressible
+    std::fs::write(format!("{}{}", src.display(), ":payload"), &stream).unwrap();
+
+    let archive = dir.path().join("os_compressed.rar");
+    {
+        let mut rar =
+            ArchiveWriter::create_with(&archive, WriterOptions::default().save_streams(true))
+                .unwrap();
+        // Store the file itself (level 0) so only the stream can shrink.
+        rar.add_path(
+            &src,
+            EntryWriteOptions::new().compression_level(CompressionLevel::try_from(0u8).unwrap()),
+        )
+        .unwrap();
+        rar.finish().unwrap();
+    }
+    let len = std::fs::metadata(&archive).unwrap().len();
+    assert!(
+        len < (stream.len() as u64) / 2,
+        "the stream must be compressed: archive={len}, stream={}",
+        stream.len()
+    );
+}

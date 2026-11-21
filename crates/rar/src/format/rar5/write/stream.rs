@@ -896,10 +896,20 @@ pub(crate) fn write_stream_record(
     };
     let data_len = data.len();
     let stream_crc = crc32fast::hash(&data);
+    // WinRAR compresses a member's stream data with its normal method (3) even
+    // when that makes it larger (an 11-byte stream is written as ~23 packed
+    // bytes), so mirror that instead of storing the plaintext. The encoder
+    // uses dictionary log 0, matching the `compInfo` field written below, and
+    // no stream filters are applied.
+    let compressed = lzss_huff::encode(
+        &data,
+        lzss_huff::EncodeOptions::new(crate::format::rar5::COMP_METHOD_NORMAL, 0),
+    )?;
     let (extra, packed) = match password {
         Some(password) => {
             // Stream CRCs stay plaintext, so the record must not
-            // request hash-MAC'd checksums (flag 0x02).
+            // request hash-MAC'd checksums (flag 0x02). The payload is
+            // encrypted after compression, like every other member.
             let session = crypto::MemberEncryption::generate_with_flags(
                 password,
                 crate::crypto::ENCR_PBKDF2_ITER_LOG,
@@ -907,15 +917,15 @@ pub(crate) fn write_stream_record(
             );
             let mut extra = session.extra_bytes();
             extra.extend_from_slice(&subdata);
-            (extra, session.encrypt(&data))
+            (extra, session.encrypt(&compressed))
         }
-        None => (subdata, data),
+        None => (subdata, compressed),
     };
     let hdr = crate::format::rar5::headers::build_stream_block(
         packed.len() as u64,
         data_len as u64,
         stream_crc,
-        COMP_METHOD_STORE,
+        crate::format::rar5::COMP_METHOD_NORMAL,
         0,
         &extra,
     );
