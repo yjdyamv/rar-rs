@@ -136,7 +136,7 @@ fn cli_repeated_switches_last_wins() {
             .args(flags)
             .arg("-idq")
             .arg(&solid)
-            .arg(format!("{}\\", dest.display()))
+            .arg(format!("{}{}", dest.display(), std::path::MAIN_SEPARATOR))
             .status()
             .unwrap();
         let got = std::fs::read(dest.join("f.txt")).unwrap();

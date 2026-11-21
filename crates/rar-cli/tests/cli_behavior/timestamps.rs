@@ -317,7 +317,7 @@ fn cli_extract_ts_minus_suppresses_the_modification_time_restore() {
     let status = std::process::Command::new(RAR_CLI)
         .args(["x", "-o+", "-idq"])
         .arg(&archive)
-        .arg(format!("{}\\", plain.display()))
+        .arg(format!("{}{}", plain.display(), std::path::MAIN_SEPARATOR))
         .status()
         .unwrap();
     assert!(status.success());
@@ -337,7 +337,7 @@ fn cli_extract_ts_minus_suppresses_the_modification_time_restore() {
         let status = std::process::Command::new(binary)
             .args(["x", "-o+", "-ts-", "-idq"])
             .arg(&archive)
-            .arg(format!("{}\\", dest.display()))
+            .arg(format!("{}{}", dest.display(), std::path::MAIN_SEPARATOR))
             .status()
             .unwrap();
         assert!(status.success(), "{binary} x -ts- must succeed");
