@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-11-20 @ `57da8fb`；实现细节以源码为准。
+> 最后核对：2026-11-21 @ `f84e340`；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -82,205 +82,34 @@
 
 ## 下一步
 
-### 发布 0.15.1 与 0.15.2（已发）
+### 待办总览（未完成项）
 
-0.14.0 已发布到 GitHub（tag + Release，2026-11-03），crates.io 三个 crate 仍
-未发布。 **`v0.15.0` 的 tag 与 GitHub Release 已于 2026-11-18 发出**，但此后
-HEAD 又积累了 22 个提交，其中五个是真修复（RAR5 在 32
-位主机上的字典上限与编码器字典大小、 RAR4 恢复记录大小检查下溢、`-inul`
-压掉错误信息、`--help`/`-?` 在所有位置当根级 开关），另有 `rust-version = 1.95`
-与 CI 重写。`cargo publish` 打的是**工作树**， 发 0.15.0 会与已发布的 Release
-资产不是同一棵树，而 crates.io 只能 yank、版本号 永久占用。所以按变更取
-**0.15.1**，把 0.15.0 那批与之后 22 个提交一起发。
-
-版本面已收口：五处版本一致（三个 crate 的 `[package] version`、
-`crates/rar-napi/package.json`、根 `Cargo.toml` 的 workspace 依赖），
-`Cargo.lock` 与 `fuzz/Cargo.lock` 已刷新，`cargo package -p rar-rs` 校验通过。
-`crates/rar/`、`crates/rar-cli/`、`crates/rar-napi/` 各自带上
-`LICENSE`、`NOTICE`、`THIRD_PARTY_LICENSES.md`、`LICENSES/` 的逐字节副本—— 此前
-tarball 里只有 `README.md`，首次发布就是一份没有正文的 `BSD-2-Clause`
-声明，`scripts/ci/check-crate-licenses.sh` 守住这一点。剩下的是执行：
-
-- [x] **打 tag `v0.15.1`**（annotated，正文按 Library / CLI / Build 分组）——
-      2026-11-20 发出，CI run #278 的 16 个 job 全绿（check / test / msrv /
-      lint-windows / 9 个 addon 构建 + wasm / release），Release 已发，25
-      个资产。
-- [x] **`cargo publish` 按顺序**：2026-11-20 用 owner token 发出三个 crate 的
-      0.15.1（`rar-rs` → 等索引 → `rar-cli` / `rar-rs-napi`），crates.io 的
-      `max_version` 均为 0.15.1，tarball 里五个许可证文件齐全。
-- [x] **发布后做一遍下游实测**：`cargo install rar-cli --locked` 装出
-      `rar.exe`/`unrar.exe` 并能 `a`/`t`；docs.rs 上 `rar-rs` 与 `rar-rs-napi`
-      构建成功，**`rar-cli` 失败**——docs.rs 固定跑 `cargo rustdoc --lib`， 而该
-      crate 只有两个 bin。
-
-### 0.15.3：第一次由 CI 自己发布（已发）
-
-无功能改动，只为让 `publish` 与 `publish-npm` 第一次走发布分支（此前只打过
-`skip`：0.15.1/0.15.2 都是手工发的）。tag `v0.15.3`、run `44735569928` 全绿，
-三个 crate 与 npm 包都是 CI 用 OIDC 发的，npm 侧带 SLSA provenance。可复用的
-教训：npm 的版本号一旦用过就永久作废（`npm unpublish` 之后也不能重发），所以
-「删包重发同一个版本」这条路不存在；要验证发布链路只能升版本。
-
-### 0.15.2：给 rar-cli 一个库目标（已发）
-
-docs.rs 的 `cargo-args` 只能传选项、不能换子命令，所以修法只有新增 lib
-target。`crates/rar-cli/src/lib.rs` 是**只有 `//!` 文档、零 item** 的空库： 把
-`src/*.rs` 改成 `pub mod` 会被 `clippy -D warnings` 的 dead-code 卡住；而
-`include_str!` 根 README 会把它中间那个 ```rust 代码块拖成 doctest。功能代码
-一行未动，只多一个版本号。
-
-- [x] 五处版本 0.15.1 → 0.15.2，`Cargo.lock` 与 `fuzz/Cargo.lock` 手工同步；
-      `ci-lint.sh --no-tests`
-      全绿，`SA_REQUIRE_WINRAR=1 cargo test
-      --workspace --all-features`
-      exit 0。
-- [x] tag `v0.15.2`，CI run #280 的 16 个 job 全绿，Release 25 个资产。
-- [x] 三个 crate 发到 crates.io；docs.rs build #5402834（rar-cli）9s 成功，
-      三个文档页 200。
-- [x] **crates.io 发布迁到 CI**：`scripts/ci/publish-crates.sh`（依赖顺序、
-      轮询稀疏索引、已存在版本跳过）+ CI 的 `publish` job（`needs: release`，
-      Trusted Publishing 换临时 token，无长期密钥）。三个 crate 的可信发布者
-      已由 owner 在 crates.io 侧配好（workflow 文件名 `CI.yml`）。
-      `test-release-scripts.sh` 用 stub `curl` 的假索引覆盖「跳过已发布」与
-      「索引路径」两条规则，并断言脚本的 `CRATES` 列表等于全部 workspace 包名。
-- [ ] **首跑复核**：`workflow_dispatch` 带 `release_tag: v0.15.2`，期望
-      `publish` 对三个 crate 各打一行 `skip`（0.15.2 已在索引上），即 OIDC
-      换取与跳过逻辑成立。
-
-### npm 发布（0.15.2 已发，单包）
-
-napi-rs 的产物此前只挂在 GitHub Release 上，npm
-上没有可安装入口。现在是**一个包** `@yjdyamv/rar-rs`：`npm i @yjdyamv/rar-rs`
-装到 14.2 MB 的 tarball，里面 9 个平台 `*.node`、wasm 与两个 worker
-脚本、全部许可证文本；napi 生成的加载器先找同目录的
-`./rar-rs-napi.<platform>.node`，所以一套字节在所有平台都能加载。
-
-- [x] **为什么是单包**：先按 napi 的常规做法拆成 10 个平台包 + 根包，实测被 npm
-      拦在
-      根名上（`E403 Package name too similar to existing package tar-fs`，这是对无
-      scope 短名的启发式检查，`rar-rs-<platform>` 因名字长而通过）。改成
-      `@yjdyamv/rar-rs` 走 scope 就绕开了拦截，但拆包要多 10 个包名 +
-      `optionalDependencies` + 每包 `os`/`cpu`/`libc`，单包换来「一个名字、一个
-      registry 条目、用户装上一定能加载」，代价是每次安装多下 ~13 MB。选单包。
-- [x] **脚本**：`scripts/ci/publish-npm.sh`（单包版）。staging 到临时目录
-      （`binding.js`、wasm loader、`browser.js` 是 gitignored 的构建产物），
-      `browser.js` 现写现生成并指向包内 `./rar-rs-napi.wasi-browser.js`；`files`
-      逐条 校验（缺 `wasi-worker.mjs` 这类文件会上不了档却装得上、跑不起来）；
-      `napi.targets` 只用来算数（`*.node` 个数 = native target 数，`wasm32-*`
-      单独 要 `.wasm`），不维护 triple→platform 的映射表；已存在版本打
-      `skip`；CI 里 加 `--provenance`。
-- [x] **首发已执行**（0.15.2，手工）：`npm publish` 从 v0.15.2 的 Release
-      payload 填包，`npm view` = 0.15.2、干净缓存安装后
-      `createArchive`/`testArchive`/ `readMember`
-      均正常。发布过程中踩到两件事值得记：npm 的 `PUT` 返回 202 后 tarball
-      还要几分钟才可下载（别立刻判定失败）；granular token 没勾 bypass 2FA 时
-      `npm publish` 会报 `EOTP`。
-- [x] **CI 里发（已真跑）**：`publish-npm` 走 OIDC（`id-token: write` +
-      `--provenance`），`@yjdyamv/rar-rs` 的 Trusted Publisher 已配好（owner
-      `yjdyamv`、repo `rar-rs`、workflow `CI.yml`），仓库不存 secret。 **v0.15.3
-      是第一次真发布**（run `44735569928`）：crates.io 三个 crate 全是
-      `Uploading` 而非 `skip`，npm 的 `_npmUser` 是
-      `GitHub Actions <npm-oidc-no-reply@github.com>` +
-      `trustedPublisher.github`， attestation 为 SLSA provenance v1，28 文件
-      14.2 MB。此后 dispatch 旧 tag 只会 skip；改脚本能在 `main`
-      上修好再用同一个 tag 重跑（脚本取自 workflow 提交），但**改
-      `Cargo.toml`/`package.json` 必须新打 tag**——`v0.15.2` 就是这么 死在
-      `does not list NOTICE` 上的。
-- [x] **残留的 `0.0.0-stage`（已删）**：npm 的 staged publish 被 kill 后留下一
-      个 `0.0.0-stage` 版本（无 dist-tag，不影响 `npm i`）。删除要**不 bypass
-      2FA** 的
-      token：`npm unpublish "@yjdyamv/rar-rs@0.0.0-stage" --force`，再按
-      提示在浏览器里确认（或 `--otp=`）。用 bypass token 会拿到 403（npm 的策
-      略），用包权限不匹配的 token 会拿到 404 而且 **CLI 仍然 exit 0**（假成
-      功，注意）。已删，registry 上只剩 0.15.2。
-
-发布闸门（本机 `cargo test --workspace --all-features`，stdin 接 EOF）：全绿
-（`rar-rs` 36 个 target、`rar-cli` 的 bins/`cli_behavior`/`volume_bare_name`、
-`rar-rs-napi` lib 全 ok）；WASI 与原生绑定都能构建。此前记录的两个环境性失败
-（`chcp` 代码页、符号链接权限）本轮未复现。
-
-### 文档人体工学（已做，保持即可）
-
-- [x] **单一来源归位**：历史修复日志移出 `PLAN.md`，可长期复用的规则收进
-      [`docs/PITFALLS.md`](docs/PITFALLS.md)（一条一行、由测试钉住），架构级不变量留在
-      [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，退出码进
-      [`docs/CLI.md`](docs/CLI.md)。`PLAN.md` 从 995 行收到 200 行量级。
-- [x] **公开 API 契约也归 PITFALLS**：错误类别贯通、`ExtractErrorPolicy` 的
-      Abort/Collect 语义、提取进度粒度、生成物与手写物的分名、WASI
-      路径映射表按名维护——见 [`docs/PITFALLS.md`](docs/PITFALLS.md)「公开 API
-      契约」段。
-- [ ] **保持**：新结论写进
-      PITFALLS（规则）或本文件（下一步），**不要把过程写回来**。
-      文档锚点（`最后核对`）在改行为时同步刷新。
-
-### 测试覆盖（对齐 CI）
-
-- [x] **CI 拉官方工具跑生成套件**：`scripts/fetch_winrar.py`（标准库，双平台）
-      是唯一下载入口，`test` 与 `lint-windows` 都先跑它；`lint-windows` 用
-      `SA_REQUIRE_WINRAR=1` 跑全套（覆盖 2.90/3.00
-      配方），`test`（Ubuntu）跑同一批 target 但允许自跳（rarlab 的 Linux 版从
-      3.93 起）。 注意上限仍是 RAR4 写入 6.23、`cf` 4.20、`rv3` 4.20。
-
-### 通用库的对外面（已做一半，剩打包）
-
-- [x] **错误分类贯通到 JS**：库的 16 个 `ErrorCode` 经消息标记 + `rar-rs.js`
-      再水化，变成 `RarError.rarCode`；此前 17 类被压成 2 个 N-API
-      status，"密码错→重问" 与"锁定→只读"无法分辨。
-- [x] **逐成员失败与提取进度**：`ExtractErrorPolicy`（`Abort` 默认 /
-      `Collect`）、
-      `ExtractionReport::failures`、`ExtractOptions::on_progress`；绑定侧
-      `ExtractArchiveOptions.collectErrors` 与 `ExtractionResult.failures`。
-- [x] **手写类型 + 编译闸门**：`rar-rs.d.ts` 为公开面，`npm run typecheck`
-      （`tsc --noEmit` + `__test__/types.test-d.ts` 的编译期断言）进 CI。
-- [x] **npm 打包**：见上文「npm 发布」——单包 `@yjdyamv/rar-rs` 带全部平台
-      addon，字节来自 Release payload，发布走 `publish-npm.sh`。0.15.2 已手工首
-      发；CI 侧仍待 `NPM_TOKEN` 或该包的 Trusted Publisher。
-- [ ] **CI 首跑**：跨平台 build 矩阵与新增的 typecheck 步骤只做过静态修改，
-      首次跑通必须由 CI 证明（本地无法覆盖）。`release`
-      侧真正发布（`gh
-      release` 上传）与 8 个跨平台 target
-      的二进制加载同样只能由 CI/ 周任务证明；本地能证明的只有 fixture 部分
-      （`bash scripts/ci/test-release-scripts.sh`）。
+- **CI 首跑/复核**：跨平台 build 矩阵、绑定 `typecheck`、release 上传与跨 target
+  的二进制加载只能由 CI 证明；`workflow_dispatch` 带一个**已发布**的
+  `release_tag` 复核 skip 分支（OIDC 真发已由 `v0.15.3` 证明）。
+- **性能**：issue 09（DLL 单线程解析）、issue 15（价格驱动解析中间档 `-m1.5`?
+  待决策）、issue 04（MT 窗口级不可压缩跳过）。
+- **格式层（已量化、需逆向）**：`-qo`/`-rr` 分卷的卷尾补零 / 每卷预留量，
+  纯字节收益，见下「已知差异」。
+- **溯源**：`rars` 移植的逐文件与上游对拍（in-tree claim，不影响许可表达式）。
 
 ### 已知差异（已量化，追平需先逆向公式）
 
 - [ ] **`-qo`/`-rr` + 分卷的「卷尾补零 / 每卷预留量」**（已量化；贴平需逆向
-      `Rar.exe` 的预留量算法）：布局已追平（每卷一个 QO 服务块 + 每卷主头的
-      `LOCATOR` 记录，条目 `rel` 按「本卷 QO 块 → 本卷分片头」重算，有官方
-      `UnRAR` 对拍）。**真正的差异是每卷预留的 trailer 大小**：官方把**非末卷
-      补零到恰好 `volume_size`**——ENDARC 之后留 0…N 字节零尾，N 随内容变化
-      （`-v64k` 实测 part1 余 **8**、part2 余 **14**），末卷不补；且其每卷预留量
-      比我们**多约 20–22 字节**（`-v64k` 纯档末卷官方 29468 / 我们 29446，
-      `-rr5%` 官方 40346 / 我们 40326）——即官方在非末卷少写那 N 字节数据、
-      留到末卷，所以**末卷大小差 ~20–22 字节**。多次实测的「`-rr` 松弛量不规则」
-      （32 KiB 卷 `-rr1/3/5/20%` 都 7 字节、`-rr10%` 393 字节；256 KiB 卷 5
-      字节） 是同一现象。两边都能被官方 `t`/`x`/`rc` 接受，`.rev`
-      本体逐字节相同。 **更细实测（刻画的规律，尚未定论）**：非末卷 pad——纯档
-      fh1=**8**、fh2=**14**； `-rr5%`
-      fh1=**15**、fh2=**21**。两个简单假设已被实测**证伪**：①「头数线性」——
-      多个**普通**小成员头（1–4 个）的卷 pad 恒 **8**；②「每条续块
-      +6」——单个跨卷 成员的 4 卷每卷 pad 也恒 **8**。故 pad
-      与「卷内**多个不同成员** + RR」的某种 组合相关，尚未收敛为闭式。
-      **逆向状态**：Ghidra 项目里已导入 `Rar7.exe`（7-23）；但 WinRAR 的 UI
-      文本在 `rarlng.dll`、二进制字符串被剥离（`QO|RR|ENDARC|volume` 全 0
-      命中），只能按 结构定位写卷路径——已确认 `FUN_140036378`（seek/skip
-      包装）、`FUN_140036994` （WriteFile
-      错误重试封装）、`FUN_1400926a8`（控制台/文件输出流）等都是通用 I/O
-      助手；ENDARC 的 8 字节（`1D 77 56 51 03 05 04 00`）在二进制里 **0 命中**
-      （CRC 运行期算、立即数拼装），签名常量也 0
-      命中，不能用常量定位。**但已追到 卷驱动层**：`FUN_14003631c(stream,size)`
-      = seek 到 size + `SetEndOfFile`
-      （**整卷预分配**，扩展部分即那截零尾）；多卷驱动 `FUN_14005be6c` 在 L428
-      对 **每卷**调用它、大小取自 `[driver+0x30+vol]`
-      数组——即**先规划各卷大小、再预 分配**。预留量算术在「规划各卷大小」（填充
-      `[base+vol*0x40+0x30]`）的那一步， 但该 0x40
-      字节每卷结构数组由某个**通用容器/分配例程**构建（`FUN_140021aec` 编排器 →
-      `FUN_14005a578`/`FUN_14005a3dc` 都不直接写它），尚未定位到填充点。
-      **又一批实测**：`padfit`（单个跨卷成员 + 若干普通小成员）**每个非末卷 pad
-      恒 8**， 与卷内文件头数（1–4）、`CONTINUES`(0x08)/`CONTINUE_TO`(0x10)
-      标志都无关；只有 `plain` 的 part2（一个**续块结束 + 新成员开始**）为
-      14，`-rr5%` 再 +7——规律仍
-      未闭合。纯字节收益，属“有意不追平”，留作后续专门逆向。
+      `Rar.exe` 的预留量算法）：布局已追平（每卷 QO 服务块 + 主头 `LOCATOR`、
+      条目 `rel` 重算，有官方 `UnRAR` 对拍）。差异在**每卷预留的 trailer
+      大小**：官方把**非末卷补零到恰好 `volume_size`**（ENDARC 后留 0…N 字节
+      零尾，N 随内容变；`-v64k` 实测 part1 余 8、part2 余 14），末卷不补；且其
+      每卷预留比我们**多约 20–22 字节**（`-v64k` 末卷官方 29468 / 我们 29446，
+      `-rr5%` 40346 / 40326），即官方在非末卷少写那 N 字节、留到末卷，所以
+      **末卷差 ~20–22 字节**；「`-rr` 松弛量不规则」是同一现象。两边都能被官方
+      `t`/`x`/`rc` 接受，`.rev` 本体逐字节相同。
+      **逆向状态**：已追到卷驱动——`FUN_14003631c(stream,size)` =
+      `seek`+`SetEndOfFile`（**整卷预分配**，扩展部分即零尾）；多卷驱动
+      `FUN_14005be6c` 对每卷调用它、大小取自 `[base+vol*0x40+0x30]`。**预留量
+      算术在该数组的上游填充**（某个通用容器/分配例程，尚未定位）；`Rar7.exe`
+      已导入 Ghidra（UI 文本在 `rarlng.dll`，二进制字符串/常量被剥离）。
+      纯字节收益，属“有意不追平”，留作后续专门逆向。
 
 ### 性能（进行中，未关闭议题）
 
@@ -557,6 +386,14 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
   再重读同一路径，同尺寸改写真可能写出旧 CRC/BLAKE2；回填头需要 patching（`-hp`
   还要重加密），已接受。
 
+## 已完成
+
+已发布 `0.15.1` / `0.15.2` / `0.15.3`（GitHub Releases、crates.io、npm
+`@yjdyamv/rar-rs`）。发布流水线、Trusted Publishing、npm 单包决策与 CI 形态见
+[`docs/ci.md`](docs/ci.md)；测试语料、`SA_REQUIRE_WINRAR` 与版本上限见
+[`docs/testing.md`](docs/testing.md)；`rar-cli` 的空 lib 目标为何存在见
+[`crates/rar-cli/src/lib.rs`](crates/rar-cli/src/lib.rs)。
+
 ## 开放议题
 
 `docs/issues/<feature>/` 只留**未关闭**议题；关闭时判决并入本文件或
@@ -598,14 +435,8 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 
 ## 已知小差异（记录，互操作无碍）
 
-- **`lb` 与分卷成员（已对齐）**：`lb`
-  对跨卷成员在**首卷**打印一次、在**每个后续卷**也打印该成员名（该卷只有这一个名字）。实测
-  WinRAR **4.20/6.23/7.23** 的 `Rar.exe` 与 `UnRAR.exe`
-  全都如此，与我们一致（旧记录「`Rar.exe lb`
-  不打印跨卷成员」对有符号版本不成立，已更正；回归测试
-  `cli_bare_list_prints_split_member_on_every_volume`）。唯一残留：我们 `lb`
-  也接受套系的**基名**（`set.rar`，经 `discover_volumes`
-  解析），官方对新编号套系要求 `set.part1.rar`（基名退 10）——属放宽便利。
+### 仍存在的差异
+
 - **同一次 `a` 里的重复成员**：同一个文件既当显式参数、又落在目录参数里时，
   官方按 `-o+` 的覆盖语义把它挪到末尾，我们保留原位（其余排序规则已对齐， 见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「solid 成员的顺序」）。
@@ -616,79 +447,91 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
   `WriterOptions::estimated_size` 时主头 locator 偏移字段取**默认 5 字节**
   （`DEFAULT_OFFSET_WIDTH`，不是「最小
   3」），官方按**输入总大小**分档（3/4/5/6）。 CLI 的 `a` **和 `m`**
-  都把输入文件大小求和后传进去（压缩只会变小，输入总量是安全 上界；`m` 同时按
-  `a` 默认开 quick-open），所以**所有 CLI 建档路径**都逐字节一致 （实测 ours
-  `a`/`m` 与 6.23/7.23 的 `a`/`m` sha256 相同）。只有**库调用者不传**
-  `estimated_size` 时才看得到差异——且库**无法自行推导**：主头在成员之前写入，
-  写头时还不知道总量。
+  都把输入文件大小求和后传进去（压缩只会变小，输入总量是 安全上界；`m` 同时按
+  `a` 默认开 quick-open），所以**所有 CLI 建档路径**都逐字节 一致（实测 ours
+  `a`/`m` 与 6.23/7.23 的 `a`/`m` sha256 相同）。只有**库调用者 不传**
+  `estimated_size` 时才看得到差异——且库**无法自行推导**：主头在成员之前
+  写入，写头时还不知道总量。
 - **Windows 联接点的 redirect 目标字符串**：见
   [`docs/PITFALLS.md`](docs/PITFALLS.md)「有意不追平官方」。
-- **`u`/`f` 的成员顺序（已对齐，含 solid）**：`rar u`/`f` 对**单卷 RAR5**
-  档**就地替换**被刷新的成员（保持原位、内容/CRC/mtime 更新），与官方 6.23/7.23
-  一致——**含 solid 档**：被替换成员所在的 solid
-  链会被**就地重压**（先解码旧内容推进共享**解码**窗口，再用新内容推进共享**编码**窗口，后继成员仍正确解码）。回归测试：`cli_update_keeps_refreshed_member_in_place`、`cli_update_solid_refresh_keeps_member_in_place`、库
-  `editor_replaces_a_member_in_place`、`editor_replaces_a_solid_member_in_place`。实现：`EditPlan::replace`
-  / `RewriteOp::Replace` +
-  `SolidChainState::replace_solid_member`。新增成员仍**追加到既有成员之后**（目录条目最后）。**仍回退「删旧+追加」**（被刷新成员落到档尾）：多卷、`-ol`/`-oh`/`-oi`
-  链接重定向、`-ver` 版本控制、目录成员、重名成员——`t` 通过、数据无损。
 - **`p`/`-so` 的残余差异**：成员选择器我们更宽松——`selector.rs` 统一把 `\` 与
   `/` 归一后再匹配，所以 `p sub/c.txt`（正斜杠）能命中官方需反斜杠的归档名（官方
-  6.23/7.23 都要求**分隔符精确**，`p sub/c.txt` 退
-  10）；这是刻意的跨平台便利（Unix 档存 `/`）。`-so` 是我们的**扩展**（等价
-  `p`）：7.23 `Rar.exe` **与** `UnRAR.exe` 都报 `Unknown option: so`（退
-  7），6.23
-  忽略该未知开关径自解到磁盘——保留作便利，不追。（头加密归档缺口令的退出码**已对齐**：现在退
-  12，与 7.23 一致；密码错仍退 11。）
-- **`-oh` 硬链接 redirect 的声明大小（已对齐）**：把硬链接存为 redirect
-  时，官方把该成员的平铺大小写为**目标文件大小**（`lt` 显示
-  `Size: 19`、`Packed size: 0`）；我们现在也写目标大小（`LinkRedirect.size`），`lt`
-  与官方逐字段一致。解压出的硬链接在两边都正确共享 inode（`fsutil hardlink list`
-  均两条）。`-ol` 的符号链接（固定 mtime + 相对目标）元数据与官方逐字段一致。
-- **SFX 产物扩展名（已对齐）**：`rar s` 现在写 `<base>.exe`——与官方
-  **3.93/4.20/6.23/7.23** 一致（也与本仓库 create-time `-sfx` 一致）；`s-`
-  同时识别 `.exe`/`.EXE`/`.sfx`/`.SFX`。同时对齐了官方两处安全行为：`s` 在无
-  `-y` 时不覆盖已存在的
-  `<base>.exe`（官方非交互下保留原文件，我们此前会静默覆盖真实程序）；`s-`
-  先校验签名之后确有**合法主头**才写，非 SFX 的可执行文件（哪怕偶然含 RAR
-  魔数）不再产出垃圾 `.rar`（官方报 `Bad archive`）。`sfx_offset_of` 亦识别 7
-  字节 RAR4 签名，`s-` 因此能剥离 RAR4 SFX（`s` 本就接受
-  RAR4）。回归测试：`cli_sfx_roundtrip_with_module`、`cli_sfx_strip_rejects_non_archive`、`cli_sfx_refuses_to_clobber_existing_exe`、`cli_sfx_roundtrip_rar4`。
+  6.23/7.23 都要求**分隔符精确**，`p sub/c.txt` 退 10）；这是刻意的跨平台便利
+  （Unix 档存 `/`）。`-so` 是我们的**扩展**（等价 `p`）：7.23 `Rar.exe` **与**
+  `UnRAR.exe` 都报 `Unknown option: so`（退 7），6.23 忽略该未知开关径自解到磁盘
+  ——保留作便利，不追。（头加密归档缺口令的退出码**已对齐**：现在退 12，与 7.23
+  一致；密码错仍退 11。）
 - **SFX 内嵌档案的字节（官方 `s` 会「重序列化」内嵌档）**：我们 `s` 把 stub
   **原样前置**到原始档案（`a` 本身两边逐字节相同）。官方 `s`
-  不是就地改两个字节，而是**重写内嵌档的头**：①把每个 FILE_HEAD 的
-  `DataSize`/`UnpackedSize` 从保留宽度（值 13 写成
-  `8D 00`）改到**最短**（`0D`），重算该头 `HeaderSize`+CRC；②**重算主头 LOCATOR
-  偏移**（`big9k` 实测
-  `8C→88`，大成员档偏移更宽）；③最小化**服务块**（QO/RR）的尺寸字段（`big9k`
-  整档少 52 字节）；④**重建/丢弃**内联恢复记录（`-rr5%` 档内嵌后与「无
-  RR」一致，少 186 字节）。因此逐字节贴平要**复刻官方的重序列化**，且含 RR
-  时因「`-rr`
-  零尾未追平」本就不可得。故仍记录为已知差异；两者都合法、解压与提取内容完全一致。
-- **`-os` NTFS 流（STM）（语义已对齐）**：两边 STM
-  服务块名字/`unpSize`/`dataCrc` 相同；`compInfo` 现在**都是 `384`**（version
-  0、solid 0、**method=3**）——`write_stream_record` 先用 method 3（dict log
-  0）压缩流数据，`-p`/`-hp` 时再逐流加密（加密在压缩之后，CRC 仍为明文 CRC；不受
-  `-m0` 影响）。**packed 字节仍不同**（自研编码器输出长度与 WinRAR
-  差若干字节，如 3800 字节流我们 37、官方 36），故归档/`s`
-  仍非逐字节一致；但**语义一致**、`compInfo`/明文 CRC/解出的 ADS
-  逐字节相同、**双向互操作**（官方 6.23/7.23 `UnRAR` 能还原我们的压缩流、`Rar t`
-  通过；我们也能解官方的压缩流）。回归：`os_stream_data_is_compressed`、`os_streams_interop_with_winrar`。
+  不是就地改两个字节， 而是**重写内嵌档的头**：①把每个 FILE_HEAD 的
+  `DataSize`/`UnpackedSize` 从保留 宽度（值 13 写成
+  `8D 00`）改到**最短**（`0D`），重算该头 `HeaderSize`+CRC；② **重算主头 LOCATOR
+  偏移**（`big9k` 实测 `8C→88`，大成员档偏移更宽）；③最小化
+  **服务块**（QO/RR）的尺寸字段（`big9k` 整档少 52 字节）；④**重建/丢弃**内联
+  恢复记录（`-rr5%` 档内嵌后与「无 RR」一致，少 186 字节）。因此逐字节贴平要
+  **复刻官方的重序列化**，且含 RR 时因「`-rr` 零尾未追平」本就不可得。故仍记录为
+  已知差异；两者都合法、解压与提取内容完全一致。
+- **`-os` NTFS 流（STM）（packed 字节仍不同）**：两边 STM 服务块名字 /`unpSize`/
+  `dataCrc` 相同；`compInfo` 现在**都是 `384`**（version 0、solid 0、
+  **method=3**）——`write_stream_record` 先用 method 3（dict log 0）压缩流数据，
+  `-p`/`-hp` 时再逐流加密（加密在压缩之后，CRC 仍为明文 CRC；不受 `-m0` 影响）。
+  **packed 字节仍不同**（自研编码器输出长度与 WinRAR 差若干字节，如 3800 字节流
+  我们 37、官方 36），故归档/`s` 仍非逐字节一致；但**语义一致**、`compInfo`/明文
+  CRC/解出的 ADS 逐字节相同、**双向互操作**（官方 6.23/7.23 `UnRAR` 能还原我们的
+  压缩流、`Rar t` 通过；我们也能解官方的压缩流）。回归：
+  `os_stream_data_is_compressed`、`os_streams_interop_with_winrar`。
+
+### 已对齐（留存结论，防回归）
+
+- **`lb` 与分卷成员**：`lb` 对跨卷成员在**首卷**打印一次、在**每个后续卷**也打印
+  该成员名（该卷只有这一个名字）。实测 WinRAR **4.20/6.23/7.23** 的 `Rar.exe` 与
+  `UnRAR.exe` 全都如此，与我们一致（旧记录「`Rar.exe lb`
+  不打印跨卷成员」对有符号 版本不成立，已更正；回归测试
+  `cli_bare_list_prints_split_member_on_every_volume`）。 唯一残留：我们 `lb`
+  也接受套系的**基名**（`set.rar`，经 `discover_volumes`
+  解析），官方对新编号套系要求 `set.part1.rar`（基名退 10）——属放宽便利。
+- **`u`/`f` 的成员顺序（含 solid）**：`rar u`/`f` 对**单卷 RAR5** 档**就地替换**
+  被刷新的成员（保持原位、内容/CRC/mtime 更新），与官方 6.23/7.23 一致——**含
+  solid 档**：被替换成员所在的 solid 链会被**就地重压**（先解码旧内容推进共享
+  **解码**窗口，再用新内容推进共享**编码**窗口，后继成员仍正确解码）。回归测试：
+  `cli_update_keeps_refreshed_member_in_place`、
+  `cli_update_solid_refresh_keeps_member_in_place`、库
+  `editor_replaces_a_member_in_place`、`editor_replaces_a_solid_member_in_place`。
+  实现：`EditPlan::replace` / `RewriteOp::Replace` +
+  `SolidChainState::replace_solid_member`。新增成员仍**追加到既有成员之后**（目录
+  条目最后）。**仍回退「删旧+追加」**（被刷新成员落到档尾）：多卷、
+  `-ol`/`-oh`/`-oi` 链接重定向、`-ver` 版本控制、目录成员、重名成员——`t` 通过、
+  数据无损。
+- **`-oh` 硬链接 redirect 的声明大小**：把硬链接存为 redirect 时，官方把该成员的
+  平铺大小写为**目标文件大小**（`lt` 显示 `Size: 19`、`Packed size: 0`）；我们
+  现在也写目标大小（`LinkRedirect.size`），`lt` 与官方逐字段一致。解压出的硬链接
+  在两边都正确共享 inode（`fsutil hardlink list` 均两条）。`-ol`
+  的符号链接（固定 mtime + 相对目标）元数据与官方逐字段一致。
+- **SFX 产物扩展名**：`rar s` 现在写 `<base>.exe`——与官方
+  **3.93/4.20/6.23/7.23** 一致（也与本仓库 create-time `-sfx` 一致）；`s-` 同时
+  识别 `.exe`/`.EXE`/`.sfx`/`.SFX`。同时对齐了官方两处安全行为：`s` 在无 `-y` 时
+  不覆盖已存在的 `<base>.exe`（官方非交互下保留原文件，我们此前会静默覆盖真实
+  程序）；`s-` 先校验签名之后确有**合法主头**才写，非 SFX 的可执行文件（哪怕偶然
+  含 RAR 魔数）不再产出垃圾 `.rar`（官方报 `Bad archive`）。`sfx_offset_of` 亦
+  识别 7 字节 RAR4 签名，`s-` 因此能剥离 RAR4 SFX（`s` 本就接受
+  RAR4）。回归测试：
+  `cli_sfx_roundtrip_with_module`、`cli_sfx_strip_rejects_non_archive`、
+  `cli_sfx_refuses_to_clobber_existing_exe`、`cli_sfx_roundtrip_rar4`。
 - **文件头编码与 WinRAR 版本无关**：固定 mtime 下，ours / WinRAR **6.23 / 7.23**
   的 RAR5 `-m0` 档案 **sha256 完全相同**（保留的 2 字节 vint、Windows FILETIME
   的 FILE_TIME 记录、`compInfo=0` 三方一致）；RAR4 文件头 **4.20 与 6.23
-  也逐字节相同**。差 2 字节只出在「官方 `s`
+  也逐字节 相同**。差 2 字节只出在「官方 `s`
   会重序列化内嵌档（最小化尺寸字段并重算 LOCATOR，见上）」；`-os` 流现在两边都用
-  method 3，差别只剩编码器输出字节，与版本无关。（缓存里没有 5.x；4.20 不认
-  `-ma4`、7.23 已移除 `-ma4`，故 RAR4 只能拿 4.20 默认档与 6.23 比。）
+  method 3，差别只剩编码器输出字节，与 版本无关。（缓存里没有 5.x；4.20 不认
+  `-ma4`、7.23 已移除 `-ma4`，故 RAR4 只能 拿 4.20 默认档与 6.23 比。）
 - **RAR4 奇数秒 mtime 的 `FHD_EXTTIME`（按容器版本决定）**：extended-time 区是
   RAR 3.0+ **容器**特性，判据应是容器 `unp_ver`（`rar4_unp_ver`），而不是成员
-  codec 版本。`-ma4`（容器 29，即使 `-m0` store 成员的 codec 版本是
-  20）现在对奇数秒 mtime 写 2 字节 `PRESENT|ADD_SECOND`——与官方 4.20/6.23
-  **逐字节相同**、解压还原奇数秒；`-ma2`/`-ma15`（pre-3.0 容器 20/15）不写，保持
-  2 秒精度，使 RAR/UnRAR **2.90** 仍能读（2.90 见到 v20+EXTTIME 会报「the file
-  header is corrupt」，实测）。因此只有含奇数秒成员的 `-ma4` 档会让 2.90 报
-  corrupt——与官方 `-ma4` 行为一致；偶数秒 `-ma4` 与 `-ma2`/`-ma15`
-  不受影响，无需开关。
+  codec 版本。`-ma4`（容器 29，即使 `-m0` store 成员的 codec 版本是 20）现在对
+  奇数秒 mtime 写 2 字节 `PRESENT|ADD_SECOND`——与官方 4.20/6.23 **逐字节相同**、
+  解压还原奇数秒；`-ma2`/`-ma15`（pre-3.0 容器 20/15）不写，保持 2 秒精度，使
+  RAR/UnRAR **2.90** 仍能读（2.90 见到 v20+EXTTIME 会报「the file header is
+  corrupt」，实测）。因此只有含奇数秒成员的 `-ma4` 档会让 2.90 报 corrupt——与
+  官方 `-ma4` 行为一致；偶数秒 `-ma4` 与 `-ma2`/`-ma15` 不受影响，无需开关。
 
 ## 发布清单（改版本号时逐项过）
 
