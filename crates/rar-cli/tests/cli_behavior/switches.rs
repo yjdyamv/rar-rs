@@ -1061,6 +1061,17 @@ fn cli_hardlink_flag_stores_redirects() {
         0,
         "the second hard link must be a redirect"
     );
+    // WinRAR declares the hard-link member's size as the target file's size
+    // (the link shares the same data).
+    let declared = reader
+        .entry(reader.unique_entry("h2.txt").unwrap())
+        .unwrap()
+        .size();
+    assert_eq!(
+        declared,
+        b"hardlink body".len() as u64,
+        "a hard link must declare the target size"
+    );
 
     let out = dir.path().join("out");
     std::fs::create_dir_all(&out).unwrap();

@@ -705,17 +705,19 @@ pub(crate) fn add_redirect(
     redir_type: u64,
     target: &str,
 ) -> RarResult<()> {
-    add_redirect_with_time(cx, name, redir_type, target, 0, None)
+    add_redirect_with_time(cx, name, redir_type, target, 0, 0, None)
 }
 
 /// Like [`add_redirect`], carrying the link's modification time
 /// (WinRAR stores it like a regular member's, including the FILE_TIME
-/// extra record).
+/// extra record) and the declared size (a hard-link member's target size;
+/// 0 for symlinks/junctions, which WinRAR reports with size 0).
 pub(crate) fn add_redirect_with_time(
     cx: &mut dyn Engine,
     name: &str,
     redir_type: u64,
     target: &str,
+    size: u64,
     mtime: u32,
     mtime_ns: Option<u32>,
 ) -> RarResult<()> {
@@ -737,6 +739,10 @@ pub(crate) fn add_redirect_with_time(
     crate::format::shared::write_ops::reset_solid_chain(cx);
     // Redirect type 3: a Windows junction (always a directory).
     const REDIR_WINDOWS_JUNCTION: u64 = 0x03;
+    // Redirect type 4: a hard link. WinRAR records its target file's size as
+    // the member's unpacked size (the link shares the same data); symlinks and
+    // junctions keep size 0.
+    const REDIR_HARD_LINK: u64 = 0x04;
     // A junction is a directory redirect; WinRAR flags it as one and drops the
     // (meaningless) CRC32, while a file symlink / hardlink keeps the CRC32.
     let is_directory = redir_type == REDIR_WINDOWS_JUNCTION;
@@ -772,7 +778,11 @@ pub(crate) fn add_redirect_with_time(
     );
     let fh = FileHeader {
         name: name.replace('\\', "/"),
-        unpacked_size: 0,
+        unpacked_size: if redir_type == REDIR_HARD_LINK {
+            size
+        } else {
+            0
+        },
         packed_size: 0,
         attributes: crate::platform::redirect_attributes(redir_type),
         crc32_val: (!is_directory).then_some(0),

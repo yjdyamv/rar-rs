@@ -613,10 +613,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         // reference target name is what matters, not the order).
         for redirect in &redirects {
             writer
-                .add_redirect_with_time(
+                .add_redirect_with_time_and_size(
                     &redirect.name,
                     redirect.redir_type,
                     &redirect.target,
+                    redirect.size,
                     redirect.mtime,
                     (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
                 )

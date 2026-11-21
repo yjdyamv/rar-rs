@@ -22,6 +22,9 @@ pub(crate) struct LinkRedirect {
     pub mtime: u32,
     /// Sub-second part of the modification time (0 when unavailable).
     pub mtime_ns: u32,
+    /// Declared size for a hard-link redirect (the target's file size); 0 for
+    /// symlinks/junctions, which WinRAR reports with size 0.
+    pub size: u64,
 }
 
 /// The link's own mtime: for symlinks that is the link, not its target.
@@ -35,7 +38,7 @@ fn link_mtime(path: &Path) -> (u32, u32) {
 }
 
 /// Build one redirect record with the link's timestamp attached.
-fn redirect(name: &str, redir_type: u64, target: String, path: &Path) -> LinkRedirect {
+fn redirect(name: &str, redir_type: u64, target: String, path: &Path, size: u64) -> LinkRedirect {
     let (mtime, mtime_ns) = link_mtime(path);
     LinkRedirect {
         name: name.to_string(),
@@ -43,6 +46,7 @@ fn redirect(name: &str, redir_type: u64, target: String, path: &Path) -> LinkRed
         target,
         mtime,
         mtime_ns,
+        size,
     }
 }
 
@@ -244,6 +248,7 @@ pub(crate) fn apply_identical_redirects(
                 5,
                 first.name.clone(),
                 &collected[i].path,
+                0,
             ));
         }
     }
@@ -319,6 +324,7 @@ pub(crate) fn split_link_redirects(
                         symlink_redir_type(&c.path),
                         target.to_string_lossy().into_owned(),
                         &c.path,
+                        0,
                     ));
                     continue;
                 }
@@ -341,7 +347,10 @@ pub(crate) fn split_link_redirects(
             }
             if let Some(id) = file_identity(&c.path) {
                 if let Some(first) = seen.get(&id) {
-                    redirects.push(redirect(&c.name, 4, first.clone(), &c.path));
+                    // WinRAR declares a hard-link member's size as the target
+                    // file's size (the link shares the same data).
+                    let size = std::fs::metadata(&c.path).map(|m| m.len()).unwrap_or(0);
+                    redirects.push(redirect(&c.name, 4, first.clone(), &c.path, size));
                     continue;
                 }
                 seen.insert(id, c.name.clone());

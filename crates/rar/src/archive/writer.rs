@@ -788,7 +788,24 @@ impl ArchiveWriter {
         mtime_ns: Option<u32>,
     ) -> RarResult<()> {
         self.apply(|archive| {
-            archive.add_redirect_with_time(name, redir_type, target, mtime, mtime_ns)
+            archive.add_redirect_with_time(name, redir_type, target, 0, mtime, mtime_ns)
+        })
+    }
+
+    /// [`Self::add_redirect_with_time`] with an explicit declared size: WinRAR
+    /// records a hard-link member's unpacked size as the target file's size
+    /// (symlinks/junctions keep 0).
+    pub fn add_redirect_with_time_and_size(
+        &mut self,
+        name: &str,
+        redir_type: u64,
+        target: &str,
+        size: u64,
+        mtime: u32,
+        mtime_ns: Option<u32>,
+    ) -> RarResult<()> {
+        self.apply(|archive| {
+            archive.add_redirect_with_time(name, redir_type, target, size, mtime, mtime_ns)
         })
     }
 

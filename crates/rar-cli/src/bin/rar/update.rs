@@ -287,10 +287,11 @@ fn cmd_update_freshen(
             .map_err(|error| CliError::from(error).context("append staged members"))?;
         for redirect in &redirects {
             staged
-                .add_redirect_with_time(
+                .add_redirect_with_time_and_size(
                     &redirect.name,
                     redirect.redir_type,
                     &redirect.target,
+                    redirect.size,
                     redirect.mtime,
                     (redirect.mtime_ns != 0).then_some(redirect.mtime_ns),
                 )

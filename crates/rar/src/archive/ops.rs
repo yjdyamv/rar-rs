@@ -220,11 +220,12 @@ impl RarArchive {
         name: &str,
         redir_type: u64,
         target: &str,
+        size: u64,
         mtime: u32,
         mtime_ns: Option<u32>,
     ) -> RarResult<()> {
         crate::format::rar5::write::add::add_redirect_with_time(
-            self, name, redir_type, target, mtime, mtime_ns,
+            self, name, redir_type, target, size, mtime, mtime_ns,
         )
     }
 }
