@@ -1179,3 +1179,54 @@ fn cli_move_created_archive_matches_add() {
         "`m` must create the same archive as `a`"
     );
 }
+
+/// `lb` prints a split member's name exactly once, on the first volume and on
+/// each continuation volume — matching WinRAR 4.20/6.23/7.23 (both `Rar.exe`
+/// and `UnRAR.exe`). The old PLAN note that `Rar.exe lb` skips a cross-volume
+/// member did not hold for any of them.
+#[test]
+fn cli_bare_list_prints_split_member_on_every_volume() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("small.txt"), b"tiny").unwrap();
+    std::fs::write(dir.path().join("big.bin"), vec![b'A'; 200_000]).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args([
+            "a",
+            "-m0",
+            "-v64k",
+            "-idq",
+            "set.rar",
+            "small.txt",
+            "big.bin",
+        ])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let list = |volume: &str| -> Vec<String> {
+        let output = std::process::Command::new(RAR_CLI)
+            .args(["lb", volume])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{volume}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(
+        list("set.part1.rar"),
+        ["small.txt", "big.bin"],
+        "the first volume lists every member, including the split one"
+    );
+    assert_eq!(
+        list("set.part2.rar"),
+        ["big.bin"],
+        "a continuation volume lists the split member by name"
+    );
+}
