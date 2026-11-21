@@ -1628,10 +1628,11 @@ fn editor_replaces_a_member_in_place() {
     assert_eq!(mtime, 1_700_000_000, "the new mtime is stamped");
 }
 
-/// A solid member cannot be replaced in place: the content change would break
-/// its own or its successor's shared window, so the op is refused.
+/// A solid chain member IS replaceable: its whole chain is repacked in place
+/// (the replaced member keeps its slot) and the member AFTER it still decodes
+/// against the repacked shared window.
 #[test]
-fn editor_refuses_to_replace_a_solid_member() {
+fn editor_replaces_a_solid_member_in_place() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("solid.rar");
     {
@@ -1646,14 +1647,32 @@ fn editor_refuses_to_replace_a_solid_member() {
         archive
             .add_bytes("m1.bin", &vec![b'b'; 48 * 1024], level(1))
             .unwrap();
+        archive
+            .add_bytes("m2.bin", &vec![b'c'; 48 * 1024], level(1))
+            .unwrap();
         archive.finish().unwrap();
     }
+    let before = names(&path);
 
     let mut editor = ArchiveEditor::open(&path).unwrap();
     let id = editor.unique_entry("m1.bin").unwrap();
-    assert!(!editor.member_is_replaceable(id).unwrap());
-    let error = editor
-        .apply(EditPlan::new().replace(id, b"BBBB".to_vec(), 1, 0))
-        .unwrap_err();
-    assert!(matches!(error, RarError::Unsupported(_)), "{error}");
+    assert!(editor.member_is_replaceable(id).unwrap());
+    let new = vec![b'Z'; 40 * 1024];
+    editor
+        .apply(EditPlan::new().replace(id, new.clone(), 1_700_000_000, 0))
+        .unwrap();
+    drop(editor);
+
+    assert_eq!(names(&path), before, "the replaced member keeps its slot");
+    let mut reader = ArchiveReader::open(&path).unwrap();
+    let m0 = reader.unique_entry("m0.bin").unwrap();
+    assert_eq!(reader.read_entry(m0).unwrap(), vec![b'a'; 48 * 1024]);
+    let m1 = reader.unique_entry("m1.bin").unwrap();
+    assert_eq!(reader.read_entry(m1).unwrap(), new, "the chain repacked m1");
+    let m2 = reader.unique_entry("m2.bin").unwrap();
+    assert_eq!(
+        reader.read_entry(m2).unwrap(),
+        vec![b'c'; 48 * 1024],
+        "m2 still decodes against the repacked window"
+    );
 }

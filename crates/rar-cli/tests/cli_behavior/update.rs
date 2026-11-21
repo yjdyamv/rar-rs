@@ -1128,3 +1128,52 @@ fn cli_update_keeps_refreshed_member_in_place() {
         "a no-op update must exit 10 like Rar.exe"
     );
 }
+
+/// A **solid** archive's refreshed member also keeps its slot: its whole
+/// chain is repacked in place, and the members after it still decode against
+/// the repacked shared window.
+#[test]
+fn cli_update_solid_refresh_keeps_member_in_place() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.bin"), vec![b'a'; 48 * 1024]).unwrap();
+    std::fs::write(dir.path().join("b.bin"), vec![b'b'; 48 * 1024]).unwrap();
+    std::fs::write(dir.path().join("c.bin"), vec![b'c'; 48 * 1024]).unwrap();
+    // Backdate b.bin's stored time so the later rewrite is unambiguously newer
+    // (otherwise a same-second rewrite reads as a no-op).
+    set_mtime_ago(&dir.path().join("b.bin"), 120);
+    let archive = dir.path().join("solid.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-s", "-m1", "-idq"])
+        .arg(&archive)
+        .args(["a.bin", "b.bin", "c.bin"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    std::fs::write(dir.path().join("b.bin"), vec![b'Z'; 40 * 1024]).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["u", "-m1", "-idq"])
+        .arg(&archive)
+        .arg("b.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        names_in_order(&archive),
+        ["a.bin", "b.bin", "c.bin"],
+        "the refreshed solid member keeps its slot"
+    );
+    let mut rar = rar_rs::ArchiveReader::open(&archive).unwrap();
+    let a = rar.unique_entry("a.bin").unwrap();
+    assert_eq!(rar.read_entry(a).unwrap(), vec![b'a'; 48 * 1024]);
+    let b = rar.unique_entry("b.bin").unwrap();
+    assert_eq!(rar.read_entry(b).unwrap(), vec![b'Z'; 40 * 1024]);
+    let c = rar.unique_entry("c.bin").unwrap();
+    assert_eq!(
+        rar.read_entry(c).unwrap(),
+        vec![b'c'; 48 * 1024],
+        "the member after the replaced one still decodes"
+    );
+}

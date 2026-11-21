@@ -102,8 +102,9 @@ impl RarArchive {
 
         let (map, renamed_count) = super::super::rename::build_rename_map(&self.entries, renames)?;
         // In-place replacements: the member keeps its slot and name, so it
-        // must not also be deleted, and its content change must not break a
-        // neighbouring solid window (its own or its successor's).
+        // must not also be deleted, and it must not be a directory. A solid
+        // chain member's replacement is supported by repacking its chain (the
+        // range is added below).
         for &idx in replacements.keys() {
             if idx >= self.entries.len() {
                 return Err(RarError::StaleEntryId);
@@ -113,9 +114,9 @@ impl RarArchive {
                     "cannot replace a member that the same edit deletes",
                 ));
             }
-            if crate::format::rar5::extract::solid::is_solid_chain_member(&*self, idx) {
+            if self.entries[idx].is_dir() {
                 return Err(RarError::unsupported(
-                    "cannot replace a member of a solid chain in place",
+                    "cannot replace a directory member in place",
                 ));
             }
         }
@@ -166,7 +167,16 @@ impl RarArchive {
         let mut chains: Vec<(usize, usize)> = Vec::new();
         for (idx, &is_deleted) in deleted.iter().enumerate() {
             if is_deleted
-                && let Some(range) = self.chain_range_around(idx)
+                && let Some(range) = self.chain_range_around(idx, false)
+                && !chains.contains(&range)
+            {
+                chains.push(range);
+            }
+        }
+        // A replaced solid member repacks its whole chain in place, including
+        // the tail (whose predecessors supply the shared window).
+        for &idx in replacements.keys() {
+            if let Some(range) = self.chain_range_around(idx, true)
                 && !chains.contains(&range)
             {
                 chains.push(range);
@@ -458,8 +468,14 @@ impl RarArchive {
     /// non-solid directory between two solid members is not a chain
     /// boundary. Deleting the last member of a chain leaves the earlier
     /// members decodable (their windows are untouched), so no chain needs to
-    /// be recompressed in that case.
-    pub(crate) fn chain_range_around(&self, idx: usize) -> Option<(usize, usize)> {
+    /// be recompressed in that case. `for_replace` inverts that: replacing
+    /// the last member still needs the chain's window, so its range is
+    /// returned too (the whole chain is repacked in place).
+    pub(crate) fn chain_range_around(
+        &self,
+        idx: usize,
+        for_replace: bool,
+    ) -> Option<(usize, usize)> {
         // Anchor the walk at `idx` when it participates in a window, or at
         // the next non-directory when the edit removes a directory.
         let mut p = idx;
@@ -484,7 +500,11 @@ impl RarArchive {
                 break;
             }
         }
-        (idx < e).then_some((s, e))
+        if idx < e || (for_replace && self.entries[e].header.comp_solid) {
+            Some((s, e))
+        } else {
+            None
+        }
     }
 
     /// Rewrite the archive file, omitting deleted members.

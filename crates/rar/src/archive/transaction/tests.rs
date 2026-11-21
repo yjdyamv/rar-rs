@@ -284,7 +284,7 @@ fn chain_range_walks_across_a_non_solid_directory() {
     let archive = RarArchive::open(&path).unwrap();
     assert_eq!(archive.entries.len(), 4, "catalog scan");
     assert_eq!(
-        archive.chain_range_around(2),
+        archive.chain_range_around(2, false),
         Some((0, 3)),
         "the walk must cross the non-solid directory to the real chain head"
     );

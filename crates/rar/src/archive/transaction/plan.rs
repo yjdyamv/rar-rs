@@ -71,20 +71,6 @@ impl RarArchive {
                 BLOCK_TYPE_FILE_HEADER => {
                     let idx = entry_idx;
                     entry_idx += 1;
-                    // An in-place replacement keeps the member at its own
-                    // slot: emit the new content here instead of copying the
-                    // old block. Replacements never overlap a deleted member
-                    // or an affected solid chain (validated in `edit_plan`).
-                    if let Some(replacement) = replacements.get(&idx) {
-                        ops.push(RewriteOp::Replace {
-                            idx,
-                            data: replacement.data.clone(),
-                            mtime: replacement.mtime,
-                            mtime_ns: replacement.mtime_ns,
-                        });
-                        prev_file_deleted = false;
-                        continue;
-                    }
                     if !chain_active
                         && let Some(&(s, e)) = chains.get(chain_cursor)
                         && s == idx
@@ -95,7 +81,18 @@ impl RarArchive {
                     }
                     if chain_active && idx <= chain_end {
                         let entry = &self.entries[idx];
-                        if entry.is_dir() || entry.header.comp_method == COMP_METHOD_STORE {
+                        if let Some(replacement) = replacements.get(&idx) {
+                            // Replace INSIDE a solid chain: the executor
+                            // decodes the old bytes (advancing the shared
+                            // decoder window, so the chain's later members
+                            // still decode) then recompresses the new ones.
+                            ops.push(RewriteOp::Replace {
+                                idx,
+                                data: replacement.data.clone(),
+                                mtime: replacement.mtime,
+                                mtime_ns: replacement.mtime_ns,
+                            });
+                        } else if entry.is_dir() || entry.header.comp_method == COMP_METHOD_STORE {
                             // Directories and STORE members never
                             // participate in the LZ window, but their copied
                             // headers still belong in the rebuilt quick-open
@@ -121,6 +118,16 @@ impl RarArchive {
                             chain_cursor += 1;
                         }
                         prev_file_deleted = deleted[idx];
+                    } else if let Some(replacement) = replacements.get(&idx) {
+                        // A non-chain in-place replacement keeps the member at
+                        // its own slot.
+                        ops.push(RewriteOp::Replace {
+                            idx,
+                            data: replacement.data.clone(),
+                            mtime: replacement.mtime,
+                            mtime_ns: replacement.mtime_ns,
+                        });
+                        prev_file_deleted = false;
                     } else if deleted[idx] {
                         prev_file_deleted = true;
                     } else {

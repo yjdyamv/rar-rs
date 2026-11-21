@@ -261,7 +261,34 @@ impl RarArchive {
                     mtime,
                     mtime_ns,
                 } => {
-                    self.emit_replacement(*idx, data, *mtime, *mtime_ns)?;
+                    if self.member_replaceable_at(*idx) {
+                        // A standalone (non-solid) member recompresses in a
+                        // fresh window.
+                        self.emit_replacement(*idx, data, *mtime, *mtime_ns)?;
+                    } else {
+                        // A solid-chain member: reuse the shared chain state
+                        // started by the preceding recompresses, or start it
+                        // here when this member is the chain head.
+                        if chain.is_none() {
+                            chain = Some(super::solid::SolidChainState::start(
+                                crate::format::rar5::extract::decode::member_dict_window(
+                                    self, *idx,
+                                )?,
+                            )?);
+                        }
+                        let state = chain.as_mut().unwrap();
+                        let mut source = crate::format::rar5::payload::SingleFileReader {
+                            reader: &mut reader,
+                        };
+                        state.replace_solid_member(
+                            self,
+                            &mut source,
+                            *idx,
+                            data,
+                            *mtime,
+                            *mtime_ns,
+                        )?;
+                    }
                     processed += data.len() as u64;
                 }
             }

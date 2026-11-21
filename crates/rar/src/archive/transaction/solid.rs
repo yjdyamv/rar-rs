@@ -101,16 +101,55 @@ impl SolidChainState {
         name: &str,
     ) -> RarResult<()> {
         let data = self.decode_member(archive, reader, idx)?;
+        self.emit_encoded(archive, idx, name, &data, 0, 0, false)
+    }
+
+    /// Replace member `idx` (a chain member) with new `data`: advance the
+    /// shared DECODER window with the member's ORIGINAL bytes (so the chain's
+    /// later members still decode against the window they were packed with),
+    /// then encode the NEW bytes into the shared ENCODER window and emit the
+    /// rebuilt header at the member's own slot.
+    pub(super) fn replace_solid_member<R: ChunkReader + ?Sized>(
+        &mut self,
+        archive: &mut RarArchive,
+        reader: &mut R,
+        idx: usize,
+        data: &[u8],
+        mtime: u32,
+        mtime_ns: u64,
+    ) -> RarResult<()> {
+        // Decode the old member to advance `dec`; its plaintext is discarded.
+        let _old = self.decode_member(archive, reader, idx)?;
+        let name = archive.entries[idx].header.name.clone();
+        self.emit_encoded(archive, idx, &name, data, mtime, mtime_ns, true)
+    }
+
+    /// Compress `data` into the shared encoder window and emit the rebuilt
+    /// member header at `idx`. `rebuild_time` drops the member's old
+    /// FILE_TIME record and stamps `mtime`/`mtime_ns` afresh (a content
+    /// replace); otherwise the member's own time records are kept unchanged
+    /// (a plain recompression, whose `hdr.mtime` is reused).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_encoded(
+        &mut self,
+        archive: &mut RarArchive,
+        idx: usize,
+        name: &str,
+        data: &[u8],
+        mtime: u32,
+        mtime_ns: u64,
+        rebuild_time: bool,
+    ) -> RarResult<()> {
         // Cloned so the header borrow does not outlive the encoding below.
         let hdr = archive.entries[idx].header.clone();
 
-        let plain_crc = crc32fast::hash(&data);
+        let plain_crc = crc32fast::hash(data);
         let plain_blake = hdr
             .hash_value
-            .map(|_| crate::format::rar5::blake2sp::hash(&data));
+            .map(|_| crate::format::rar5::blake2sp::hash(data));
         let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
         let packed = compression::encode_chunked(
-            &data,
+            data,
             compression::EncodeOptions {
                 chunk_size: crate::codec::DEFAULT_CHUNK_SIZE,
                 state: Some(&mut self.enc),
@@ -125,7 +164,7 @@ impl SolidChainState {
             // the sequential add_file path.
             self.enc.reset();
             self.enc_active = false;
-            (COMP_METHOD_STORE, 0u8, None, data.clone())
+            (COMP_METHOD_STORE, 0u8, None, data.to_vec())
         } else {
             self.enc_active = true;
             (
@@ -154,9 +193,28 @@ impl SolidChainState {
         // Carry the member's own metadata records (nanosecond/ctime/atime
         // FILE_TIME, OWNER, ...) over to the rebuilt header; the ENCR/HASH
         // records just rebuilt are dropped from the old set (a fresh
-        // encryption session invalidates the old ENCR).
-        let kept = retain_extra_records(&hdr.extra_data, &[EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH]);
+        // encryption session invalidates the old ENCR), and a content replace
+        // also drops the stale FILE_TIME record.
+        let mut drop_records = vec![EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH];
+        if rebuild_time {
+            drop_records.push(EXTRA_FILE_TIME);
+        }
+        let kept = retain_extra_records(&hdr.extra_data, &drop_records);
         extra_data.extend_from_slice(&kept);
+        // On Windows (and for sub-second times) the time travels in a
+        // FILE_TIME record, not the 4-byte Unix field, so the reader would
+        // otherwise see mtime 0; rebuild the record from the new mtime.
+        if rebuild_time
+            && (crate::format::rar5::write::emit::time_uses_windows_record() || mtime_ns != 0)
+        {
+            extra_data.extend_from_slice(
+                &crate::format::rar5::headers::file_time_extra_record_windows(
+                    Some((u64::from(mtime), mtime_ns as u32)),
+                    None,
+                    None,
+                ),
+            );
+        }
         let payload =
             crate::format::rar5::write::emit::encrypt_payload_with(encr.as_ref(), &payload);
         crate::format::rar5::write::emit::write_file_entry(
@@ -170,7 +228,7 @@ impl SolidChainState {
                 dict_size_bytes,
                 extra_data,
                 attrs: hdr.attributes,
-                mtime: hdr.mtime,
+                mtime: if rebuild_time { mtime } else { hdr.mtime },
                 solid: self.enc_active,
                 stored_hash,
             },
@@ -225,83 +283,9 @@ impl RarArchive {
                 "cannot replace a directory member in place",
             ));
         }
-        let variant = crate::version::ArchiveVersion::from_v70(hdr.dict_size_bytes.is_some());
-        let mut enc = EncoderState::default();
-        let packed = compression::encode_chunked(
-            data,
-            compression::EncodeOptions {
-                state: Some(&mut enc),
-                is_final: true,
-                variant,
-                ..compression::EncodeOptions::new(hdr.comp_method, encoder_dict_log(&hdr))
-            },
-        )?;
-        let (method, dict_size_log, dict_size_bytes, payload) = if packed.len() >= data.len() {
-            (COMP_METHOD_STORE, 0u8, None, data.to_vec())
-        } else {
-            (
-                hdr.comp_method,
-                hdr.comp_dict_size,
-                hdr.dict_size_bytes,
-                packed,
-            )
-        };
-        let member_encrypted = crate::crypto::parse_encryption_extra(&hdr.extra_data)?.is_some();
-        let password = if member_encrypted {
-            self.password.as_deref()
-        } else {
-            None
-        };
-        let plain_crc = crc32fast::hash(data);
-        let plain_blake = hdr
-            .hash_value
-            .map(|_| crate::format::rar5::blake2sp::hash(data));
-        let (header_crc, mut extra_data, stored_hash, encr) =
-            crate::format::rar5::write::emit::payload_extra_and_crc(
-                password,
-                plain_crc,
-                plain_blake,
-            );
-        // Carry the member's metadata records over, but drop the old time
-        // record: the mtime changed, so rebuild it from the new time when it
-        // carried sub-second precision.
-        let kept = retain_extra_records(
-            &hdr.extra_data,
-            &[EXTRA_FILE_ENCRYPTION, EXTRA_FILE_HASH, EXTRA_FILE_TIME],
-        );
-        extra_data.extend_from_slice(&kept);
-        // On Windows (and for sub-second times) the time travels in a
-        // FILE_TIME record, not the 4-byte Unix field, so the reader would
-        // otherwise see mtime 0; rebuild the record from the new mtime.
-        if crate::format::rar5::write::emit::time_uses_windows_record() || mtime_ns != 0 {
-            extra_data.extend_from_slice(
-                &crate::format::rar5::headers::file_time_extra_record_windows(
-                    Some((u64::from(mtime), mtime_ns as u32)),
-                    None,
-                    None,
-                ),
-            );
-        }
-        let payload =
-            crate::format::rar5::write::emit::encrypt_payload_with(encr.as_ref(), &payload);
-        crate::format::rar5::write::emit::write_file_entry(
-            self,
-            &MemberPlan {
-                name: hdr.name.clone(),
-                unpacked_size: data.len() as u64,
-                file_crc: header_crc,
-                method,
-                dict_size_log,
-                dict_size_bytes,
-                extra_data,
-                attrs: hdr.attributes,
-                mtime,
-                solid: false,
-                stored_hash,
-            },
-            &payload,
-        )?;
-        Ok(())
+        let window = crate::format::rar5::extract::decode::member_dict_window(self, idx)?;
+        let mut state = SolidChainState::start(window)?;
+        state.emit_encoded(self, idx, &hdr.name, data, mtime, mtime_ns, true)
     }
 }
 

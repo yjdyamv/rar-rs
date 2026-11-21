@@ -101,11 +101,12 @@ impl ArchiveEditor {
     }
 
     /// Whether member `id` can be replaced in place (see [`EditPlan::replace`]):
-    /// false for a member of a solid chain, whose content change would break
-    /// its own or its successor's shared window.
+    /// false for a directory member or a non-RAR5 archive. A solid chain
+    /// member is replaceable (its chain is repacked in place); multi-volume
+    /// archives are rejected by the rewrite itself.
     pub fn member_is_replaceable(&self, id: EntryId) -> RarResult<bool> {
         let idx = self.resolve_id(id)?;
-        Ok(self.archive.member_replaceable_at(idx))
+        Ok(self.is_rar5() && !self.archive.entries[idx].is_dir())
     }
 
     /// Whether this archive uses the RAR5 container — the only family that
