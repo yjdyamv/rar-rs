@@ -301,6 +301,7 @@ fn add_directory_inner(
 pub(crate) fn add_batch(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarResult<()> {
     cx.check_cancel()?;
     set_rar4_dict_bits(cx, entries)?;
+    set_rar5_solid_dict_basis(cx, entries)?;
     #[cfg(feature = "parallel")]
     {
         if !cx.is_legacy()
@@ -372,6 +373,38 @@ fn set_rar4_dict_bits(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarRes
         crate::format::rar4::write::archive_dict_bits(unp_ver, size, solid)
     };
     cx.write_ctx_mut().solid.rar4_dict_bits = Some(bits);
+    Ok(())
+}
+
+/// Record the largest compressed member of the batch so a RAR5 solid chain
+/// sizes its shared dictionary from the whole set, not from the first member
+/// written (see `CompressionSettings::dict_basis` and `solid_dict_params`).
+///
+/// WinRAR caps a solid dictionary at twice the largest member; the run's one
+/// window is built from the chain head's declared dictionary, so a head sized
+/// to itself (the previous behaviour) starves every later, larger member. No-op
+/// for the legacy families (they have their own dictionary rules) and for
+/// non-solid archives.
+fn set_rar5_solid_dict_basis(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarResult<()> {
+    if cx.is_legacy() || !cx.write_ctx().solid.mode || entries.is_empty() {
+        return Ok(());
+    }
+    let mut max = 0u64;
+    for e in entries {
+        match e {
+            // Only compressed members join the chain; a `-m0` member breaks it.
+            BatchEntry::Bytes { data, level, .. } if *level > 0 => {
+                max = max.max(data.len() as u64);
+            }
+            BatchEntry::File { path, level, .. } if *level > 0 => {
+                max = max.max(fs::metadata(path)?.len());
+            }
+            _ => {}
+        }
+    }
+    if max > 0 {
+        cx.write_ctx_mut().compression.dict_basis = Some(max);
+    }
     Ok(())
 }
 
