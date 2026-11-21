@@ -254,22 +254,25 @@ fn try_auto_filters(
 
 /// Solid counterpart of [`try_auto_filters`].
 ///
-/// The filter decision runs on whole-member probes before the shared encoder
-/// state is touched, because a losing candidate cannot be rolled back out of
-/// a solid chain. The chosen record covers the whole member; the transform
-/// output continues the same LZ window, which the decoder mirrors (its
-/// pending filters add the member start to the recorded positions).
+/// The chosen records transform the member in place; the transformed bytes
+/// continue the shared LZ window, which the decoder mirrors (its pending
+/// filters add the member start to the recorded positions).
 ///
-/// The per-block picker the non-solid path uses ([`best_combined_specs`]) is
-/// deliberately not used here: it selects delta/x86 per 64 KiB block, and a
-/// *sub-region* filter record carried by a solid member comes back out broken
-/// (measured: a near-random member whose first 64 KiB block spuriously wins a
-/// delta trial packs to ~64 KiB that the reader then rejects with "match
-/// distance 262144 exceeds the 65536-byte window"; `-s -mc-` and non-solid
-/// members show the per-block records themselves are fine). So this stays a
-/// correctness-first stopgap and costs ratio where the per-block scan would
-/// take x86 (measured ~0.6 MB on the DLL corpus). The bug is in how the solid
-/// chain carries sub-region records, not in the records.
+/// The default automatic policy uses the same per-64 KiB-block picker as the
+/// non-solid path ([`best_combined_specs`]): delta, x86 or plain per block. A
+/// filtered member advances the shared chain state (its transformed bytes are
+/// part of the run's window), which is what makes sub-region records legal
+/// here at all — the reader resolves each record against the position it has
+/// produced, so the records must be emitted where their region starts. The
+/// dangerous case is a candidate that *loses*: the chain head cannot roll a
+/// member back out, so a losing encode leaves the state advanced while the
+/// caller's unfiltered pass runs from it, and the packer then emits distances
+/// into a member the decoder never saw. That produced archives the reader
+/// rejects with "match distance 262144 exceeds the 65536-byte window" (a
+/// near-random member whose first 64 KiB block spuriously wins a delta trial).
+/// The losing case resets the chain state in place instead. Forced/disabled
+/// `-mc` modes, and the `-m1`/`-m2` rungs (where the scan's cost is not worth
+/// it), keep the whole-member picker.
 fn try_solid_filters(
     cx: &mut dyn Engine,
     data: &[u8],
@@ -278,28 +281,61 @@ fn try_solid_filters(
     dict_bytes: Option<u64>,
     threads: usize,
 ) -> RarResult<Option<Vec<u8>>> {
+    use crate::options::FilterMode;
     let variant = crate::version::ArchiveVersion::from_v70(dict_bytes.is_some());
     let filters = cx.write_ctx().compression.filters;
-    let Some(specs) = lzss_huff::solid_filter_specs(data, method, dsl, variant, &filters)? else {
-        return Ok(None);
+    let scan = std::env::var("RAR_RS_FILTER_SCAN")
+        .map(|value| value != "0")
+        .unwrap_or(method >= 3);
+    let auto = filters.delta == FilterMode::Auto && filters.x86 == FilterMode::Auto;
+    // Prefer the per-block picker, then the whole-member probe when it declines
+    // every block: coverage heuristics miss some x86 runs the trial-based probe
+    // still takes (a member of `E8 rel32` call sites is declined per block but
+    // filtered whole-member). Both decisions are state-independent, so a
+    // fallback re-decides without disturbing the chain.
+    let per_block = (auto && scan).then(|| {
+        lzss_huff::best_combined_specs(data, method, dsl, variant, None, lzss_huff::FILTER_E8E9, 1)
+    });
+    let specs = match per_block {
+        Some(specs) if !specs.is_empty() => specs,
+        _ => match lzss_huff::solid_filter_specs(data, method, dsl, variant, &filters)? {
+            Some(specs) if !specs.is_empty() => specs,
+            _ => return Ok(None),
+        },
     };
     let cancel = cx.cancel_token();
-    let state = cx
-        .write_ctx_mut()
-        .solid
-        .encoder_state
-        .as_mut()
-        .expect("encoder state seeded");
-    Ok(Some(lzss_huff::encode_with_filters_continue(
-        data,
-        method,
-        dsl,
-        &specs,
-        variant,
-        threads,
-        state,
-        cancel.as_deref(),
-    )?))
+    let packed = {
+        let state = cx
+            .write_ctx_mut()
+            .solid
+            .encoder_state
+            .as_mut()
+            .expect("encoder state seeded");
+        lzss_huff::encode_with_filters_continue(
+            data,
+            method,
+            dsl,
+            &specs,
+            variant,
+            threads,
+            state,
+            cancel.as_deref(),
+        )?
+    };
+    if packed.len() as u64 >= data.len() as u64 {
+        // The filtered candidate lost against STORE. Reset the shared chain
+        // state in place (the head dictionary stays, so the run's declarations
+        // still match the reader's one window) so the caller's unfiltered pass
+        // starts from a clean window rather than history the decoder never saw.
+        cx.write_ctx_mut()
+            .solid
+            .encoder_state
+            .as_mut()
+            .expect("encoder state seeded")
+            .reset();
+        return Ok(None);
+    }
+    Ok(Some(packed))
 }
 
 /// RAR5 filesystem-file member writer (the neutral dispatcher lives in
@@ -357,7 +393,6 @@ pub(crate) fn add_file_rar5(
         method,
         cx.write_ctx().compression.force_v70,
     );
-
     if method == COMP_METHOD_STORE || probe_incompressible {
         // STORE is written by streaming the file directly: bounded
         // memory regardless of file size. Encrypted STORE is encrypted
