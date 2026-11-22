@@ -399,7 +399,12 @@ pub(crate) fn add_file_rar5(
     }
 
     let method = level_to_method(level);
-    let probe_incompressible = method != COMP_METHOD_STORE
+    // A solid chain never stores: WinRAR keeps the member's compressed stream
+    // even when it grows (like the RAR4 writer), because a store resets the
+    // chain and splits the run.
+    let chain_compresses = cx.write_ctx().solid.mode && method != COMP_METHOD_STORE;
+    let probe_incompressible = !chain_compresses
+        && method != COMP_METHOD_STORE
         && file_size >= (SAMPLE_PROBE_HEAD as u64) * 4
         && sample_is_incompressible_stream(&mut fs::File::open(path)?, file_size, method)?;
     let (dsl, dict_bytes) = dict_params_for(
@@ -650,13 +655,13 @@ pub(crate) fn add_file_rar5(
             )?;
             packed.extend(compressed);
             cx.report_progress(bytes_read, file_size);
-            if packed.len() as u64 >= file_size {
+            if packed.len() as u64 >= file_size && !chain_compresses {
                 break;
             }
         }
     }
 
-    if packed.len() as u64 >= file_size {
+    if packed.len() as u64 >= file_size && !chain_compresses {
         // Compression is a net loss: fall back to streaming STORE.
         crate::format::shared::write_ops::reset_solid_chain(cx);
         let (header_crc, extra_data, stored_hash, encr) =
