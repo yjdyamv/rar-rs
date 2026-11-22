@@ -157,6 +157,13 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         args.solid || args.solid_params.is_some() || misc.solid_reset != "off",
     ) {
         (_, false) => rar_rs::SolidMode::Disabled,
+        // Stored members cannot form a solid chain, so a bare `-s`/`-sd -m0` is
+        // not solid (WinRAR leaves ARCHIVE_FLAG_SOLID clear). An explicit
+        // `-s=v`/`-se` reset keeps its mode so the format can still reject an
+        // unrepresentable reset (e.g. `-ma4 -s=v`).
+        _ if args.level == 0 && !matches!(misc.solid_reset.as_str(), "volume" | "extension") => {
+            rar_rs::SolidMode::Disabled
+        }
         ("volume", _) => rar_rs::SolidMode::PerVolume,
         ("extension", _) => rar_rs::SolidMode::PerExtension,
         _ => rar_rs::SolidMode::Continuous,

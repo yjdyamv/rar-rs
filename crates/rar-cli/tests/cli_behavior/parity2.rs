@@ -587,6 +587,36 @@ fn cli_single_volume_dash_v_is_a_plain_archive() {
     );
 }
 
+/// Stored members cannot form a solid chain, so `-m0 -s` must not set
+/// ARCHIVE_FLAG_SOLID (WinRAR stores them plainly); `-m5 -s` must.
+#[test]
+fn cli_solid_flag_only_for_compressed_members() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.bin"), vec![5u8; 2000]).unwrap();
+    let solid_bit = |name: &str, sw: &[&str]| -> u64 {
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", "-idq"])
+            .args(sw)
+            .arg(name)
+            .arg("f.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{sw:?}");
+        rar5_main_archive_flags(&std::fs::read(dir.path().join(name)).unwrap()) & 0x4
+    };
+    assert_eq!(
+        solid_bit("stored.rar", &["-m0", "-s"]),
+        0,
+        "-m0 -s must not set ARCHIVE_FLAG_SOLID"
+    );
+    assert_eq!(
+        solid_bit("solid.rar", &["-m5", "-s"]),
+        0x4,
+        "-m5 -s must set ARCHIVE_FLAG_SOLID"
+    );
+}
+
 /// `a -sfx` prepends the default SFX module at create time (skipped when
 /// no module is installed).
 #[test]

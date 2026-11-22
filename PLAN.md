@@ -503,7 +503,8 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
   **仍存**：多卷且每卷含多个缓存条目时，卷尾 QO 预留与官方差约几十字节（`-qo+` 下亦
   复现，与条目过滤无关，属既有多卷预算模型缺口）。回归：
   `cli_quick_open_skips_small_members`。
-- **`-v` 恰好单卷时（官方降级为普通档案）**：**已对齐**。`a -v<size>` 若内容恰好装进一卷，官方写的就是不带 `-v` 的那份普通档案：名为 `{base}.rar`（不是 `{base}.part1.rar`）、主头不带 `ARCHIVE_FLAG_VOLUME`。`commit_pending` 现在在 `nd == 1` 时把主头的 VOLUME 位清掉（重算头 CRC；清低位不改变 vint 宽度，故头长与后续偏移不变）、最终名定为 `{base}.rar`；`-hp`（明文头无法解析）与带 `.rev` 的集合不降级。`-m0`/`-qo-`/`-qo+` 单卷实测与官方逐字节一致。**仍存**（均与降级无关的既有差异）：单成员 `-s` 档官方不置 SOLID 而我们置了；`-rr` 单卷的内联恢复记录载荷两边仍不同。回归：`cli_single_volume_dash_v_is_a_plain_archive`。
+- **`-v` 恰好单卷时（官方降级为普通档案）**：**已对齐**。`a -v<size>` 若内容恰好装进一卷，官方写的就是不带 `-v` 的那份普通档案：名为 `{base}.rar`（不是 `{base}.part1.rar`）、主头不带 `ARCHIVE_FLAG_VOLUME`。`commit_pending` 现在在 `nd == 1` 时把主头的 VOLUME 位清掉（重算头 CRC；清低位不改变 vint 宽度，故头长与后续偏移不变）、最终名定为 `{base}.rar`；`-hp`（明文头无法解析）与带 `.rev` 的集合不降级。`-m0`/`-qo-`/`-qo+` 单卷实测与官方逐字节一致。**仍存**：`-rr` 单卷的内联恢复记录载荷两边仍不同（既有差异，与降级无关）。回归：`cli_single_volume_dash_v_is_a_plain_archive`。
+- **`-m0 -s`（STORE + solid）的 SOLID 标志**：**已对齐**。STORED 成员成不了 solid 链，官方即便给了 `-s` 也不置 `ARCHIVE_FLAG_SOLID`（1 成员与 3 成员、`-m0 -s` 均如此；`-m5 -s` 即便单成员也置位）。我们此前一律置位。现在 CLI 在 `-m0`（level 0）且未显式 `-s=v`/`-se` 时把 solid 模式关掉，`-ma4 -s=v` 这类不可表达的重置模式仍照旧报错。回归：`cli_solid_flag_only_for_compressed_members`。
 - **`-os` NTFS 流（STM）（packed 字节仍不同）**：两边 STM 服务块名字 /`unpSize`/
   `dataCrc` 相同；`compInfo` 现在**都是 `384`**（version 0、solid 0、
   **method=3**）——`write_stream_record` 先用 method 3（dict log 0）压缩流数据，
