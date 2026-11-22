@@ -285,6 +285,14 @@ pub(crate) fn encrypt_block_header(header: &[u8], password: &str) -> RarResult<(
 /// Returns `(encoded_name, flags)` where `flags` includes `FHD_UNICODE` if
 /// the name was encoded using the RAR4 Unicode extension.
 pub(crate) fn encode_file_name(name: &str) -> (Vec<u8>, u16) {
+    // WinRAR stores the host's own separator (a Windows `-ma4` archive uses
+    // `\`); the model and the CLI keep the portable `/`, so translate here.
+    let name = if cfg!(windows) {
+        name.replace('/', "\\")
+    } else {
+        name.to_string()
+    };
+    let name = name.as_str();
     // If the name is pure ASCII, store it as-is (no FHD_UNICODE).
     if name.is_ascii() {
         return (name.as_bytes().to_vec(), 0);

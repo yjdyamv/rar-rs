@@ -459,6 +459,9 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         return Err(RarError::format("RAR4: file name extends past header"));
     }
     let name = decode_file_name(&h[pos..name_end], block.flags);
+    // RAR4 stores the host's own separator (a Windows archive uses `\`); the
+    // model keeps the portable `/` so names compare and extract uniformly.
+    let name = name.replace('\\', "/");
     pos = name_end;
 
     let salt = if block.flags & FHD_SALT != 0 {
