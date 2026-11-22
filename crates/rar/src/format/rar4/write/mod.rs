@@ -297,60 +297,69 @@ pub(crate) fn encode_file_name(name: &str) -> (Vec<u8>, u16) {
     if name.is_ascii() {
         return (name.as_bytes().to_vec(), 0);
     }
-    // Encode as RAR4 Unicode: null-terminated ANSI fallback + Unicode
-    // extension. The ANSI fallback is the system code page when it represents
-    // the name (WinRAR's behaviour), else `?` substitutions. The extension is a
-    // byte-aligned stream of 2-bit mode codes (4 per flag byte, MSB first)
-    // interleaved with each code's data: mode 0 = single byte (`unit < 0x100`),
-    // mode 2 = two bytes LE. The decoder (rar40::decode_file_name) reads a flag
-    // byte, then the data bytes of the up-to-four codes it describes, in order.
-    let ascii_fallback: Vec<u8> = match crate::format::encode_system_ansi(name) {
+    // RAR 3.0 "old name": the ANSI name + NUL, then a stream that rebuilds the
+    // Unicode name. Its first byte is the high byte shared by the compact
+    // one-byte codes (WinRAR uses 1 when no unit exceeds 0xFF); then 2-bit
+    // modes packed MSB-first, four per flag byte, each followed by its data
+    // bytes in order: 0 = one literal byte, 1 = HighByte<<8 | byte, 2 = two
+    // bytes LE, 3 = copy a run from the ANSI name (Length byte = run - 2, read
+    // at the same decoded position). Derived from WinRAR 6.23's output over a
+    // name matrix (ASCII prefixes, GBK characters, mixed high bytes and a
+    // surrogate pair).
+    let ansi_name: Vec<u8> = match crate::format::encode_system_ansi(name) {
         Some(ansi) => ansi,
         None => name
             .chars()
             .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
             .collect(),
     };
-    let ascii_fallback: Vec<u8> = ascii_fallback
-        .into_iter()
-        .chain(std::iter::once(0))
-        .collect();
+    let units: Vec<u16> = name.encode_utf16().collect();
+    let high = units
+        .iter()
+        .find(|unit| **unit > 0xFF)
+        .map_or(1, |unit| (unit >> 8) as u8);
 
-    let utf16: Vec<u16> = name.encode_utf16().collect();
-    let mut ext = Vec::new();
-    // High byte shared by mode-1 codes (units in the 0xFFxx range). We only
-    // emit mode 2 for units >= 0x100, so this value is inert; 0xFF is the
-    // conventional WinRAR value.
-    ext.push(0xFF);
-
-    let mut modes = [0u8; 4];
-    let mut data = Vec::<u8>::new();
-    let mut group = 0usize;
-    for &unit in &utf16 {
+    let mut items: Vec<(u8, Vec<u8>)> = Vec::new();
+    let mut i = 0;
+    while i < units.len() {
+        // Two or more characters equal to the ANSI name's bytes at the same
+        // positions are copied as one run (mode 3).
+        let mut run = 0;
+        while i + run < units.len()
+            && ansi_name
+                .get(i + run)
+                .is_some_and(|&b| units[i + run] == u16::from(b))
+        {
+            run += 1;
+        }
+        if run >= 2 {
+            let n = run.min(0x7F + 2);
+            items.push((3, vec![(n - 2) as u8]));
+            i += n;
+            continue;
+        }
+        let unit = units[i];
         if unit <= 0xFF {
-            // Mode 0: single byte.
-            modes[group] = 0;
-            data.push(unit as u8);
+            items.push((0, vec![unit as u8]));
+        } else if unit >> 8 == u16::from(high) {
+            items.push((1, vec![(unit & 0xFF) as u8]));
         } else {
-            // Mode 2: two bytes, low first.
-            modes[group] = 2;
-            data.push((unit & 0xFF) as u8);
-            data.push((unit >> 8) as u8);
+            items.push((2, vec![(unit & 0xFF) as u8, (unit >> 8) as u8]));
         }
-        group += 1;
-        if group == 4 {
-            ext.push(encode_flag_byte(&modes[..4]));
-            ext.extend_from_slice(&data);
-            data.clear();
-            group = 0;
-        }
-    }
-    if group > 0 {
-        ext.push(encode_flag_byte(&modes[..group]));
-        ext.extend_from_slice(&data);
+        i += 1;
     }
 
-    let mut result = ascii_fallback;
+    let mut ext = vec![high];
+    for group in items.chunks(4) {
+        let modes: Vec<u8> = group.iter().map(|(mode, _)| *mode).collect();
+        ext.push(encode_flag_byte(&modes));
+        for (_, data) in group {
+            ext.extend_from_slice(data);
+        }
+    }
+
+    let mut result = ansi_name;
+    result.push(0);
     result.extend_from_slice(&ext);
     (result, FHD_UNICODE)
 }
