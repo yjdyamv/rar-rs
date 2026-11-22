@@ -939,6 +939,7 @@ impl RarArchive {
                     quick_open,
                     quick_open_auto,
                     quick_open_hit: false,
+                    volume_data_run: 0,
                     offset_width,
                     quick_open_entries: Vec::new(),
                     qo_offset_field_pos: None,

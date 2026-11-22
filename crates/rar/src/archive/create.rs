@@ -211,7 +211,12 @@ impl RarArchive {
     /// prefix, its freshly patched main header included). The archive rewrite
     /// path reuses the same rules by simply setting `recovery_percent`.
     pub(super) fn finish_volume(&mut self, next_volume: bool) -> RarResult<()> {
-        let quick_open = self.quick_open_record_wanted();
+        // Reserve for the record once the volume earns it, but only write it
+        // when it actually caches a header: a volume of small members earns the
+        // budget yet caches nothing, and WinRAR then writes no record (the
+        // reserved tail stays zero padding).
+        let quick_open = self.quick_open_record_wanted()
+            && !self.write_ctx().locator.quick_open_entries.is_empty();
         let qo_offset = if quick_open {
             Some(self.write_quick_open_record()?)
         } else {
@@ -478,7 +483,8 @@ impl RarArchive {
     /// that compresses to 61 bytes earns nothing).
     pub(super) fn mark_quick_open_data(&mut self, packed_run: u64) {
         let locator = &mut self.write_ctx_mut().locator;
-        if locator.quick_open_auto && packed_run > QUICK_OPEN_AUTO_THRESHOLD {
+        locator.volume_data_run = locator.volume_data_run.saturating_add(packed_run);
+        if locator.quick_open_auto && locator.volume_data_run > QUICK_OPEN_AUTO_THRESHOLD {
             locator.quick_open_hit = true;
         }
     }

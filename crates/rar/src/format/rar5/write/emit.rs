@@ -48,7 +48,11 @@ pub(super) fn volume_tail_reserve(
     prefix_len: u64,
     pending: Option<(u64, u64)>,
 ) -> u64 {
-    let pending_header = pending.and_then(|(len, run)| cx.quick_open_caches(run).then_some(len));
+    // The pending header joins the reservation whenever the volume earns its
+    // record at all (the `record_wanted` gate inside the reserve), regardless of
+    // this member's own run — WinRAR reserves it even when only the volume total
+    // crossed the threshold.
+    let pending_header = pending.map(|(len, _run)| len);
     let quick_open = cx.quick_open_volume_reserve(pending_header);
     // Header-encrypted sets keep the earlier geometry (their reserve has an
     // extra `-hp` term we have not measured); so does a caller with no volume

@@ -190,10 +190,6 @@ impl VolumeOps for RarArchive {
         RarArchive::quick_open_volume_reserve(self, pending_header)
     }
 
-    fn quick_open_caches(&self, packed_run: u64) -> bool {
-        RarArchive::quick_open_caches(self, packed_run)
-    }
-
     fn mark_quick_open_data(&mut self, packed_run: u64) {
         RarArchive::mark_quick_open_data(self, packed_run);
     }

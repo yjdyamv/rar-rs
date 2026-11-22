@@ -359,6 +359,10 @@ pub(crate) struct LocatorState {
     /// `start_next_volume`, since no entry of one volume is visible from the
     /// next.
     pub quick_open_hit: bool,
+    /// Member data (packed) written to the current volume so far. The automatic
+    /// rule keys on the volume's *total* run, so many small members can still
+    /// earn the record; reset per volume by `start_next_volume`.
+    pub volume_data_run: u64,
     /// Reserved width of the QO/RR offset fields, when the caller supplied a
     /// size estimate (WinRAR's byte layout); `None` uses the default.
     pub offset_width: Option<usize>,

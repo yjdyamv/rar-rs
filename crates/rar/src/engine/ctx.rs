@@ -215,10 +215,6 @@ pub(crate) trait VolumeOps {
     /// being settled for). `0` when quick-open is off or the archive is
     /// single-volume, so the family writers can add it unconditionally.
     fn quick_open_volume_reserve(&self, pending_header: Option<u64>) -> u64;
-    /// Whether a member header whose packed data run in the current volume is
-    /// `packed_run` earns a quick-open entry. Automatic mode caches only runs
-    /// above the threshold; `-qo+` caches every header, `-qo-` none.
-    fn quick_open_caches(&self, packed_run: u64) -> bool;
     /// Note that `packed_run` bytes of member data are about to be written to
     /// the current volume, so the automatic quick-open rule can decide whether
     /// the volume earns its record. No-op unless quick-open is in automatic

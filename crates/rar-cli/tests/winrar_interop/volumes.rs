@@ -215,6 +215,70 @@ fn our_middle_volumes_expose_nanosecond_times_to_unrar() {
     );
 }
 
+fn volume_parts(dir: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
+    let mut v: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.starts_with(prefix) && n.contains(".part") && n.ends_with(".rar")
+            })
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// The automatic quick-open rule keys on the volume's **cumulative** member
+/// data, not one member's run: a volume of small members (none above 4096 B)
+/// still earns the record's reserved tail — it caches nothing and writes no
+/// record, but the tail is held back as padding. Ours keyed on the single
+/// member, so such a volume fit more data and the set diverged.
+#[test]
+fn multivolume_auto_quick_open_many_small_members_is_byte_identical() {
+    let Some(official) = rar_bin() else {
+        eprintln!("skipped: WinRAR not installed");
+        return;
+    };
+    let dir = temp_dir();
+    let mut members = Vec::new();
+    for i in 0..20u8 {
+        let name = format!("f{i:02}.bin");
+        std::fs::write(dir.path().join(&name), vec![i; 1000]).unwrap();
+        members.push(name);
+    }
+    let make = |bin: &std::path::Path, arc: &str| {
+        let status = Command::new(bin)
+            .args(["a", "-idq", "-m0", "-v8k", arc])
+            .args(&members)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "create {arc}");
+    };
+    make(std::path::Path::new(env!("CARGO_BIN_EXE_rar")), "ours.rar");
+    make(&official, "win.rar");
+
+    let ours = volume_parts(dir.path(), "ours");
+    let win = volume_parts(dir.path(), "win");
+    assert!(
+        ours.len() > 2,
+        "expected several volumes, got {}",
+        ours.len()
+    );
+    assert_eq!(ours.len(), win.len(), "volume counts differ");
+    for (a, b) in ours.iter().zip(&win) {
+        assert_eq!(
+            std::fs::read(a).unwrap(),
+            std::fs::read(b).unwrap(),
+            "volume {} differs from {}",
+            a.display(),
+            b.display()
+        );
+    }
+}
+
 /// The per-volume quick-open reserve when a volume caches several entries:
 /// WinRAR reserves `header_len + 16` for each already-cached header and a fixed
 /// 3-byte distance for the pending one. Ours used to under-reserve, shifting
@@ -248,22 +312,8 @@ fn multivolume_qoplus_set_is_byte_identical() {
     make(std::path::Path::new(env!("CARGO_BIN_EXE_rar")), "ours.rar");
     make(&official, "win.rar");
 
-    let parts = |prefix: &str| -> Vec<std::path::PathBuf> {
-        let mut v: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                    n.starts_with(prefix) && n.contains(".part") && n.ends_with(".rar")
-                })
-            })
-            .collect();
-        v.sort();
-        v
-    };
-    let ours = parts("ours");
-    let win = parts("win");
+    let ours = volume_parts(dir.path(), "ours");
+    let win = volume_parts(dir.path(), "win");
     assert!(
         ours.len() > 4,
         "expected several volumes, got {}",

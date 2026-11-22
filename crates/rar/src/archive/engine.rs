@@ -112,6 +112,7 @@ impl RarArchive {
         // data, not on the previous volume's.
         self.write_ctx_mut().locator.quick_open_entries.clear();
         self.write_ctx_mut().locator.quick_open_hit = false;
+        self.write_ctx_mut().locator.volume_data_run = 0;
         self.stream = None;
         self.write_ctx_mut().output.current_volume += 1;
         let (parent, tmp_base, final_base) = match &self.write_ctx().output.pending {
