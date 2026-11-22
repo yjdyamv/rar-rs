@@ -56,6 +56,58 @@ pub(crate) fn decode_system_ansi(_bytes: &[u8]) -> Option<String> {
     None
 }
 
+/// Encode text with the process's system ANSI code page (`CP_ACP`) — the
+/// encoding WinRAR's RAR4 writer uses for a member name the code page can
+/// represent. `None` when it cannot (or the round-trip differs), so the caller
+/// keeps the `FHD_UNICODE` extension.
+#[cfg(windows)]
+pub(crate) fn encode_system_ansi(text: &str) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Globalization::{CP_ACP, WideCharToMultiByte};
+
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let len = i32::try_from(wide.len()).ok()?;
+    let bytes_len = unsafe {
+        WideCharToMultiByte(
+            CP_ACP,
+            0,
+            wide.as_ptr(),
+            len,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        )
+    };
+    if bytes_len <= 0 {
+        return None;
+    }
+    let mut bytes = vec![0u8; bytes_len as usize];
+    let written = unsafe {
+        WideCharToMultiByte(
+            CP_ACP,
+            0,
+            wide.as_ptr(),
+            len,
+            bytes.as_mut_ptr(),
+            bytes_len,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+    bytes.truncate(written as usize);
+    // Only an exact round-trip is safe: a lossy mapping would change the name.
+    (decode_system_ansi(&bytes).as_deref() == Some(text)).then_some(bytes)
+}
+
+/// Non-Windows stub: there is no system code page to target.
+#[cfg(not(windows))]
+pub(crate) fn encode_system_ansi(_text: &str) -> Option<Vec<u8>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::decode_system_ansi;

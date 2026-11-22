@@ -297,15 +297,22 @@ pub(crate) fn encode_file_name(name: &str) -> (Vec<u8>, u16) {
     if name.is_ascii() {
         return (name.as_bytes().to_vec(), 0);
     }
-    // Encode as RAR4 Unicode: null-terminated ASCII fallback + Unicode
-    // extension. The extension is a byte-aligned stream of 2-bit mode codes
-    // (4 per flag byte, MSB first) interleaved with each code's data:
-    // mode 0 = single byte (`unit < 0x100`), mode 2 = two bytes LE.
-    // The decoder (rar40::decode_file_name) reads a flag byte, then the
-    // data bytes of the up-to-four codes it describes, in order.
-    let ascii_fallback: Vec<u8> = name
-        .chars()
-        .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
+    // Encode as RAR4 Unicode: null-terminated ANSI fallback + Unicode
+    // extension. The ANSI fallback is the system code page when it represents
+    // the name (WinRAR's behaviour), else `?` substitutions. The extension is a
+    // byte-aligned stream of 2-bit mode codes (4 per flag byte, MSB first)
+    // interleaved with each code's data: mode 0 = single byte (`unit < 0x100`),
+    // mode 2 = two bytes LE. The decoder (rar40::decode_file_name) reads a flag
+    // byte, then the data bytes of the up-to-four codes it describes, in order.
+    let ascii_fallback: Vec<u8> = match crate::format::encode_system_ansi(name) {
+        Some(ansi) => ansi,
+        None => name
+            .chars()
+            .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
+            .collect(),
+    };
+    let ascii_fallback: Vec<u8> = ascii_fallback
+        .into_iter()
         .chain(std::iter::once(0))
         .collect();
 
@@ -752,11 +759,21 @@ mod tests {
 
     #[test]
     fn encode_unicode_name_sets_flag() {
-        let (encoded, flags) = encode_file_name("café.txt");
+        let name = "café.txt";
+        let (encoded, flags) = encode_file_name(name);
         assert_ne!(flags & FHD_UNICODE, 0);
-        // Should contain the ASCII fallback.
+        // The NUL-terminated ANSI fallback is the system code page's encoding
+        // of the name when it round-trips (CP1252 `caf\xE9.txt`, CP936
+        // `caf\xA8\xA6.txt`, CP65001 the raw UTF-8 bytes) and the
+        // `?`-substituted form otherwise. `CP_ACP` is locale-dependent, so pin
+        // the contract instead of particular bytes.
+        let expected = crate::format::encode_system_ansi(name).unwrap_or_else(|| {
+            name.chars()
+                .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
+                .collect()
+        });
         let fallback_end = encoded.iter().position(|&b| b == 0).unwrap();
-        assert_eq!(&encoded[..fallback_end], b"caf?.txt");
+        assert_eq!(&encoded[..fallback_end], expected.as_slice());
     }
 
     #[test]
