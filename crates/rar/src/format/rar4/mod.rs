@@ -497,18 +497,19 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     };
 
     // Extended time: four nibbles (mtime, ctime, atime, arctime) with
-    // sub-second precision. Only mtime is decoded; ctime/atime are stored
-    // in `extra_data` for potential future use.
+    // sub-second precision. The raw area is kept in `extra_data` (the edit
+    // path copies it verbatim) and decoded into the three timestamps.
     let ext_time = if block.flags & FHD_EXTTIME != 0 {
         h[pos..head_end].to_vec()
     } else {
         Vec::new()
     };
 
-    let (add_second, mtime_ns) = extract_mtime_refinement(&ext_time);
+    let ext = decode_ext_time(&ext_time);
     // The DOS field has 2-second resolution; an odd second is flagged in the
     // ext-time word.
-    let mtime = dos_time_to_unix(file_time).wrapping_add(u32::from(add_second));
+    let mtime = dos_time_to_unix(file_time).wrapping_add(u32::from(ext.mtime_add_second));
+    let mtime_ns = ext.mtime_ns;
 
     let is_directory = rar4_is_directory(attr);
 
@@ -558,8 +559,10 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
         format_version: 4,
         dict_size_bytes: None,
         mtime_ns,
-        ctime: None,
-        atime: None,
+        // RAR 3.x/4.x carry ctime/atime in the extended-time area (host Unix
+        // uses true ctime; Windows the creation time), like the RAR5 records.
+        ctime: ext.ctime.map(|(secs, ns)| (u64::from(secs), ns)),
+        atime: ext.atime.map(|(secs, ns)| (u64::from(secs), ns)),
         owner: None,
         group: None,
         version: None,
@@ -685,36 +688,84 @@ pub(crate) fn is_stored(comp_method: u8) -> bool {
     comp_method == 0
 }
 
-/// Extract the mtime refinement from the RAR4 extended-time field: the
-/// `ADD_SECOND` flag (the DOS field has 2-second resolution) and the
-/// sub-second ticks. The flags word holds four nibbles (mtime first at bits
-/// 15-12), each encoding PRESENT (0x8), ADD_SECOND (0x4) and a 0-3 byte
-/// count. Sub-second bytes arrive high-end first into a 24-bit accumulator.
-fn extract_mtime_refinement(ext_time: &[u8]) -> (bool, Option<u32>) {
+/// The timestamps decoded from an `FHD_EXTTIME` area (see [`decode_ext_time`]).
+struct ExtTimes {
+    /// The header's DOS mtime is an even second; this adds the odd one.
+    mtime_add_second: bool,
+    mtime_ns: Option<u32>,
+    /// ctime/atime as `(seconds, nanoseconds)`; `None` when absent.
+    ctime: Option<(u32, u32)>,
+    atime: Option<(u32, u32)>,
+}
+
+/// Decode the RAR4 extended-time area. The 16-bit flags word holds four
+/// nibbles — mtime, ctime, atime, arctime from the top — each encoding PRESENT
+/// (`0x8`), ADD_SECOND (`0x4`) and a 0..=3 sub-second byte count. A field's
+/// sub-second bytes arrive high-end first into a 24-bit 100-ns tick
+/// accumulator; mtime reuses the header's own DOS field, ctime and atime carry
+/// a 4-byte DOS time of their own before their bytes (with their own
+/// ADD_SECOND), and arctime is never materialized. Mirrors unrar's
+/// `ReadExtTime`; verified against WinRAR 6.23 `-ma4 -tsc -tsa`.
+fn decode_ext_time(ext_time: &[u8]) -> ExtTimes {
     const PRESENT: u8 = 0x8;
     const ADD_SECOND: u8 = 0x4;
     const TICK_NANOSECONDS: u32 = 100;
 
+    let mut out = ExtTimes {
+        mtime_add_second: false,
+        mtime_ns: None,
+        ctime: None,
+        atime: None,
+    };
     let Some(flags) = ext_time
         .get(..2)
         .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
         .map(u16::from_le_bytes)
     else {
-        return (false, None);
+        return out;
     };
-    let rmode = ((flags >> 12) & 0xf) as u8;
-    if rmode & PRESENT == 0 {
-        return (false, None);
+    let mut pos = 2usize;
+    for (index, shift) in [12u32, 8, 4, 0].into_iter().enumerate() {
+        let nibble = ((flags >> shift) & 0xf) as u8;
+        if nibble & PRESENT == 0 {
+            continue;
+        }
+        let add_second = nibble & ADD_SECOND != 0;
+        // ctime/atime carry their own 4-byte DOS time; mtime reuses the
+        // header's field and arctime is never materialized.
+        let secs = match index {
+            1 | 2 => {
+                let Some(bytes) = ext_time.get(pos..pos + 4) else {
+                    return out;
+                };
+                pos += 4;
+                let raw = u32::from_le_bytes(bytes.try_into().unwrap());
+                Some(dos_time_to_unix(raw).wrapping_add(u32::from(add_second)))
+            }
+            0 => {
+                out.mtime_add_second = add_second;
+                None
+            }
+            _ => None,
+        };
+        let count = usize::from(nibble & 0x3);
+        let Some(bytes) = ext_time.get(pos..pos + count) else {
+            return out;
+        };
+        pos += count;
+        let mut ticks = 0u32;
+        for &byte in bytes {
+            ticks = (u32::from(byte) << 16) | (ticks >> 8);
+        }
+        let ns = ticks * TICK_NANOSECONDS;
+        match index {
+            0 => out.mtime_ns = Some(ns),
+            1 => out.ctime = Some((secs.unwrap_or_default(), ns)),
+            2 => out.atime = Some((secs.unwrap_or_default(), ns)),
+            _ => {}
+        }
     }
-    let add_second = rmode & ADD_SECOND != 0;
-    let Some(bytes) = ext_time.get(2..2 + usize::from(rmode & 0x3)) else {
-        return (add_second, None);
-    };
-    let mut ticks = 0u32;
-    for &byte in bytes {
-        ticks = (u32::from(byte) << 16) | (ticks >> 8);
-    }
-    (add_second, Some(ticks * TICK_NANOSECONDS))
+    out
 }
 
 /// Locate the nested `COMM_HEAD` (0x75) file-comment subblock in a `FILE_HEAD`'s
@@ -803,20 +854,51 @@ mod tests {
     }
 
     #[test]
-    fn extract_mtime_refinement_applies_add_second() {
-        // PRESENT|ADD_SECOND, one 100-ns tick.
-        let ext = [0x00u8, 0xF0, 0x01, 0x00, 0x00];
-        let (add_second, ns) = extract_mtime_refinement(&ext);
-        assert!(add_second);
-        assert_eq!(ns, Some(100));
+    fn decode_ext_time_applies_add_second() {
+        // mtime PRESENT|ADD_SECOND, one 100-ns tick.
+        let times = decode_ext_time(&[0x00u8, 0xF0, 0x01, 0x00, 0x00]);
+        assert!(times.mtime_add_second);
+        assert_eq!(times.mtime_ns, Some(100));
+        assert_eq!((times.ctime, times.atime), (None, None));
 
         // ADD_SECOND without ticks is still a present refinement.
-        let (add_second, ns) = extract_mtime_refinement(&[0x00, 0xC0]);
-        assert!(add_second);
-        assert_eq!(ns, Some(0));
+        let times = decode_ext_time(&[0x00, 0xC0]);
+        assert!(times.mtime_add_second);
+        assert_eq!(times.mtime_ns, Some(0));
 
         // No PRESENT bit: nothing to apply.
-        assert_eq!(extract_mtime_refinement(&[0x00, 0x00]), (false, None));
+        let times = decode_ext_time(&[0x00, 0x00]);
+        assert!(!times.mtime_add_second);
+        assert_eq!(
+            (times.mtime_ns, times.ctime, times.atime),
+            (None, None, None)
+        );
+    }
+
+    /// The exact `FHD_EXTTIME` area WinRAR 6.23 writes for `-ma4 -tsc -tsa`
+    /// on a file with mtime `…:01.123456`, ctime `…:35.198231` and
+    /// atime `…:41.5` decodes to those timestamps.
+    #[test]
+    fn decode_ext_time_matches_a_winrar_vector() {
+        let ext = [
+            0xf0, 0xff, // mtime|ctime|atime all PRESENT|ADD_SECOND, 3 tick bytes
+            0x80, 0xd6, 0x12, // mtime ticks 1_234_560
+            0x71, 0x95, 0x76, 0x5d, // ctime DOS 0x5d76_9571
+            0x66, 0x3f, 0x1e, // ctime ticks 1_982_310
+            0x54, 0xa3, 0x2d, 0x51, // atime DOS 0x512d_a354
+            0x40, 0x4b, 0x4c, // atime ticks 5_000_000
+        ];
+        let times = decode_ext_time(&ext);
+        assert!(times.mtime_add_second);
+        assert_eq!(times.mtime_ns, Some(123_456_000));
+        assert_eq!(
+            times.ctime,
+            Some((dos_time_to_unix(0x5d76_9571).wrapping_add(1), 198_231_000))
+        );
+        assert_eq!(
+            times.atime,
+            Some((dos_time_to_unix(0x512d_a354).wrapping_add(1), 500_000_000))
+        );
     }
 
     #[test]

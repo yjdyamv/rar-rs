@@ -457,11 +457,17 @@ fn list_stamp(entry: &EntryRef<'_>) -> (String, String) {
 /// Member timestamp in the container's own time convention: RAR5 stores UTC
 /// (rendered local), RAR 1.3–4.x stores DOS local time (rendered as-is).
 fn member_stamp(entry: &EntryRef<'_>) -> String {
+    member_stamp_at(entry, entry.mtime())
+}
+
+/// A member timestamp in the container's own time convention (see
+/// [`member_stamp`]); used for `Created:`/`Accessed:` too.
+fn member_stamp_at(entry: &EntryRef<'_>, secs: u32) -> String {
     let version = entry.version();
     if version.is_rar13() || version.is_legacy() {
-        crate::time::format_civil_time(entry.mtime())
+        crate::time::format_civil_time(secs)
     } else {
-        crate::time::format_local_time(entry.mtime())
+        crate::time::format_local_time(secs)
     }
 }
 
@@ -687,6 +693,25 @@ pub fn list_technical(
                 "Modified",
                 member_stamp(&entry),
                 entry.mtime_ns().unwrap_or(0)
+            );
+        }
+        // WinRAR lists the creation and access times after the modification
+        // time when the archive carries them (RAR5 FILE_TIME records and RAR
+        // 1.5-4.x extended-time fields alike).
+        if let Some((secs, ns)) = entry.ctime() {
+            println!(
+                "{:>12}: {},{:09}",
+                "Created",
+                member_stamp_at(&entry, secs as u32),
+                ns
+            );
+        }
+        if let Some((secs, ns)) = entry.atime() {
+            println!(
+                "{:>12}: {},{:09}",
+                "Accessed",
+                member_stamp_at(&entry, secs as u32),
+                ns
             );
         }
         println!("{:>12}: {}", "Attributes", attributes_cell(&entry));

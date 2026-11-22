@@ -367,7 +367,7 @@ pub(crate) use crate::format::shared::legacy_time::unix_to_dos_time;
 /// odd-second flag for mtime. RAR4 stores the 100-ns tick count as three
 /// bytes, least significant first, with a 2-byte flags word whose bits 12-15
 /// encode PRESENT (`0x8`), ADD_SECOND (`0x4`) and the byte count. This
-/// matches what WinRAR writes and what `extract_mtime_refinement` decodes.
+/// matches what WinRAR writes and what `decode_ext_time` decodes.
 pub(crate) fn build_ext_time(mtime: u32, mtime_ns: Option<u32>) -> Option<Vec<u8>> {
     // DOS seconds have 2-second resolution; an odd local second is
     // recovered through ADD_SECOND.
