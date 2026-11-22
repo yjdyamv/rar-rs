@@ -405,6 +405,12 @@ pub(crate) struct OutputState {
     /// `{base}.partNN.rar` — and leave `MHD_NEWNUMBERING` clear. RAR 1.3/1.4
     /// always use the old names and ignore this.
     pub old_numbering: bool,
+    /// Internal: demote a `-v` set that turns out to hold a single volume to
+    /// the plain `{base}.rar` (no volume flag, short `ENDARC`). `true` for a
+    /// user create; the RAR4 multi-volume edit/append repack clears it so the
+    /// set keeps its `.partNN.rar` shape (see
+    /// [`crate::options::CreateOptions::demote_single_volume`]).
+    pub demote_single_volume: bool,
     /// Current volume number during creation (1-indexed).
     pub current_volume: usize,
     /// Bytes written in the current volume during creation.

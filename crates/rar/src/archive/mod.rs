@@ -952,6 +952,7 @@ impl RarArchive {
                     volume_size: opts.volume_size,
                     recovery_ratio: None,
                     old_numbering: opts.old_numbering,
+                    demote_single_volume: opts.demote_single_volume,
                     current_volume: 0,
                     bytes_written: 0,
                     rar13_header_pending: false,

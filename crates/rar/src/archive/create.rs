@@ -521,16 +521,13 @@ impl RarArchive {
                 let nd = self.volume_paths.len();
                 let width = nd.to_string().len().max(1);
                 // WinRAR demotes a set that turned out to hold a single volume
-                // to a plain `{base}.rar` with no `ARCHIVE_FLAG_VOLUME` (a
-                // `-v` that fits in one volume is the archive you would get
-                // without `-v`). A header-encrypted first volume cannot be
-                // parsed, and a `.rev` set keeps its volume naming.
-                let demote = nd == 1
-                    && !self.is_rar13()
-                    && !self.is_legacy()
-                    && !self.header_encryption
-                    && self.recovery_volumes_percent.is_none()
-                    && self.recovery_volumes_count.is_none();
+                // to a plain `{base}.rar` with no volume flag (a `-v` that fits
+                // in one volume is the archive you would get without `-v`). The
+                // RAR4 writer already cleared the flag and wrote the short
+                // ENDARC before the recovery record, so only the rename is
+                // left; the RAR5 commit clears the flag in the staged header.
+                let demote = nd == 1 && self.demotes_single_volume();
+                let rar5_demote = demote && !self.is_legacy();
                 let mut data_paths = Vec::with_capacity(nd);
                 let mut install = Vec::with_capacity(nd);
                 for n in 1..=nd {
@@ -542,14 +539,14 @@ impl RarArchive {
                     // RAR13 too, so test RAR13 first.)
                     let final_path = if self.is_rar13() {
                         volume_path_rar4(parent, final_base, n)
-                    } else if self.is_legacy() {
-                        self.rar4_final_volume_path(parent, final_base, n, width)
                     } else if demote {
                         parent.join(format!("{final_base}.rar"))
+                    } else if self.is_legacy() {
+                        self.rar4_final_volume_path(parent, final_base, n, width)
                     } else {
                         volume_path_padded(parent, final_base, n, width)
                     };
-                    if demote {
+                    if rar5_demote {
                         clear_volume_flag(&tmp)?;
                     }
                     data_paths.push(final_path.clone());
@@ -618,6 +615,30 @@ impl RarArchive {
                 Err(e)
             }
         }
+    }
+
+    /// Whether a `-v` set that turned out to hold exactly one volume is
+    /// written as the plain `{base}.rar` archive WinRAR produces without `-v`.
+    ///
+    /// RAR 1.5–4.x sets qualify: the writer patches the staged main header and
+    /// writes the short single-volume ENDARC before the recovery record
+    /// ([`Self::demote_rar4_single_volume`]), so the commit only renames. RAR5
+    /// sets qualify when the first volume is not header-encrypted (its header
+    /// cannot be parsed back to clear `ARCHIVE_FLAG_VOLUME`). RAR 1.3/1.4 keeps
+    /// its `.rar`/`.rNN` naming. A single-volume set writes no `.rev` files
+    /// regardless (the recovery-volume builder skips a one-volume set), so a
+    /// `-rv` request does not change the answer.
+    fn demotes_single_volume(&self) -> bool {
+        if !self.write_ctx().output.demote_single_volume {
+            return false;
+        }
+        if self.is_rar13() {
+            return false;
+        }
+        if self.is_rar4() {
+            return true;
+        }
+        !self.header_encryption
     }
 
     /// Remove the staged `.rev` files the recovery-volume builder may have
@@ -1129,6 +1150,10 @@ impl RarArchive {
             return Ok(());
         }
         if self.stream.is_some() && (self.mode == Mode::Write || self.mode == Mode::Append) {
+            // Demote a `-v` set that turned out to hold a single volume to the
+            // plain archive *before* the recovery record is computed, so the
+            // record protects the demoted header (matching WinRAR).
+            self.demote_rar4_single_volume()?;
             // `-rr`: the legacy NEWSUB (0x7a) recovery record goes between
             // the last member and the end-of-archive block, in every volume of
             // a set (matching WinRAR's RAR4 writer). Appending to an archive
@@ -1137,6 +1162,53 @@ impl RarArchive {
             self.finish_volume_rar4(false)?;
             self.mode = Mode::Read;
         }
+        Ok(())
+    }
+
+    /// Clear the volume flags of a `-v` set that turned out to hold a single
+    /// volume, in the staged main header, in place — WinRAR writes such a set
+    /// as the plain archive you would get without `-v`. Only the first (and
+    /// only) volume qualifies. Run before the recovery record so the record
+    /// protects the demoted header; [`Self::write_rar4_end_block`] then takes
+    /// the short single-volume ENDARC, and [`Self::commit_pending`] renames the
+    /// staged file to `{base}.rar`.
+    fn demote_rar4_single_volume(&mut self) -> RarResult<()> {
+        if !self.write_ctx().output.demote_single_volume
+            || !self.is_rar4()
+            || self.write_ctx().output.volume_size.is_none()
+            || self.write_ctx().output.current_volume != 1
+        {
+            return Ok(());
+        }
+        let Some((offset, _)) = self.write_ctx().rar4.main_header else {
+            return Ok(());
+        };
+        // Read the header back (a legacy RAR 1.5/2.x comment is nested inside
+        // it, so it can be longer than the fixed 13 bytes).
+        let stream = self.stream.as_mut().unwrap();
+        let end = stream.stream_position()?;
+        stream.seek(SeekFrom::Start(offset))?;
+        let mut fixed = [0u8; 13];
+        stream.read_exact(&mut fixed)?;
+        let head_size = u16::from_le_bytes([fixed[5], fixed[6]]) as usize;
+        let mut header = vec![0u8; head_size];
+        header[..13].copy_from_slice(&fixed);
+        if head_size > 13 {
+            stream.read_exact(&mut header[13..])?;
+        }
+        use crate::format::rar4::{MHD_FIRSTVOLUME, MHD_NEWNUMBERING, MHD_VOLUME};
+        let flags = u16::from_le_bytes([header[3], header[4]]);
+        let cleared = flags & !(MHD_VOLUME | MHD_FIRSTVOLUME | MHD_NEWNUMBERING);
+        if cleared != flags {
+            header[3..5].copy_from_slice(&cleared.to_le_bytes());
+            // The header CRC still covers only the fixed 13 bytes (a nested
+            // comment carries its own CRC), matching `embed_legacy_main_comment`.
+            let crc = crate::format::shared::checksum::header_crc16(&header[2..13]);
+            header[..2].copy_from_slice(&crc.to_le_bytes());
+            stream.seek(SeekFrom::Start(offset))?;
+            stream.write_all(&header)?;
+        }
+        stream.seek(SeekFrom::Start(end))?;
         Ok(())
     }
 
@@ -1299,9 +1371,14 @@ impl RarArchive {
 
     /// Append this volume's ENDARC_HEAD. A multi-volume set uses WinRAR's
     /// 20-byte form carrying the protected prefix's CRC-32 and the zero-based
-    /// volume index; a single-volume archive keeps the short 7-byte form.
+    /// volume index; a single-volume archive — including a `-v` set that was
+    /// demoted to one volume — keeps the short 7-byte form.
     fn write_rar4_end_block(&mut self, next_volume: bool) -> RarResult<()> {
-        let buf: Vec<u8> = if self.write_ctx().output.volume_size.is_some() {
+        let single_volume = self.write_ctx().output.volume_size.is_none()
+            || (self.write_ctx().output.current_volume == 1 && !next_volume);
+        let buf: Vec<u8> = if single_volume {
+            crate::format::rar4::write::build_endarc_single().to_vec()
+        } else {
             let prefix_crc = {
                 let stream = self.stream.as_mut().unwrap();
                 let prefix_len = stream.stream_position()?;
@@ -1309,8 +1386,6 @@ impl RarArchive {
             };
             let index = self.write_ctx().output.current_volume.saturating_sub(1) as u16;
             crate::format::rar4::write::build_endarc(next_volume, prefix_crc, index).to_vec()
-        } else {
-            crate::format::rar4::write::build_endarc_single().to_vec()
         };
         let stream = self.stream.as_mut().unwrap();
         if self.header_encryption {

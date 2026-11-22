@@ -509,6 +509,11 @@ pub(crate) fn repack_multivolume_archive(
                     encrypt_headers: hp,
                     volume_size: Some(volume_size),
                     old_numbering,
+                    // Keep the set's `.partNN.rar` shape even if the edit
+                    // shrinks it to one volume: this is an edit of an existing
+                    // set, not a fresh `-v` create (matching the RAR5 edit
+                    // path, which installs its own names).
+                    demote_single_volume: false,
                     recovery_percent: rr_percent,
                     recovery_sectors: rr_sectors,
                     ..Default::default()

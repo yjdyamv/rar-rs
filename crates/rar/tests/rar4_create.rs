@@ -2421,6 +2421,71 @@ fn rar4_multivolume_uses_new_numbering_and_the_volume_endarc() {
     }
 }
 
+/// A `-v` set that fits in a single volume is written as the plain archive
+/// WinRAR produces without `-v`: named `{base}.rar` (never `.part1.rar`), with
+/// no `MHD_VOLUME`/`MHD_FIRSTVOLUME`/`MHD_NEWNUMBERING`, the short 7-byte
+/// single-volume `ENDARC` — and byte-identical to the same write without `-v`.
+/// Verified against WinRAR 6.23 (`-ma4 -m0 -v150k` demotes to `arc.rar`).
+#[test]
+fn rar4_single_volume_dash_v_is_the_plain_archive() {
+    let dir = make_temp_dir();
+    let mut data = vec![0u8; 40_000];
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for b in &mut data {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u8;
+    }
+    let src = dir.path().join("f.bin");
+    std::fs::write(&src, &data).unwrap();
+
+    let sized = dir.path().join("sized.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &sized,
+        WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .volume_size(150_000),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(0)).unwrap();
+    archive.finish().unwrap();
+
+    assert!(sized.exists(), "a single volume must be named {{base}}.rar");
+    assert!(!dir.path().join("sized.part1.rar").exists());
+
+    let bytes = std::fs::read(&sized).unwrap();
+    let flags = u16::from_le_bytes([bytes[10], bytes[11]]);
+    assert_eq!(
+        flags & (0x0001 | 0x0010 | 0x0100),
+        0,
+        "a demoted set clears MHD_VOLUME/NEWNUMBERING/FIRSTVOLUME"
+    );
+    let endarc = &bytes[bytes.len() - 7..];
+    assert_eq!(endarc[2], 0x7b, "ENDARC type");
+    assert_eq!(
+        u16::from_le_bytes([endarc[3], endarc[4]]),
+        0x4000,
+        "single-volume ENDARC flags"
+    );
+    assert_eq!(
+        u16::from_le_bytes([endarc[5], endarc[6]]),
+        7,
+        "single-volume ENDARC head size"
+    );
+
+    // Byte-identical to the archive the same options without `-v` produce.
+    let plain = dir.path().join("plain.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &plain,
+        WriterOptions::new().compression(ArchiveVersion::V29),
+    )
+    .unwrap();
+    archive.add_path(&src, ewo(0)).unwrap();
+    archive.finish().unwrap();
+    assert_eq!(bytes, std::fs::read(&plain).unwrap());
+}
+
 /// `-vn` (`old_numbering`) is a RAR4-only naming flag: RAR5 and RAR13 ignore
 /// it. RAR5 must still produce the zero-padded `partNN` set and RAR13 always
 /// the old `.rar`/`.rNN` one. An ungated flag made the volume commit look for

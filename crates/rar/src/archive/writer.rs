@@ -494,6 +494,7 @@ impl WriterOptions {
             recovery_volume_count: self.recovery_volume_count,
             volume_size: self.volume_size,
             old_numbering: self.old_numbering,
+            demote_single_volume: true,
             dict_size_log: dictionary_log,
             dict_size_bytes: dictionary_bytes,
             rar4_dict_bits: self.rar4_dict_bits,

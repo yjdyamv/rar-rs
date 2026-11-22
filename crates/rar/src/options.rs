@@ -229,6 +229,14 @@ pub(crate) struct CreateOptions {
     /// flag set. RAR 1.3/1.4 always use the old names; RAR5 has no old
     /// naming, so the flag is ignored there.
     pub old_numbering: bool,
+    /// Internal: demote a `-v` set that turns out to hold a single volume to
+    /// the plain `{base}.rar` archive WinRAR produces without `-v` (no volume
+    /// flag, short single-volume `ENDARC`). `true` for a user create; the RAR4
+    /// multi-volume edit/append repack sets it `false` so an existing set keeps
+    /// its `.partNN.rar` shape even when the edit shrinks it to one volume
+    /// (matching the RAR5 edit path, which installs its own names). No effect
+    /// without [`Self::volume_size`].
+    pub demote_single_volume: bool,
     /// Dictionary size as a RAR5 log (`128 KiB << log`), like WinRAR's
     /// `-md`; `None` = WinRAR's default (32 MiB, capped at 2x the file
     /// size rounded down to a power of two). Valid logs: 0..=15
@@ -486,6 +494,7 @@ impl Default for CreateOptions {
             recovery_volume_count: None,
             volume_size: None,
             old_numbering: false,
+            demote_single_volume: true,
             dict_size_log: None,
             dict_size_bytes: None,
             rar4_dict_bits: None,
