@@ -571,7 +571,8 @@ pub(crate) fn add_rar4_data(
 
 /// Write one RAR4 directory FILE_HEAD member (WinRAR convention: zero
 /// packed/unpacked sizes, CRC 0, the directory's DOS attribute byte (at least
-/// `0x10`), `unp_ver 20`, name without a trailing slash; directories carry no
+/// `0x10`), `unp_ver 20` (`29` under `-p`, so a reader selects the cipher),
+/// name without a trailing slash; directories carry no
 /// data payload).
 pub(crate) fn write_rar4_dir_entry(
     cx: &mut dyn Engine,
@@ -618,6 +619,15 @@ pub(crate) fn write_rar4_dir_entry(
     // The directory's own DOS attributes (directory bit plus hidden/system),
     // like WinRAR; the model entry carries the same byte.
     let attr = crate::platform::rar4_dir_attributes(meta);
+    // A `-p` member declares `unp_ver 29` (the RAR29 layout) even when it
+    // stores nothing, so a reader selects the right cipher; a plain directory
+    // stores as `unp_ver 20` like a stored file. WinRAR 6.23 stamps 29 on a
+    // `-p` directory.
+    let member_unp_ver = crate::format::rar4::write::member_unp_ver(
+        cx.write_ctx().solid.rar4_unp_ver,
+        0,
+        cx.password().is_some_and(|pw| !pw.is_empty()),
+    );
     let params = FileHeaderParams {
         flags,
         packed_size: 0,
@@ -625,7 +635,7 @@ pub(crate) fn write_rar4_dir_entry(
         host_os: 2,
         file_crc: 0,
         file_time: unix_to_dos_time(mtime_secs),
-        unp_ver: 20,
+        unp_ver: member_unp_ver,
         method: crate::format::rar4::RAR4_METHOD_STORE,
         name: &encoded_name,
         attr,
@@ -703,7 +713,7 @@ pub(crate) fn write_rar4_dir_entry(
             comp_method: 0,
             host_os: 2,
             format_version: 4,
-            unp_ver: 20,
+            unp_ver: member_unp_ver,
             legacy_head_crc: Some(head_crc),
             is_directory: true,
             extra_data: ext_time.unwrap_or_default(),
