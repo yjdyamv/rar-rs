@@ -470,6 +470,10 @@ fn cli_extract_overwrite_defaults_to_skip() {
         let mut command = std::process::Command::new(UNRAR_CLI);
         command.args(["x"]).args(&extra).arg(&archive);
         command.arg("--dest").arg(&out);
+        // Detach stdin: this exercises the non-interactive overwrite default
+        // (skip), so the child must not inherit a terminal and block on the
+        // interactive prompt when the suite runs from a console.
+        command.stdin(std::process::Stdio::null());
         let status = command.current_dir(dir.path()).status().unwrap();
         assert_eq!(
             status.code(),
