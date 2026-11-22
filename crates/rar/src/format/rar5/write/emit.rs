@@ -475,7 +475,10 @@ pub(super) fn write_split_member(
 
         let final_hdr = final_fh.to_bytes();
         let final_hdr_disk = cx.on_disk_header_len(final_hdr.len() as u64);
-        cx.record_quick_open_entry(&final_hdr, total_packed)?;
+        // Cache this volume's copy of the header only when the chunk it holds
+        // here exceeds the threshold — a member whose *total* run is large but
+        // whose slice in this volume is small is not cached here.
+        cx.record_quick_open_entry(&final_hdr, chunk_size)?;
         cx.write_block_header(&final_hdr)?;
         let data_offset = phase(cx, SplitPhase::Write, offset, chunk_size, is_last)?;
         cx.add_bytes_written(final_hdr_disk + chunk_size);

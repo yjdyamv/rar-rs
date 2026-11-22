@@ -279,6 +279,44 @@ fn multivolume_auto_quick_open_many_small_members_is_byte_identical() {
     }
 }
 
+/// A member split across volumes: only the volume whose chunk exceeds 4096 B
+/// caches the continuation header (a small slice does not, even when the
+/// member's total run is larger). A `-v8k` set is byte-identical to WinRAR's.
+#[test]
+fn multivolume_split_member_quick_open_is_byte_identical() {
+    let Some(official) = rar_bin() else {
+        eprintln!("skipped: WinRAR not installed");
+        return;
+    };
+    let dir = temp_dir();
+    write_pattern_file(&dir.path().join("big.bin"), 9000, 3);
+    let make = |bin: &std::path::Path, arc: &str| {
+        let status = Command::new(bin)
+            .args(["a", "-idq", "-m0", "-v8k", arc])
+            .arg("big.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "create {arc}");
+    };
+    make(std::path::Path::new(env!("CARGO_BIN_EXE_rar")), "ours.rar");
+    make(&official, "win.rar");
+
+    let ours = volume_parts(dir.path(), "ours");
+    let win = volume_parts(dir.path(), "win");
+    assert_eq!(ours.len(), win.len(), "volume counts differ");
+    assert!(ours.len() >= 2, "expected a split, got {}", ours.len());
+    for (a, b) in ours.iter().zip(&win) {
+        assert_eq!(
+            std::fs::read(a).unwrap(),
+            std::fs::read(b).unwrap(),
+            "volume {} differs from {}",
+            a.display(),
+            b.display()
+        );
+    }
+}
+
 /// The per-volume quick-open reserve when a volume caches several entries:
 /// WinRAR reserves `header_len + 16` for each already-cached header and a fixed
 /// 3-byte distance for the pending one. Ours used to under-reserve, shifting
