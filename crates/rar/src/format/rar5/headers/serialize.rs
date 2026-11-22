@@ -84,8 +84,9 @@ fn stream_size_field_width(unpacked_size: u64) -> usize {
 /// it makes a 7.5 KiB member's header two bytes longer than the value alone
 /// would need, which moved every later member of a volume by two bytes (and so
 /// every quick-open offset with it) until it was pinned down. Service blocks
-/// (QO/RR/CMT) keep the plain two-byte floor; the stream block has its own rule
-/// in [`stream_size_field_width`].
+/// (QO/RR/CMT) follow the same tiers — measured: a >7.5 KiB RR payload widens
+/// its header to three-byte size fields (header 25, not 23). The stream block
+/// has its own rule in [`stream_size_field_width`].
 fn member_size_field_width(total_unpacked: u64) -> usize {
     const THREE_BYTES: u64 = (1 << 13) - 512;
     const FOUR_BYTES: u64 = (1 << 20) - 512;
@@ -453,9 +454,13 @@ pub(crate) fn build_service_block(
     if !subdata.is_empty() {
         body.extend(vint::encode(subdata.len() as u64)); // extra area size
     }
-    body.extend(vint_at_least(data_size, 2)); // data size
+    // WinRAR applies the member `data_size`/`unpacked_size` width tiers here
+    // too: an RR payload above ~7.5 KiB carries the three-byte width (its
+    // on-disk header is 25, not 23). Small QO/CMT payloads stay at the floor.
+    let size_width = member_size_field_width(data_size);
+    body.extend(vint_at_least(data_size, size_width)); // data size
     body.extend(vint::encode(0u64)); // file flags
-    body.extend(vint_at_least(data_size, 2)); // unpacked size
+    body.extend(vint_at_least(data_size, size_width)); // unpacked size
     body.extend(vint::encode(0u64)); // attributes
     body.extend(vint_at_least(0, 2)); // compression info (store)
     body.extend(vint::encode(crate::platform::host_os()));

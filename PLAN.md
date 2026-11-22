@@ -98,27 +98,15 @@
   `release_tag` 复核 skip 分支（OIDC 真发已由 `v0.15.3` 证明）。
 - **性能**：issue 09（DLL 单线程解析）、issue 15（价格驱动解析中间档 `-m1.5`?
   待决策）、issue 04（MT 窗口级不可压缩跳过）。
-- **格式层（已量化、需逆向）**：`-qo`/`-rr` 分卷的卷尾补零 / 每卷预留量，
-  纯字节收益，见下「已知差异」。
 - **溯源**：`rars` 移植的逐文件与上游对拍（in-tree claim，不影响许可表达式）。
 
-### 已知差异（已量化，追平需先逆向公式）
+### 已知差异（已量化；`-qo`/`-rr` 分卷已对齐）
 
-- [ ] **`-qo`/`-rr` + 分卷的「卷尾补零 / 每卷预留量」**（已量化；贴平需逆向
-      `Rar.exe` 的预留量算法）：布局已追平（每卷 QO 服务块 + 主头 `LOCATOR`、
-      条目 `rel` 重算，有官方 `UnRAR` 对拍）。差异在**每卷预留的 trailer
-      大小**：官方把**非末卷补零到恰好 `volume_size`**（ENDARC 后留 0…N 字节
-      零尾，N 随内容变；`-v64k` 实测 part1 余 8、part2 余 14），末卷不补；且其
-      每卷预留比我们**多约 20–22 字节**（`-v64k` 末卷官方 29468 / 我们 29446，
-      `-rr5%` 40346 / 40326），即官方在非末卷少写那 N 字节、留到末卷，所以
-      **末卷差 ~20–22 字节**；「`-rr` 松弛量不规则」是同一现象。两边都能被官方
-      `t`/`x`/`rc` 接受，`.rev` 本体逐字节相同。
-      **逆向状态**：已追到卷驱动——`FUN_14003631c(stream,size)` =
-      `seek`+`SetEndOfFile`（**整卷预分配**，扩展部分即零尾）；多卷驱动
-      `FUN_14005be6c` 对每卷调用它、大小取自 `[base+vol*0x40+0x30]`。**预留量
-      算术在该数组的上游填充**（某个通用容器/分配例程，尚未定位）；`Rar7.exe`
-      已导入 Ghidra（UI 文本在 `rarlng.dll`，二进制字符串/常量被剥离）。
-       纯字节收益，属“有意不追平”，留作后续专门逆向。
+- [x] **`-qo`/`-rr` + 分卷的「卷尾补零 / 每卷预留量」**（**已实现并对拍**）：布局早已追平（每卷 QO 服务块 + 主头 `LOCATOR`、条目 `rel` 重算，有官方 `UnRAR` 对拍）；唯一差异是每卷尾部 trailer 的预留与补零。旧记录里的「末卷差 ~20–22 字节」「`-rr` 松弛量不规则」都是下面这套规则的副产物。
+      **机制（`Rar7.exe` 7-23）**：`FUN_14003631c(stream,size)` = `seek`+`SetEndOfFile`，把每个非末卷预分配到计划大小，扩出来的零就是卷尾；多卷驱动 `FUN_14005be6c` 在 L428 对每卷调用它，大小取自 `[base+vol*0x40+0x30]`。每卷数据预算在 `FUN_14007de58(ctx,volume_size)`；`FUN_14007d704` 是前缀搜索；`FUN_140054100(type=3,pct,prefix)` = `plan_inline_recovery(prefix,pct).payload_size() + 0x16`（官方按**固定 22 字节**估 RR 服务头，实际头是 19/23/25，差额落在零尾）；`FUN_140054dfc` 是 RR 计划（data_shards 上限 200、`(2*pct*ds)/200`、group_count 取偶、header_size=`ds*8+0x48`、shard=`blocks*header+gc`，与我们 `plan_inline_recovery` 逐项一致）；`FUN_1400542cc` 发射 `{RB}` 块（magic `7b52427d`、64 KiB 分块）。
+      **完整预算模型**（设 `V = volume_size`）：① `bound = V − 8`（8 = RAR5 END；`-hp` 时 32）。② 无 `-rr` 时 `term = bound`；有 `-rr` 时取满足 `u + plan_inline_recovery(u,pct).payload_size() + 0x16 ≤ bound` 的**最大前缀** `u`，再 `term = u − 8`（`FUN_14007de58` 里 `ctx[0x1f80] = lVar3 − lVar6` 的 `−8`）。③ `QO 预留 = 有 QO ? quick_open::entry_len_upper(V, header_len) + 8 : 0`（我们现在只到 `+0`）。④ 成员数据预算 `data = term − QO预留 − (8 签名 + 主头 + 文件头)`。⑤ **补零规则**：`content = 8 + 主头 + 文件头 + data + QO实际 + RR实际 + END`；非末卷**当且仅当 `V − content ≤ max(V/128, 1024)`** 时补零到 `V`，否则停在 `content`（末卷永不补）。
+      **对拍**（`-m0` STORE，`-v{32k…512k} × -rr{1..100}%`，取每例的非末卷）：实现后**卷文件大小 / 成员 `data` / `content` 全部 1000/1000**。`-qo-` 无 RR 时本就逐字节相同。
+      **实现（2026-11-22）**：`volume_term()` 复刻 `FUN_14007de58` 的 term；`volume_tail_reserve()` 用 `QO预留(+8) + (V − term)`；`pad_volume_tail()` 复刻「`V − content ≤ max(V/128,1024)` 才补零」；顺带把服务块 `data_size`/`unpacked_size` 改为走成员宽度分档（实测官方在 >7.5 KiB 时也宽 3 字节，QO 与 RR 都如此）。`format_parity` 的 `-rr` 分卷用例已从「字段级」升级为「padding 与 chunk 全等」，`cargo test --workspace --all-features` 全绿。复现脚本 `.scratch/{fastsweep,verify_ours}.mjs`；Ghidra 结论在 `Rar7.exe` 的 `rar5-volume` note。
 
 - [x] **solid 里的滤波：换逐块选择器（2026-11-21）**：solid 成员改用非 solid 的
       逐 64 KiB 块选择器（`best_combined_specs`），拿回整员探针漏掉的 x86——87 MB

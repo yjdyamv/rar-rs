@@ -1495,11 +1495,10 @@ fn volume_blocks(volume: &[u8]) -> (Vec<VolBlock>, usize) {
 }
 
 /// Every scan helper above addresses one archive; a recovery record adds a
-/// `RR` service block per volume, and official pads each non-final volume
-/// with zeros, so the sets cannot be byte-identical. Everything around that
-/// padding still has to agree: same names, same block sequence, the same
-/// percent record, the same size-field widths, and the split arithmetic that
-/// turns the padding into a smaller data chunk.
+/// `RR` service block per volume, and official pads each non-final volume with
+/// zeros. We now reproduce that padding (and the per-volume budget behind it)
+/// exactly, so the sets agree on volume sizes, zero tails, block sequence, the
+/// percent record, and the size-field widths.
 fn check_recovery_volumes(
     member: &str,
     volume_size: u64,
@@ -1548,22 +1547,23 @@ fn check_recovery_volumes(
         "volume naming"
     );
     assert!(mine.len() > 3, "the payload must span several volumes");
-    // The reserved size fields are part of the per-volume budget: a volume
-    // that ignored the extra bytes would overflow the requested size.
-    for (name, bytes) in &mine[..mine.len() - 1] {
-        assert_eq!(
-            bytes.len() as u64,
-            volume_size,
-            "{name}: a non-final volume must fill the requested size exactly"
-        );
-    }
+    // We now reproduce official's per-volume size, padding included.
+    assert_eq!(
+        mine.iter().map(|(_, b)| b.len() as u64).collect::<Vec<_>>(),
+        theirs
+            .iter()
+            .map(|(_, b)| b.len() as u64)
+            .collect::<Vec<_>>(),
+        "volume sizes (padding included)"
+    );
+    let _ = volume_size;
 
     let mut our_payload = 0u64;
     let mut their_payload = 0u64;
     for (index, ((name, ours), (_, official))) in mine.iter().zip(&theirs).enumerate() {
         let (our_blocks, our_padding) = volume_blocks(ours);
         let (their_blocks, their_padding) = volume_blocks(official);
-        assert_eq!(our_padding, 0, "{name}: we never pad a volume");
+        assert_eq!(our_padding, their_padding, "{name}: same zero padding");
         assert_eq!(
             our_blocks.iter().map(|b| b.kind).collect::<Vec<_>>(),
             their_blocks.iter().map(|b| b.kind).collect::<Vec<_>>(),
@@ -1606,15 +1606,14 @@ fn check_recovery_volumes(
         our_payload += our_data.data_size;
         their_payload += their_data.data_size;
 
-        // Official reserves the padding inside the volume budget, so its
-        // chunk is exactly the padding shorter; the last volume has no
-        // padding and no reserve.
+        // Same padding and same chunk: our per-volume budget now matches
+        // official's, so non-final volumes carry equal data and equal zero
+        // tails, and the last volume is padded on neither side.
+        assert_eq!(
+            our_data.data_size, their_data.data_size,
+            "{name}: same member chunk"
+        );
         if index + 1 < mine.len() {
-            assert_eq!(
-                our_data.data_size,
-                their_data.data_size + their_padding as u64,
-                "{name}: our chunk must cover what official pads"
-            );
             assert!(
                 their_padding > 0,
                 "{name}: expected official to pad a non-final volume"

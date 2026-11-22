@@ -182,6 +182,10 @@ impl VolumeOps for RarArchive {
         RarArchive::recovery_volume_reserve(self, prefix_len)
     }
 
+    fn volume_term(&self, volume_size: u64) -> u64 {
+        RarArchive::volume_term(self, volume_size)
+    }
+
     fn quick_open_volume_reserve(&self, pending_header: Option<u64>) -> u64 {
         RarArchive::quick_open_volume_reserve(self, pending_header)
     }

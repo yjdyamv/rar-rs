@@ -204,6 +204,11 @@ pub(crate) trait VolumeOps {
     /// requested). Geometry only, so the family writers reserve room for the
     /// record on top of the end block and keep the volume within `volume_size`.
     fn recovery_volume_reserve(&self, prefix_len: u64) -> u64;
+    /// WinRAR's per-volume "term": the bytes after the member data for a volume
+    /// of `volume_size` — `volume_size - 8` (the end block) without `-rr`, or
+    /// the largest RR-start prefix minus 8 with `-rr`. One constant encodes the
+    /// end block and the recovery record reserve, like `FUN_14007de58`.
+    fn volume_term(&self, volume_size: u64) -> u64;
     /// Bytes the per-volume quick-open record will occupy at the tail of the
     /// volume being written, one entry per member header cached in that volume
     /// (`pending_header`: the header about to be emitted, which the budget is

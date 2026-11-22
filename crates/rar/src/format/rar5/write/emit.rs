@@ -47,13 +47,28 @@ pub(super) fn volume_tail_reserve(
     prefix_len: u64,
     pending_header: Option<u64>,
 ) -> u64 {
-    // The QO record sits *before* the recovery record, so the parity payload
-    // protects this volume's catalog too: size the recovery reserve over the
-    // prefix the catalog leaves behind, or the record grows by a byte or two
-    // past what was reserved and the volume overflows.
     let quick_open = cx.quick_open_volume_reserve(pending_header);
-    let recovery = cx.recovery_volume_reserve(prefix_len.saturating_add(quick_open));
-    cx.on_disk_header_len(8) + recovery + quick_open
+    // Header-encrypted sets keep the earlier geometry (their reserve has an
+    // extra `-hp` term we have not measured); so does a caller with no volume
+    // budget.
+    let Some(volume_size) = cx
+        .write_ctx()
+        .output
+        .volume_size
+        .filter(|_| !cx.header_encryption())
+    else {
+        let recovery = cx.recovery_volume_reserve(prefix_len.saturating_add(quick_open));
+        return cx.on_disk_header_len(8) + recovery + quick_open;
+    };
+    // WinRAR budgets a volume from one "term": the largest RR start prefix `u`
+    // with `u + payload(u, pct) + 0x16 <= volume_size - 8`, then `term = u - 8`
+    // (or `volume_size - 8` without `-rr`). Everything after the member data
+    // therefore reserves `volume_size - term` bytes, plus this volume's
+    // quick-open record and the fixed 8-byte slack WinRAR leaves after it.
+    // Mirrors `Rar7.exe`'s `FUN_14007de58` / `FUN_140054100`; see PLAN.md.
+    let term = cx.volume_term(volume_size);
+    let quick_open = if quick_open > 0 { quick_open + 8 } else { 0 };
+    quick_open + volume_size.saturating_sub(term)
 }
 
 /// Largest data budget that fits `remaining` volume bytes behind a

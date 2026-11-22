@@ -196,7 +196,8 @@ impl RarArchive {
         if rr_offset.is_some() {
             self.write_recovery_record()?;
         }
-        self.write_end_block_flags(next_volume)
+        self.write_end_block_flags(next_volume)?;
+        self.pad_volume_tail(next_volume)
     }
 
     /// Finish writing and hand the underlying stream back (test seam for
@@ -315,6 +316,69 @@ impl RarArchive {
             crate::format::rar5::BLOCK_FLAG_SKIP_IF_UNKNOWN,
         );
         self.on_disk_header_len(hdr.len() as u64) + payload
+    }
+
+    /// WinRAR's per-volume "term" (see [`crate::format::rar5::write::emit::volume_tail_reserve`]):
+    /// the byte budget a volume of `volume_size` keeps after its member data.
+    /// Without `-rr` that is `volume_size - 8` (the end block); with `-rr` it is
+    /// the largest RR-start prefix `u` with
+    /// `u + inline_recovery_payload_len(u, pct) + 0x16 <= volume_size - 8`,
+    /// minus 8. Mirrors `FUN_14007de58` (`Rar7.exe` 7-23); the `0x16` is
+    /// `FUN_140054100`'s fixed RR header estimate. See PLAN.md「已知差异」.
+    pub(super) fn volume_term(&self, volume_size: u64) -> u64 {
+        let bound = volume_size.saturating_sub(8);
+        let Some(percent) = self.recovery_percent else {
+            return bound;
+        };
+        let percent = u64::from(percent);
+        let fits = |u: u64| {
+            crate::recovery::rar50::inline_recovery_payload_len(u, percent)
+                .map(|payload| u.saturating_add(payload).saturating_add(0x16) <= bound)
+                .unwrap_or(false)
+        };
+        if !fits(0) {
+            return bound.saturating_sub(8);
+        }
+        let (mut lo, mut hi) = (0u64, bound);
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            if fits(mid) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo.saturating_sub(8)
+    }
+
+    /// WinRAR preallocates each non-final volume to `volume_size`, leaving the
+    /// unwritten tail zero — but only when the content ends within
+    /// `max(volume_size / 128, 1024)` bytes of `volume_size`; a bigger leftover
+    /// is *not* padded and the volume stops at its content. The final volume is
+    /// never padded. Measured against `Rar7.exe` 7-23 across
+    /// `-v{32k..512k} × -rr{1..100}%` (1000/1000 volume sizes). See PLAN.md.
+    fn pad_volume_tail(&mut self, next_volume: bool) -> RarResult<()> {
+        if !next_volume {
+            return Ok(());
+        }
+        let Some(volume_size) = self.write_ctx().output.volume_size else {
+            return Ok(());
+        };
+        let stream = self.stream.as_mut().unwrap();
+        let content = stream.stream_position()?;
+        let gap = volume_size.saturating_sub(content);
+        let threshold = std::cmp::max(volume_size / 128, 1024);
+        if gap == 0 || gap > threshold {
+            return Ok(());
+        }
+        let zeros = [0u8; 8192];
+        let mut remaining = gap;
+        while remaining > 0 {
+            let n = remaining.min(zeros.len() as u64) as usize;
+            stream.write_all(&zeros[..n])?;
+            remaining -= n as u64;
+        }
+        Ok(())
     }
 
     /// Bytes the per-volume quick-open record will occupy at the tail of the
