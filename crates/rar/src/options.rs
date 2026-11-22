@@ -240,6 +240,10 @@ pub(crate) struct CreateOptions {
     /// to 126 GiB. Mutually exclusive with `dict_size_log` in practice (one
     /// `-md` switch only).
     pub dict_size_bytes: Option<u64>,
+    /// RAR4 `-md` window as FHD bits (0 = 64 KiB … 6 = 4 MiB); `None` keeps
+    /// the member-size default. RAR4-only (see
+    /// `WriterOptions::rar4_dictionary_bits`).
+    pub rar4_dict_bits: Option<u8>,
     /// Write RAR7 (v70) members (`comp_version` 1, DCX distance table)
     /// even when `dict_size_bytes` is at or below the 4 GiB threshold
     /// that normally selects v70 (WinRAR's `-md` semantics). The header
@@ -484,6 +488,7 @@ impl Default for CreateOptions {
             old_numbering: false,
             dict_size_log: None,
             dict_size_bytes: None,
+            rar4_dict_bits: None,
             force_v70: false,
             filters: FilterOptions::default(),
             save_ctime: false,
@@ -964,11 +969,35 @@ pub fn parse_dict_bytes(s: &str) -> Option<u64> {
         Some('g') | Some('G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
         _ => (s, 1024 * 1024),
     };
+    parse_dict_bytes_with_floor(num, mult, MIN_DICTIONARY_BYTES)
+}
+
+/// Parse a WinRAR-style `-md<size>[k|m|g]` with RAR4's 64 KiB dictionary
+/// floor — below the RAR5 minimum [`parse_dict_bytes`] enforces, but a
+/// `-ma4` `-md` may request it (WinRAR 6.23 accepts `-md64k`). Returns
+/// `None` outside 64 KiB ..= 126 GiB.
+pub fn parse_dict_size_rar4(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult) = match s.chars().last() {
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1024u64),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('g') | Some('G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1024 * 1024),
+    };
+    parse_dict_bytes_with_floor(num, mult, 64 * 1024)
+}
+
+/// Shared tail of the raw dictionary parsers: `num` scaled by `mult`, bounded
+/// to `floor ..= ` the RAR7-encodable maximum.
+fn parse_dict_bytes_with_floor(num: &str, mult: u64, floor: u64) -> Option<u64> {
     let bytes = num
         .parse::<u64>()
         .ok()
         .and_then(|n| n.checked_mul(mult))
-        .filter(|b| (MIN_DICTIONARY_BYTES..=MAX_RAR7_DICTIONARY_BYTES).contains(b))?;
+        .filter(|b| (floor..=MAX_RAR7_DICTIONARY_BYTES).contains(b))?;
     Some(bytes)
 }
 

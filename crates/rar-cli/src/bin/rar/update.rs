@@ -52,6 +52,8 @@ fn cmd_update_freshen(
         dict_size_log,
         dict_size_bytes,
     )?;
+    let rar4_dict_bits =
+        crate::args::rar4_dict_bits(args.archive_format.as_deref(), args.dict_size.as_deref())?;
     // The version table is the single write knob: `-ma7` selects v70
     // (every member v70); `-ma5`/default keep v50 with the legacy auto
     // v50/v70 semantics for > 4 GiB `-md` requests; `-ma4` selects v29.
@@ -336,6 +338,9 @@ fn cmd_update_freshen(
                 }
                 if let Some(size) = dictionary {
                     writer_opts = writer_opts.dictionary_size(size);
+                }
+                if let Some(bits) = rar4_dict_bits {
+                    writer_opts = writer_opts.rar4_dictionary_bits(bits);
                 }
                 crate::ops::create_writer(staged_path, writer_opts)
                     .map_err(|error| CliError::from(error).context("recreate staged archive"))?

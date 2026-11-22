@@ -372,6 +372,11 @@ fn set_rar4_dict_bits(cx: &mut dyn Engine, entries: &[BatchEntry<'_>]) -> RarRes
     } else {
         crate::format::rar4::write::archive_dict_bits(unp_ver, size, solid)
     };
+    // A caller `-md` request caps the archive-wide window (never raises it).
+    let bits = match cx.write_ctx().solid.rar4_dict_bits_cap {
+        Some(cap) => bits.min(cap),
+        None => bits,
+    };
     cx.write_ctx_mut().solid.rar4_dict_bits = Some(bits);
     Ok(())
 }

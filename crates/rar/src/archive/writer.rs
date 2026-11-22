@@ -127,6 +127,9 @@ pub struct WriterOptions {
     volume_size: Option<u64>,
     pub(super) old_numbering: bool,
     pub(super) dictionary_size: Option<DictionarySize>,
+    /// RAR4 `-md` window as FHD bits (0 = 64 KiB … 6 = 4 MiB); `None` keeps the
+    /// member-size default. Capped at the default and only valid for `-ma4`.
+    pub(super) rar4_dict_bits: Option<u8>,
     save_ctime: bool,
     save_atime: bool,
     time_precision_seconds: bool,
@@ -155,6 +158,7 @@ impl Default for WriterOptions {
             volume_size: None,
             old_numbering: false,
             dictionary_size: None,
+            rar4_dict_bits: None,
             save_ctime: false,
             save_atime: false,
             time_precision_seconds: false,
@@ -327,6 +331,17 @@ impl WriterOptions {
         self
     }
 
+    /// Request a RAR4 dictionary window, like WinRAR's `-md` on a `-ma4`
+    /// archive, given as the fixed-width `FHD` window bits (`0` = 64 KiB …
+    /// `6` = 4 MiB). The writer caps it at the window the largest member needs
+    /// (so a larger request is a no-op) and bounds the encoder to it. Only
+    /// meaningful for the legacy RAR4 container (`-ma4`).
+    #[must_use]
+    pub fn rar4_dictionary_bits(mut self, bits: u8) -> Self {
+        self.rar4_dict_bits = Some(bits);
+        self
+    }
+
     /// Name a RAR4 volume set the old way (WinRAR `-vn`): `{base}.rar`,
     /// `{base}.r00`, … and no `MHD_NEWNUMBERING`, instead of the default
     /// zero-padded `{base}.partNN.rar` naming. Ignored by RAR 1.3/1.4 (always
@@ -481,6 +496,7 @@ impl WriterOptions {
             old_numbering: self.old_numbering,
             dict_size_log: dictionary_log,
             dict_size_bytes: dictionary_bytes,
+            rar4_dict_bits: self.rar4_dict_bits,
             force_v70: self.compression == ArchiveVersion::V70,
             filters: self.filters,
             save_ctime: self.save_ctime,

@@ -1,6 +1,6 @@
 # RAR4 Creation Feature Spec
 
-> 最后核对：2026-11-18 @ `73d84e4`；字节级行为由测试与官方工具对拍锁定。
+> 最后核对：2026-11-22；字节级行为由测试与官方工具对拍锁定。
 
 ## 目标
 
@@ -13,7 +13,7 @@ rar-rs 支持创建 RAR 1.5 / 2.x / 3.x-4.x（unp_ver
 
 | 功能                                                                                             | 状态 |
 | ------------------------------------------------------------------------------------------------ | ---- |
-| 单卷创建、STORE、LZSS+Huffman m1-m5、Solid（`-s`）、成员级加密（`-p`）、多卷（`-v`）、CLI `-ma4` | ✅   |
+| 单卷创建、STORE、LZSS+Huffman m1-m5、Solid（`-s`）、成员级加密（`-p`）、多卷（`-v`）、CLI `-ma4`、`-md` 固定宽度窗口 | ✅   |
 | PPMd 编码（`-m4`/`-m5`）                                                                         | ✅   |
 | 头加密（`-hp`）                                                                                  | ✅   |
 | 自动 VM 过滤器（E8/E8E9/Delta/Audio 探测 + RGB/Itanium 编码），solid 链内同样生效                | ✅   |
@@ -196,8 +196,9 @@ rar a -ma4 -v1m archive.rar file1 file2
 - `CreateOptions` 的 `compression` 字段类型为 `ArchiveVersion`（`"4"` →
   `V29`，字段原名 `format_version`，2026-09 与 `WriterOptions::compression`
   统一）
-- RAR4 不兼容的选项（quick_open、blake2、owner/streams、RAR7 字典）在 `-ma4`
-  时报错；内联 RR（`-rr`）、头加密（`-hp`）与 `.rev`
+- RAR4 不兼容的选项（quick_open、blake2、owner/streams、RAR5/RAR7 字典日志）在
+  `-ma4` 时报错；`-md` 改为设置 RAR4 固定宽度窗口（64 KiB–4 MiB，按成员集需要封顶，
+  官方 `-md` 只降不升）；内联 RR（`-rr`）、头加密（`-hp`）与 `.rev`
   恢复卷（`-rv`/`rv`/`rc`，2026-09）**已支持**
 
 ## 测试策略

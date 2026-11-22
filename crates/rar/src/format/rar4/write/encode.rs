@@ -123,10 +123,13 @@ fn encode_rar29_member(cx: &mut dyn Engine, data: &[u8], level: u8) -> RarResult
     }
     if !cx.write_ctx().solid.mode {
         let filters = cx.write_ctx().compression.filters;
-        return Ok(match best_rar29_member(data, level, filters)? {
-            Some(best) => best,
-            None => (data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE),
-        });
+        let max_distance = rar4_max_match_distance(cx, data.len(), level);
+        return Ok(
+            match best_rar29_member(data, level, filters, max_distance)? {
+                Some(best) => best,
+                None => (data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE),
+            },
+        );
     }
     // Solid: reuse the persistent encoder so its sliding window, Huffman
     // table and PPMd model state carry across the members of the run
@@ -143,11 +146,16 @@ fn encode_rar29_member(cx: &mut dyn Engine, data: &[u8], level: u8) -> RarResult
         .iter()
         .flat_map(|records| group_by_kind(records))
         .collect();
+    let max_distance = rar4_max_match_distance(cx, data.len(), level);
     let encoder = cx
         .write_ctx_mut()
         .solid
         .rar4_encoder
-        .get_or_insert_with(|| Unpack29Encoder::with_options(options_for_level(level)));
+        .get_or_insert_with(|| {
+            let mut options = options_for_level(level);
+            options.max_match_distance = options.max_match_distance.min(max_distance);
+            Unpack29Encoder::with_options(options)
+        });
     let lz = if data.is_empty() {
         encoder.encode_member(data)?
     } else {
@@ -422,16 +430,36 @@ fn group_by_kind(
 /// searches the same filter list against the carried chain, and then pits
 /// the best LZ result against the chain-continuing PPMd trial
 /// (`Unpack29Encoder::encode_solid_member_with_filter_candidates`).
+/// The RAR29 match distance (bytes) the declared RAR4 window permits:
+/// `64 KiB << window_bits`, the same field the FILE_HEAD carries. The encoder
+/// must never emit a distance past it, or the decoder's declared window cannot
+/// reach it — relevant when a `-md` request is below the member's size-driven
+/// default.
+fn rar4_max_match_distance(cx: &dyn Engine, unpacked: usize, level: u8) -> usize {
+    let solid = &cx.write_ctx().solid;
+    let window_bits = super::effective_window_bits(
+        solid.rar4_dict_bits,
+        solid.rar4_dict_bits_cap,
+        solid.rar4_unp_ver,
+        level,
+        solid.mode,
+        unpacked as u64,
+    );
+    0x1_0000usize << window_bits
+}
+
 pub(super) fn best_rar29_member(
     data: &[u8],
     level: u8,
     policy: crate::options::FilterOptions,
+    max_distance: usize,
 ) -> RarResult<Option<(Vec<u8>, u8)>> {
     use crate::codec::legacy::rar29_encoder::{Unpack29Encoder, options_for_level};
     if !(1..=5).contains(&level) {
         return Ok(None);
     }
-    let options = options_for_level(level);
+    let mut options = options_for_level(level);
+    options.max_match_distance = options.max_match_distance.min(max_distance);
     let method = crate::format::rar4::RAR4_METHOD_STORE + level;
     // Measured against WinRAR 6.23 on a 13.9 MB kernel image: its `-m1` archive
     // is byte-for-byte the same size with and without `-mc-` (7,385,258), so it

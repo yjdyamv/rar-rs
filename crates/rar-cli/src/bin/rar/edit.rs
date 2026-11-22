@@ -296,6 +296,8 @@ pub(crate) fn cmd_move(
         dict_size_log,
         dict_size_bytes,
     )?;
+    let rar4_dict_bits =
+        crate::args::rar4_dict_bits(args.archive_format.as_deref(), args.dict_size.as_deref())?;
     let dictionary = if version.is_legacy() {
         None
     } else {
@@ -352,6 +354,9 @@ pub(crate) fn cmd_move(
         }
         if let Some(size) = dictionary {
             writer_opts = writer_opts.dictionary_size(size);
+        }
+        if let Some(bits) = rar4_dict_bits {
+            writer_opts = writer_opts.rar4_dictionary_bits(bits);
         }
         // WinRAR sizes the main header's locator offset fields from the input
         // total (the packed size only shrinks it; see `create.rs`). The same

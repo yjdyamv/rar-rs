@@ -113,7 +113,7 @@ pub use fs::atomic::{StagedCopy, StagedVolumeSet};
 pub use options::{
     DictionarySize, ExtractErrorPolicy, ExtractOptions, ExtractionCallback, ExtractionProgress,
     FilterMode, FilterOptions, MarkOfTheWeb, OverwriteChoice, OverwritePrompt, SolidReset,
-    parse_dict_bytes, parse_dict_size,
+    parse_dict_bytes, parse_dict_size, parse_dict_size_rar4,
 };
 pub use parallel::{set_compression_threads, set_extraction_threads};
 pub use recovery::rev50::{build_recovery_volumes_for_set, plan_recovery_volume_count};

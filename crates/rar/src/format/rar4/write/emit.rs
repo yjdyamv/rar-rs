@@ -116,6 +116,11 @@ pub(super) fn emit_rar4_segment(
             super::dict_bits(u64::from(unpacked_size), false)
         }
     });
+    // A caller `-md` request caps the declared window (never raises it).
+    let window_bits = match this.write_ctx().solid.rar4_dict_bits_cap {
+        Some(cap) => window_bits.min(cap),
+        None => window_bits,
+    };
     let params = FileHeaderParams {
         flags: fhd,
         packed_size,

@@ -461,6 +461,36 @@ pub(crate) fn archive_dict_bits(unp_ver: u8, size: u64, solid: bool) -> u8 {
     }
 }
 
+/// The window bits the writer declares and bounds the encoder to: the
+/// archive-wide (or per-member fallback) value, capped by a caller `-md`
+/// request (`cap`). WinRAR clamps a `-md` request down to the window the member
+/// set actually needs, never up, so `min` reproduces it (verified on 6.23
+/// `-ma4`: a 300 KB member with `-md1m` declares 512 KiB).
+pub(crate) fn effective_window_bits(
+    archive_dict_bits: Option<u8>,
+    cap: Option<u8>,
+    archive_unp_ver: u8,
+    level: u8,
+    solid_mode: bool,
+    unpacked_size: u64,
+) -> u8 {
+    let base = archive_dict_bits.unwrap_or_else(|| {
+        if archive_unp_ver < 29 {
+            4
+        } else if level == 0 {
+            1
+        } else if solid_mode {
+            6
+        } else {
+            dict_bits(unpacked_size, false)
+        }
+    });
+    match cap {
+        Some(cap) => base.min(cap),
+        None => base,
+    }
+}
+
 /// Encode a dictionary size (in bytes) into the upper bits of the FILE_HEAD
 /// flags word (bits 5–7). Test-only: production code passes the 3-bit
 /// `window_bits` straight to [`build_file_header`], so this pins the
@@ -693,6 +723,36 @@ mod tests {
         ] {
             assert_eq!(dict_bits(size, solid), bits, "size={size} solid={solid}");
         }
+    }
+
+    /// A `-md` request (`cap`) only ever lowers the declared window, never
+    /// raises it — WinRAR 6.23 `-ma4` clamps a 300 KB member's `-md1m` to 512
+    /// KiB (bits 3).
+    #[test]
+    fn effective_window_bits_caps_only() {
+        // Archive-wide value (batch), capped down and left alone when larger.
+        assert_eq!(
+            effective_window_bits(Some(3), Some(0), 29, 3, false, 300_000),
+            0
+        );
+        assert_eq!(
+            effective_window_bits(Some(3), Some(4), 29, 3, false, 300_000),
+            3
+        );
+        assert_eq!(
+            effective_window_bits(Some(3), None, 29, 3, false, 300_000),
+            3
+        );
+        // Streaming fallback: the member-size default still caps a larger
+        // request, and a smaller one lowers it.
+        assert_eq!(
+            effective_window_bits(None, Some(6), 29, 3, false, 300_000),
+            3
+        );
+        assert_eq!(
+            effective_window_bits(None, Some(0), 29, 3, false, 300_000),
+            0
+        );
     }
 
     /// The RAR 2.x family declares the era's fixed 1 MiB dictionary (WinRAR

@@ -41,6 +41,7 @@ pub(crate) fn prepare_rar4_file_member(
     level: u8,
     codec: LegacyCodec,
     filters: crate::options::FilterOptions,
+    max_distance: usize,
 ) -> RarResult<Rar4PreparedMember> {
     let meta = fs::metadata(path)?;
     let file_size = meta.len();
@@ -73,7 +74,7 @@ pub(crate) fn prepare_rar4_file_member(
                 (data, crate::format::rar4::RAR4_METHOD_STORE)
             }
         } else if (1..=5).contains(&level) {
-            match best_rar29_member(&data, level, filters)? {
+            match best_rar29_member(&data, level, filters, max_distance)? {
                 Some(best) => best,
                 None => (data, crate::format::rar4::RAR4_METHOD_STORE),
             }
@@ -273,6 +274,9 @@ pub(crate) fn add_batch_parallel_rar4(
                 ))
             })?;
             let filters = cx.write_ctx().compression.filters;
+            // The batch window is archive-wide (already capped by `-md`), so the
+            // same bound applies to every member.
+            let max_distance = 0x1_0000usize << cx.write_ctx().solid.rar4_dict_bits.unwrap_or(6);
             let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
                 wave.par_iter()
                     .map(|&(idx, entry)| {
@@ -287,7 +291,7 @@ pub(crate) fn add_batch_parallel_rar4(
                                 .to_string_lossy()
                                 .into_owned(),
                         };
-                        prepare_rar4_file_member(path, &name, level, codec, filters)
+                        prepare_rar4_file_member(path, &name, level, codec, filters, max_distance)
                             .map(|p| (idx, p))
                     })
                     .collect()

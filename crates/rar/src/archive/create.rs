@@ -1422,6 +1422,8 @@ pub(super) struct WriteOptionFlags {
     save_owner: bool,
     save_streams: bool,
     has_dictionary: bool,
+    /// RAR4 `-md` window bits (0..=6), if requested.
+    rar4_dict_bits: Option<u8>,
     encrypt_headers: bool,
 }
 
@@ -1438,6 +1440,7 @@ impl WriteOptionFlags {
             save_owner: options.save_owner,
             save_streams: options.save_streams,
             has_dictionary: options.dictionary_size.is_some(),
+            rar4_dict_bits: options.rar4_dict_bits,
             encrypt_headers: options.encrypt_headers,
         }
     }
@@ -1459,6 +1462,7 @@ impl WriteOptionFlags {
             // The legacy pipeline picks its own per-member window, so either
             // dictionary field would be silently ignored — reject both.
             has_dictionary: options.dict_size_log.is_some() || options.dict_size_bytes.is_some(),
+            rar4_dict_bits: options.rar4_dict_bits,
             encrypt_headers: options.encrypt_headers,
         }
     }
@@ -1471,6 +1475,13 @@ pub(super) fn validate_write_options(
     version: crate::version::ArchiveVersion,
     flags: &WriteOptionFlags,
 ) -> RarResult<()> {
+    // The RAR4 dictionary window is a fixed-width `-ma4` field; reject it for
+    // every other family instead of silently ignoring it.
+    if flags.rar4_dict_bits.is_some() && (!version.is_legacy() || version.is_rar13()) {
+        return Err(RarError::invalid_option(
+            "RAR4 dictionary bits are only supported for -ma4 archives",
+        ));
+    }
     if version.is_legacy() {
         crate::format::rar4::create::validate_rar4_only(
             crate::format::rar4::create::Rar4WriteOptions {
@@ -1479,6 +1490,7 @@ pub(super) fn validate_write_options(
                 save_owner: flags.save_owner,
                 save_streams: flags.save_streams,
                 has_dictionary: flags.has_dictionary,
+                rar4_dict_bits: flags.rar4_dict_bits,
             },
         )?;
     }

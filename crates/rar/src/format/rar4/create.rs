@@ -16,6 +16,8 @@ pub(crate) struct Rar4WriteOptions {
     pub save_owner: bool,
     pub save_streams: bool,
     pub has_dictionary: bool,
+    /// RAR4 `-md` window as FHD bits (0..=6), if the caller requested one.
+    pub rar4_dict_bits: Option<u8>,
 }
 
 /// Reject typed options the RAR4 container cannot express. Called by the
@@ -42,6 +44,11 @@ pub(crate) fn validate_rar4_only(options: Rar4WriteOptions) -> RarResult<()> {
     if options.has_dictionary {
         return Err(RarError::invalid_option(
             "RAR4 archives do not support configurable dictionary sizes",
+        ));
+    }
+    if options.rar4_dict_bits.is_some_and(|bits| bits > 6) {
+        return Err(RarError::invalid_option(
+            "RAR4 dictionary bits must be in 0..=6",
         ));
     }
     Ok(())

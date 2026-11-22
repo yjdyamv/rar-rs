@@ -114,6 +114,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         dict_size_log,
         dict_size_bytes,
     )?;
+    // A `-ma4` `-md<size>` sets the fixed-width RAR4 window (FHD bits 5–7)
+    // instead of the RAR5 dictionary log the modern container uses.
+    let rar4_dict_bits =
+        crate::args::rar4_dict_bits(args.archive_format.as_deref(), args.dict_size.as_deref())?;
     // A modern SFX module in front of a DOS-era archive makes it unreadable
     // to WinRAR/UnRAR: the official tools locate RAR 1.3/1.4 only through
     // the legacy DOS stub, never by scanning for the `RE~^` signature.
@@ -239,6 +243,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     };
     let opts = if let Some(size) = dictionary {
         opts.dictionary_size(size)
+    } else {
+        opts
+    };
+    let opts = if let Some(bits) = rar4_dict_bits {
+        opts.rar4_dictionary_bits(bits)
     } else {
         opts
     };

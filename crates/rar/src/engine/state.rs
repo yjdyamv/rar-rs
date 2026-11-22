@@ -219,6 +219,9 @@ pub(crate) struct SolidChain {
     /// (single-add streaming); emission then falls back to a per-member safe
     /// value.
     pub rar4_dict_bits: Option<u8>,
+    /// Caller-requested RAR4 `-md` cap (FHD bits 0..=6), applied as
+    /// `min(computed, cap)`; `None` keeps the size-based window.
+    pub rar4_dict_bits_cap: Option<u8>,
 }
 
 impl Default for SolidChain {
@@ -234,6 +237,7 @@ impl Default for SolidChain {
             rar4_unp_ver: 29,
             rar4_run_has_member: false,
             rar4_dict_bits: None,
+            rar4_dict_bits_cap: None,
         }
     }
 }

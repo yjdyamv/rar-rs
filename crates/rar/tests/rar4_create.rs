@@ -1354,6 +1354,41 @@ fn create_rar4_v20_declares_the_fixed_window_bits() {
     }
 }
 
+/// `-md` (`WriterOptions::rar4_dictionary_bits`) sets the RAR4 `FHD` window,
+/// capped at the window the member set needs — never raised. Verified against
+/// WinRAR 6.23 `-ma4` on a 300 KB member: `-md64k`→0, `-md256k`→2,
+/// `-md512k`→3, `-md1m`→3 (clamped to the size-based 3).
+#[test]
+fn create_rar4_md_caps_the_declared_window() {
+    let dir = make_temp_dir();
+    let data = vec![5u8; 300_000];
+    for (request, expected) in [
+        (None, 3u16),
+        (Some(0), 0),
+        (Some(2), 2),
+        (Some(3), 3),
+        (Some(6), 3),
+    ] {
+        let arc = dir.path().join(format!("md{request:?}.rar"));
+        let mut opts = WriterOptions::default().compression(ArchiveVersion::V29);
+        if let Some(bits) = request {
+            opts = opts.rar4_dictionary_bits(bits);
+        }
+        let mut archive = ArchiveWriter::create_with(&arc, opts).unwrap();
+        archive
+            .add_batch(&[WriteEntry::Bytes {
+                name: "f.bin",
+                data: &data,
+                options: ewo(3),
+            }])
+            .unwrap();
+        archive.finish().unwrap();
+        let shape = rar4_member_shape(&std::fs::read(&arc).unwrap());
+        assert_eq!(shape.len(), 1);
+        assert_eq!(shape[0].1, expected, "-md request {request:?}");
+    }
+}
+
 /// The `FHD` window bits are archive-wide (the *largest* member), not per
 /// member: an 8 MiB + 10 KiB pair declares 6 for both, matching WinRAR.
 #[test]

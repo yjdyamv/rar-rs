@@ -785,6 +785,11 @@ pub(crate) fn resolve_dict_switch(
     spec: &str,
     ma: Option<&str>,
 ) -> Result<(Option<u8>, Option<u64>), String> {
+    // `-ma4` uses a fixed-width window; its `-md` is parsed and bounded by
+    // `rar4_dict_bits`, which accepts the 64 KiB floor this parser rejects.
+    if ma == Some("4") {
+        return Ok((None, None));
+    }
     if let Some(parsed) = rar_rs::parse_dict_size(spec) {
         return Ok(parsed);
     }
@@ -794,6 +799,28 @@ pub(crate) fn resolve_dict_switch(
         return Ok((None, Some(bytes)));
     }
     Err(format!("Unknown option: md{spec}"))
+}
+
+/// The RAR4 `-md` window bits (`0` = 64 KiB … `6` = 4 MiB) for a `-ma4`
+/// archive, from the raw `-md<size>` spec; `None` when the format is not RAR4
+/// or no `-md` was given. WinRAR clamps a request down to the window the member
+/// set needs (never up) and floors a sub-64 KiB request, so sizes above 4 MiB
+/// map to `6` and the writer applies the size-based cap.
+pub(crate) fn rar4_dict_bits(
+    ma: Option<&str>,
+    dict_size: Option<&str>,
+) -> Result<Option<u8>, String> {
+    if ma != Some("4") {
+        return Ok(None);
+    }
+    let Some(spec) = dict_size else {
+        return Ok(None);
+    };
+    let bytes =
+        rar_rs::parse_dict_size_rar4(spec).ok_or_else(|| format!("Unknown option: md{spec}"))?;
+    // Floor to the 64 KiB unit; a sub-64 KiB request becomes 64 KiB.
+    let units = (bytes / 1024).max(64) / 64;
+    Ok(Some((63 - units.leading_zeros()).min(6) as u8))
 }
 
 /// Parse a normalized `-mc<par>` value into a filter policy.
