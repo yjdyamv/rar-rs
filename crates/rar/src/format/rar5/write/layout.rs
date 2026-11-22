@@ -13,16 +13,27 @@ pub(crate) use crate::codec::common::incompressible::{
     SAMPLE_PROBE_HEAD, sample_is_incompressible, sample_is_incompressible_stream,
 };
 
+/// The 128 KiB floor a member dictionary selection is clamped to (RAR5 log 0),
+/// WinRAR's smallest representable dictionary.
+pub(crate) const DICT_BASE_FLOOR: u64 = 128 * 1024;
+
+/// WinRAR floors a **solid** run's dictionary *cap* at 1 MiB: a 40 KiB run
+/// still declares 1 MiB (measured on 6.23). The floor applies to the cap, not
+/// the final value, so an explicit `-md` below 1 MiB is still honoured
+/// (`min(requested, max(1 MiB, cap))`): `-md128k/256k/512k` keep their value
+/// while `-md2m/4m` cap at 1 MiB for a small member.
+pub(crate) const SOLID_DICT_FLOOR: u64 = 1 << 20;
+
 /// WinRAR 7.23 dictionary selection for a non-solid member: the requested
 /// dictionary (`-md`, or the default 32 MiB at every compression level) is
 /// capped at twice the file size rounded down to a power of two, floored at
-/// 128 KiB, and clamped to the RAR5 range (128 KiB .. 4 GiB, log 0..15).
-fn dict_log_for(data_size: usize, requested: Option<u8>, _level: u8) -> u8 {
+/// `cap_floor`, and clamped to the RAR5 range (128 KiB .. 4 GiB, log 0..15).
+fn dict_log_for(data_size: usize, requested: Option<u8>, _level: u8, cap_floor: u64) -> u8 {
     // Sizes and caps are computed in `u64`: on 32-bit hosts a multi-GiB
     // `data_size` would overflow `usize` in the 2x cap.
-    let base = 128u64 * 1024;
+    let base = DICT_BASE_FLOOR;
     let file_pow2 = 1u64 << (u64::BITS - 1 - (data_size as u64).max(1).leading_zeros());
-    let auto_cap = file_pow2.saturating_mul(2).max(base);
+    let auto_cap = file_pow2.saturating_mul(2).max(cap_floor);
     let requested_bytes = requested.map_or(32 * 1024 * 1024, |log| base << log);
     let target = auto_cap.min(requested_bytes);
     let mut log = 0u8;
@@ -55,13 +66,17 @@ pub(crate) fn dict_params_for(
     requested_bytes: Option<u64>,
     level: u8,
     force_v70: bool,
+    cap_floor: u64,
 ) -> (u8, Option<u64>) {
     let Some(requested) = requested_bytes else {
-        return (dict_log_for(data_size, requested_log, level), None);
+        return (
+            dict_log_for(data_size, requested_log, level, cap_floor),
+            None,
+        );
     };
-    let base = 128u64 * 1024;
+    let base = DICT_BASE_FLOOR;
     let file_pow2 = 1u64 << (u64::BITS - 1 - (data_size as u64).max(1).leading_zeros());
-    let auto_cap = file_pow2.saturating_mul(2).max(base);
+    let auto_cap = file_pow2.saturating_mul(2).max(cap_floor);
     let capped = requested.min(auto_cap);
     if force_v70 || capped > 4 * 1024 * 1024 * 1024u64 {
         // RAR7 (v70): the header declares the (capped) dictionary — floored
@@ -72,8 +87,8 @@ pub(crate) fn dict_params_for(
         // undecodable. (The > 4 GiB path never tripped this because the
         // RAR5 log ceiling of 4 GiB is already below any v70 dict; the
         // clamp matters for force_v70's small dicts.)
-        let declared = capped.max(base);
-        let window_log = dict_log_for(data_size, requested_log, level)
+        let declared = capped.max(cap_floor);
+        let window_log = dict_log_for(data_size, requested_log, level, cap_floor)
             .min((63 - (declared / base).leading_zeros()) as u8);
         (window_log, Some(declared))
     } else {
@@ -125,7 +140,7 @@ pub(crate) fn hash_file(
 
 #[cfg(test)]
 mod tests {
-    use super::dict_params_for;
+    use super::{DICT_BASE_FLOOR, dict_params_for};
 
     /// A multi-GiB `-md` must not be truncated to the host word size: for a
     /// 32 MiB member the 2x-file-size cap always lands at log 9 (64 MiB),
@@ -139,7 +154,7 @@ mod tests {
             65 * 1024 * 1024 * 1024,
         ] {
             assert_eq!(
-                dict_params_for(member, None, Some(requested), 5, false),
+                dict_params_for(member, None, Some(requested), 5, false, DICT_BASE_FLOOR),
                 (9, None),
                 "requested {requested}"
             );

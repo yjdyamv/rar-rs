@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "parallel")]
 use super::add::{mtime_record, owner_extra_cfg, time_extra_cfg};
 #[cfg(feature = "parallel")]
-use super::layout::{dict_params_for, sample_is_incompressible};
+use super::layout::{DICT_BASE_FLOOR, dict_params_for, sample_is_incompressible};
 #[cfg(feature = "parallel")]
 use crate::codec::lzss_huff;
 use crate::engine::BatchEntry;
@@ -282,6 +282,7 @@ fn prepare_data_entry(
         ctx.dict_size_bytes,
         method,
         ctx.force_v70,
+        DICT_BASE_FLOOR,
     );
     // One encoder state per member: the sequential path keeps the LZ
     // window (tail + long-range history) within a member and resets

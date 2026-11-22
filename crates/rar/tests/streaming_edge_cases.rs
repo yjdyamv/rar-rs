@@ -183,9 +183,10 @@ mod solid_dict_growth {
         rar.finish().expect("close solid archive");
     }
 
-    /// The 64 KiB head selects a 128 KiB dictionary; the ~5 MiB second member
-    /// would select 8 MiB and repeats the head's bytes 320 KiB back. The writer
-    /// must clamp it to the chain window and the archive must round-trip.
+    /// The 64 KiB head selects 128 KiB but floors to WinRAR's 1 MiB solid
+    /// minimum; the ~5 MiB second member would select 8 MiB and repeats the
+    /// head's bytes 320 KiB back. The writer must clamp it to the chain window
+    /// and the archive must round-trip.
     #[test]
     fn solid_chain_clamps_a_larger_member_dictionary() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -203,14 +204,15 @@ mod solid_dict_growth {
         let large_id = reader.unique_entry("large.bin").expect("large entry");
         let small_entry = reader.entry(small_id).expect("small metadata");
         let large_entry = reader.entry(large_id).expect("large metadata");
+        // `comp_dict_size` is the log2/128 KiB vint: 3 is the 1 MiB floor.
         assert_eq!(
             small_entry.comp_dict_size(),
-            0,
-            "chain head declares the 128 KiB selection"
+            3,
+            "chain head floors its selection to the 1 MiB solid minimum"
         );
         assert_eq!(
             large_entry.comp_dict_size(),
-            0,
+            3,
             "continuation member is clamped to the chain-start dictionary"
         );
         assert!(large_entry.comp_solid(), "large member continues the chain");

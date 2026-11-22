@@ -10,8 +10,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::layout::{
-    SAMPLE_PROBE_HEAD, dict_params_for, hash_file, sample_is_incompressible,
-    sample_is_incompressible_stream,
+    DICT_BASE_FLOOR, SAMPLE_PROBE_HEAD, SOLID_DICT_FLOOR, dict_params_for, hash_file,
+    sample_is_incompressible, sample_is_incompressible_stream,
 };
 use crate::codec::lzss_huff;
 use crate::engine::Engine;
@@ -194,28 +194,44 @@ fn owner_extra_for(cx: &dyn Engine, meta: &fs::Metadata) -> Option<Vec<u8>> {
 /// starve every larger member that follows. Without a basis (the single-member
 /// streaming API) the member's own selection stands.
 fn solid_dict_params(cx: &mut dyn Engine, dsl: u8, dict_bytes: Option<u64>) -> (u8, Option<u64>) {
+    const SOLID_FLOOR_LOG: u8 = 3; // 128 KiB << 3 = 1 MiB
     if !cx.write_ctx().solid.mode {
         return (dsl, dict_bytes);
     }
     if cx.write_ctx().solid.encoder_state.is_none() {
         let basis = cx.write_ctx().compression.dict_basis;
         let (dsl, dict_bytes) = match basis {
+            // WinRAR floors a solid run's dictionary *cap* at 1 MiB — a 40 KiB
+            // run still declares 1 MiB (measured on 6.23: 40K and 600K -> 1M,
+            // 1.5M -> 2M, 5M -> 8M) — but still honours an explicit `-md`
+            // below the floor: the head is `min(requested, max(1 MiB, cap))`.
+            // `dict_params_for` applies `SOLID_DICT_FLOOR` to the cap.
             Some(basis) => super::layout::dict_params_for(
                 usize::try_from(basis).unwrap_or(usize::MAX),
                 cx.write_ctx().compression.dict_size_log,
                 cx.write_ctx().compression.dict_size_bytes,
                 0,
                 cx.write_ctx().compression.force_v70,
+                SOLID_DICT_FLOOR,
             ),
-            None => (dsl, dict_bytes),
+            // No basis (the single-member streaming API): keep the member's own
+            // selection, floored at the same solid minimum.
+            None => (
+                dsl.max(SOLID_FLOOR_LOG),
+                dict_bytes.map(|bytes| bytes.max(SOLID_DICT_FLOOR)),
+            ),
         };
         cx.write_ctx_mut().solid.chain_dict = Some((dsl, dict_bytes));
         return (dsl, dict_bytes);
     }
     let Some(head) = cx.write_ctx().solid.chain_dict else {
-        // Chain state seeded by a path that did not record a head
-        // (surgical rewrite): leave the member's own selection.
-        return (dsl, dict_bytes);
+        // Chain state seeded by a path that did not record a head (surgical
+        // rewrite): keep the member's own selection, but a solid chain still
+        // declares at least 1 MiB (see the floor above).
+        return (
+            dsl.max(SOLID_FLOOR_LOG),
+            dict_bytes.map(|bytes| bytes.max(SOLID_DICT_FLOOR)),
+        );
     };
     // Every member of the run uses the head's parameters, matching WinRAR
     // (which declares one dictionary for the whole set): the reader builds the
@@ -392,6 +408,7 @@ pub(crate) fn add_file_rar5(
         cx.write_ctx().compression.dict_size_bytes,
         method,
         cx.write_ctx().compression.force_v70,
+        DICT_BASE_FLOOR,
     );
     if method == COMP_METHOD_STORE || probe_incompressible {
         // STORE is written by streaming the file directly: bounded
@@ -978,6 +995,7 @@ pub(crate) fn add_bytes_rar5(
             cx.write_ctx().compression.dict_size_bytes,
             method,
             cx.write_ctx().compression.force_v70,
+            DICT_BASE_FLOOR,
         );
         // WinRAR `-se`: reset the solid statistics when the extension changes.
         crate::format::shared::write_ops::maybe_reset_solid_for_extension(cx, &name);
