@@ -923,8 +923,10 @@ pub struct MarkOfTheWeb {
 ///
 /// Sizes in the RAR5 range (128 KiB ..= 4 GiB) must be a power of two and
 /// map to a dict log (WinRAR rejects e.g. `-md3m` with "Unknown option");
-/// anything above 4 GiB is accepted as-is (RAR7 v70 members), capped at the
-/// exactly encodable maximum of 126 GiB (a 64 GiB base plus 31/32).
+/// WinRAR also accepts the power-of-two values down to RAR4's 64 KiB window
+/// (`-md64k`) and clamps them up to the 128 KiB RAR5 floor (log 0). Anything
+/// above 4 GiB is accepted as-is (RAR7 v70 members), capped at the exactly
+/// encodable maximum of 126 GiB (a 64 GiB base plus 31/32).
 ///
 /// Non-power-of-two sizes through 4 GiB are rejected here (`None`): a plain
 /// v50 header has no way to carry them, matching WinRAR. Callers that
@@ -948,12 +950,16 @@ pub fn parse_dict_size(s: &str) -> Option<(Option<u8>, Option<u64>)> {
         .parse::<u64>()
         .ok()
         .and_then(|n| n.checked_mul(mult))
-        .filter(|b| *b >= 128 * 1024)?;
+        // WinRAR takes a power-of-two request down to RAR4's 64 KiB window
+        // (`-md64k`); anything lower is "Unknown option".
+        .filter(|b| *b >= 64 * 1024)?;
     if bytes <= 4 * 1024 * 1024 * 1024 {
         if !bytes.is_power_of_two() {
             return None;
         }
-        // 128 KiB = 2^17, so log = trailing_zeros - 17 (0..=15).
+        // The RAR5 dictionary floor is 128 KiB, so WinRAR clamps a 64 KiB
+        // request up to it. 128 KiB = 2^17, so log = trailing_zeros - 17.
+        let bytes = bytes.max(128 * 1024);
         return Some((Some((bytes.trailing_zeros() - 17) as u8), None));
     }
     if bytes > MAX_RAR7_DICTIONARY_BYTES {
@@ -1017,6 +1023,8 @@ mod tests {
     #[test]
     fn dict_size_parses_rar5_range() {
         assert_eq!(parse_dict_size("128k"), Some((Some(0), None)));
+        // A 64 KiB request is accepted and clamped up to the 128 KiB floor.
+        assert_eq!(parse_dict_size("64k"), Some((Some(0), None)));
         assert_eq!(parse_dict_size("1m"), Some((Some(3), None)));
         assert_eq!(parse_dict_size("32m"), Some((Some(8), None)));
         assert_eq!(parse_dict_size("4g"), Some((Some(15), None)));
