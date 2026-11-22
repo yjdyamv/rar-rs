@@ -47,6 +47,7 @@ pub(crate) fn prepare_rar4_file_member(
     max_distance: usize,
     save_ctime: bool,
     save_atime: bool,
+    precision_seconds: bool,
 ) -> RarResult<Rar4PreparedMember> {
     let meta = fs::metadata(path)?;
     let file_size = meta.len();
@@ -56,15 +57,23 @@ pub(crate) fn prepare_rar4_file_member(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as u32;
-    let mtime_ns = meta
-        .modified()
-        .unwrap_or(SystemTime::now())
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
+    let mtime_ns = if precision_seconds {
+        0
+    } else {
+        meta.modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    };
     let attr = crate::platform::rar4_file_attributes(&meta);
-    let (ctime, atime) =
-        crate::format::rar4::write::member_extra_times(save_ctime, save_atime, &meta, path);
+    let (ctime, atime) = crate::format::rar4::write::member_extra_times(
+        save_ctime,
+        save_atime,
+        precision_seconds,
+        &meta,
+        path,
+    );
     let mut reader = File::open(path)?;
     let mut data = Vec::with_capacity(file_size as usize);
     std::io::Read::read_to_end(&mut reader, &mut data)?;
@@ -292,6 +301,7 @@ pub(crate) fn add_batch_parallel_rar4(
             let max_distance = 0x1_0000usize << cx.write_ctx().solid.rar4_dict_bits.unwrap_or(6);
             let save_ctime = cx.write_ctx().meta.ctime;
             let save_atime = cx.write_ctx().meta.atime;
+            let precision_seconds = cx.write_ctx().meta.time_precision_seconds;
             let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
                 wave.par_iter()
                     .map(|&(idx, entry)| {
@@ -315,6 +325,7 @@ pub(crate) fn add_batch_parallel_rar4(
                             max_distance,
                             save_ctime,
                             save_atime,
+                            precision_seconds,
                         )
                         .map(|p| (idx, p))
                     })

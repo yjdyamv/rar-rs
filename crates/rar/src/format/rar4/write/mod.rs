@@ -462,16 +462,30 @@ pub(crate) type MemberExtraTimes = (Option<(u32, u32)>, Option<(u32, u32)>);
 pub(crate) fn member_extra_times(
     save_ctime: bool,
     save_atime: bool,
+    precision_seconds: bool,
     meta: &std::fs::Metadata,
     path: &std::path::Path,
 ) -> MemberExtraTimes {
+    // `-ts1` drops the fractional second, like the mtime path.
+    let zero_ns = |time: Option<(u32, u32)>| time.map(|(secs, _)| (secs, 0));
+    let strip = |time: Option<(u32, u32)>| {
+        if precision_seconds {
+            zero_ns(time)
+        } else {
+            time
+        }
+    };
     (
-        save_ctime
-            .then(|| platform_time(meta, path, false))
-            .flatten(),
-        save_atime
-            .then(|| platform_time(meta, path, true))
-            .flatten(),
+        strip(
+            save_ctime
+                .then(|| platform_time(meta, path, false))
+                .flatten(),
+        ),
+        strip(
+            save_atime
+                .then(|| platform_time(meta, path, true))
+                .flatten(),
+        ),
     )
 }
 

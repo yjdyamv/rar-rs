@@ -147,15 +147,21 @@ pub(crate) fn add_file_rar4(
         cx.report_progress(0, file_size);
     }
 
-    let mtime_ns = meta
-        .modified()
-        .unwrap_or(SystemTime::now())
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
+    // `-ts1` drops every fractional second of the member.
+    let precision_seconds = cx.write_ctx().meta.time_precision_seconds;
+    let mtime_ns = if precision_seconds {
+        0
+    } else {
+        meta.modified()
+            .unwrap_or(SystemTime::now())
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    };
     let (ctime, atime) = crate::format::rar4::write::member_extra_times(
         cx.write_ctx().meta.ctime,
         cx.write_ctx().meta.atime,
+        precision_seconds,
         &meta,
         path,
     );
@@ -583,12 +589,15 @@ pub(crate) fn write_rar4_dir_entry(
     // kind it is; directories reached before any file flush it here.
     emit_pending_rar4_comment(cx)?;
     let (encoded_name, name_flags) = encode_file_name(name);
+    let precision_seconds = cx.write_ctx().meta.time_precision_seconds;
     let (ctime, atime) = crate::format::rar4::write::member_extra_times(
         cx.write_ctx().meta.ctime,
         cx.write_ctx().meta.atime,
+        precision_seconds,
         meta,
         path,
     );
+    let mtime_ns = if precision_seconds { 0 } else { mtime_ns };
     let ext_time = build_member_ext_time(
         cx.write_ctx().solid.rar4_unp_ver,
         mtime_secs,
