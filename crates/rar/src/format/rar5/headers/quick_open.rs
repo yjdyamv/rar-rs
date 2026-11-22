@@ -51,19 +51,13 @@ pub(crate) fn encode_entry(rel: u64, header: &[u8]) -> Vec<u8> {
     entry
 }
 
-/// Upper bound on the bytes [`encode_entry`] spends on one cached header of
-/// `header_len` bytes inside a volume that is at most `volume_size` bytes long.
-///
-/// The writer has to reserve room for the per-volume quick-open record
-/// *before* it knows where the volume will end, and the entry's distance back
-/// to the header is measured from that end. The widest distance the volume
-/// admits therefore bounds the entry, which keeps the reservation a pure
-/// function of the header sizes.
-pub(crate) fn entry_len_upper(volume_size: u64, header_len: u64) -> u64 {
-    let body = 1
-        + crate::vint::encoded_size(volume_size) as u64
-        + crate::vint::encoded_size(header_len) as u64
-        + header_len;
+/// Upper bound on one quick-open catalog entry caching a `header_len`-byte
+/// header whose distance from the record fits in `rel_width` bytes. WinRAR
+/// estimates a *pending* (not yet cached) header with a fixed 3-byte distance;
+/// an already-cached header reserves `header_len + 16` instead (see
+/// `quick_open_volume_reserve`).
+pub(crate) fn entry_len_upper(rel_width: u64, header_len: u64) -> u64 {
+    let body = 1 + rel_width + crate::vint::encoded_size(header_len) as u64 + header_len;
     4 + crate::vint::encoded_size(body) as u64 + body
 }
 

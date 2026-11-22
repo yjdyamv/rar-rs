@@ -214,3 +214,69 @@ fn our_middle_volumes_expose_nanosecond_times_to_unrar() {
         "middle volume must carry the FILE_TIME record: {line}"
     );
 }
+
+/// The per-volume quick-open reserve when a volume caches several entries:
+/// WinRAR reserves `header_len + 16` for each already-cached header and a fixed
+/// 3-byte distance for the pending one. Ours used to under-reserve, shifting
+/// where member data stops — a `-qo+` set with many small members must be
+/// byte-identical to WinRAR's.
+#[test]
+fn multivolume_qoplus_set_is_byte_identical() {
+    let Some(official) = rar_bin() else {
+        eprintln!("skipped: WinRAR not installed");
+        return;
+    };
+    let dir = temp_dir();
+    let mut members = Vec::new();
+    for i in 0..6u8 {
+        let name = format!("s{i}.bin");
+        std::fs::write(dir.path().join(&name), vec![i + 1; 128]).unwrap();
+        members.push(name);
+    }
+    write_pattern_file(&dir.path().join("big.bin"), 200_000, 7);
+    members.push("big.bin".to_string());
+
+    let make = |bin: &std::path::Path, arc: &str| {
+        let status = Command::new(bin)
+            .args(["a", "-idq", "-m0", "-v16k", "-qo+", arc])
+            .args(&members)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "create {arc}");
+    };
+    make(std::path::Path::new(env!("CARGO_BIN_EXE_rar")), "ours.rar");
+    make(&official, "win.rar");
+
+    let parts = |prefix: &str| -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.starts_with(prefix) && n.contains(".part") && n.ends_with(".rar")
+                })
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let ours = parts("ours");
+    let win = parts("win");
+    assert!(
+        ours.len() > 4,
+        "expected several volumes, got {}",
+        ours.len()
+    );
+    assert_eq!(ours.len(), win.len(), "volume counts differ");
+    for (a, b) in ours.iter().zip(&win) {
+        assert_eq!(
+            std::fs::read(a).unwrap(),
+            std::fs::read(b).unwrap(),
+            "volume {} differs from {}",
+            a.display(),
+            b.display()
+        );
+    }
+}

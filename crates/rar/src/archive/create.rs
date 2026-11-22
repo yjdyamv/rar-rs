@@ -434,18 +434,21 @@ impl RarArchive {
         if !self.quick_open_record_wanted() {
             return 0;
         }
-        let Some(volume_size) = self.write_ctx().output.volume_size else {
+        // Single-volume archives keep no per-volume budget for the record.
+        if self.write_ctx().output.volume_size.is_none() {
             return 0;
-        };
+        }
         let mut payload = 0u64;
         for (_, header) in &self.write_ctx().locator.quick_open_entries {
-            payload += crate::format::rar5::headers::quick_open::entry_len_upper(
-                volume_size,
-                header.len() as u64,
-            );
+            // For an already-cached header WinRAR's per-entry reserve is a flat
+            // `header_len + 16` — measured against 7.23 across header sizes (the
+            // old `entry_len_upper` under-reserved a few bytes, moving where
+            // member data stops in a full volume).
+            payload += 16 + header.len() as u64;
         }
         if let Some(len) = pending_header {
-            payload += crate::format::rar5::headers::quick_open::entry_len_upper(volume_size, len);
+            // WinRAR estimates the pending header with a fixed 3-byte distance.
+            payload += crate::format::rar5::headers::quick_open::entry_len_upper(3, len);
         }
         let hdr = crate::format::rar5::headers::build_service_block(
             "QO",
