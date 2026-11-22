@@ -943,6 +943,11 @@ pub struct TreeMatchFinder {
     /// walk on a match longer than eleven bytes; this knob tests what that
     /// rule buys and costs here.
     stop: usize,
+    /// Set once [`Self::rebase`] has slid the frame. From then on a tree link
+    /// can name a position whose bytes changed with the slide, so the collector
+    /// must re-verify descent reports against the input. A member that fits the
+    /// window never slides, so its reports are exact and the verify is skipped.
+    frame_slid: bool,
 }
 
 impl TreeMatchFinder {
@@ -973,7 +978,14 @@ impl TreeMatchFinder {
             mask: window - 1,
             head_shift: 32 - bits,
             stop: stop_from_env(),
+            frame_slid: false,
         }
+    }
+
+    /// Whether the descent's reports are exact against the current input: true
+    /// until a frame slide (`rebase`) can leave links naming changed bytes.
+    pub(crate) fn links_are_exact(&self) -> bool {
+        !self.frame_slid
     }
 
     /// One bucket per window position, clamped (see `HASH_BITS_MIN`).
@@ -1060,6 +1072,7 @@ impl TreeMatchFinder {
         if sub == 0 {
             return;
         }
+        self.frame_slid = true;
         let sub = sub as u32;
         // The head table's values are positions too: shift them, dropping
         // the ones that slid out of the frame (underflow wraps to a huge

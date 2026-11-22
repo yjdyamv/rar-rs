@@ -814,9 +814,17 @@ pub(super) fn collect_block_matches(
             // only when it still improves on the best so far, which preserves the
             // ascending-length order the parse relies on.
             let mut best = 0usize;
+            // Without a frame slide the descent's report is already exact (it
+            // compared the bytes), so the re-measure is skipped: the guard only
+            // exists to catch links a slide left naming changed bytes. A member
+            // that fits the window never slides. Byte-identical either way.
+            let exact = finder.links_are_exact();
             for &(len, dist) in scratch.iter() {
-                let check = (len as usize).min(len_limit);
-                let held = match_length_at(combined, pos, dist as usize, check);
+                let held = if exact {
+                    len as usize
+                } else {
+                    match_length_at(combined, pos, dist as usize, (len as usize).min(len_limit))
+                };
                 if held > best {
                     best = held;
                     matches.runs.push((held as u32, dist));

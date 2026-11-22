@@ -277,3 +277,30 @@ attempt starts from the conclusion instead of re-deriving it. Re-adding the
 lever means building the per-step scheduler first; the probe/replay primitives
 are straightforward to re-create from this record and are not a reason to carry
 a default-off regression path.
+
+## 2026-11-22: skip the post-descent report verify when the frame never slid (−24% seq on ntoskrnl)
+
+The collector re-measured every tree report with `match_length_at` before pushing
+it. That guard exists only for a **frame slide** (`TreeMatchFinder::rebase`): a
+link that survived a slide can name bytes that changed, so the report must be
+checked against the input. A member that fits the dictionary never slides, and
+there the descent's report is already exact — it compared the bytes — so the
+re-measure returns the same length and only costs a second (often random) read
+per match.
+
+Added `TreeMatchFinder::frame_slid`, set by `rebase` when `sub != 0`, and gated
+the verify on `links_are_exact()`: exact → push the descent's length as-is; slid
+→ keep re-measuring. Byte-identical by construction (the verify only ever shrinks
+a report, and an exact report cannot shrink); 602 lib tests (including the
+split/multi-chunk stale-link guard) and unchanged packed ratios validate it.
+
+`collectbench` ntoskrnl 13.3 MiB, m3, release:
+
+|      | seq ms | seq MiB/s | seq ratio | mt8 ratio |
+| ---- | ------ | --------- | --------- | --------- |
+| before | 4604 | 2.9 | 44.59% | 48.07% |
+| after  | 3502 | 3.8 | 44.59% | 48.07% |
+
+`decode OK (byte-identical)`. Slowdown vs WinRAR mt1 drops from ~2.6x to ~1.9x
+on this corpus; the DRAM-bound descent remains the ceiling for the rest
+(per-step scheduler still unbuilt).

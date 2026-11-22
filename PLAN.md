@@ -267,6 +267,14 @@ System32 DLL、`-m3`：`-s` 26,918,320 → 24,631,445 B（−8.5%），同语料
 本身多线程（mt8 1.73 s / mt1 7.74 s，体积仅差 0.006%），我们的链仍逐成员串行，
 分段并行是后续项。
 
+26 **跳过无滑动的 desc 复核**：collect 对每个 tree report 的 `match_length_at`
+复核只为「帧滑动（`rebase`）后链路可能指向改过的字节」而存在；member ≤ 字典时
+从不滑动，report 已精确。加 `TreeMatchFinder::frame_slid`，在 `links_are_exact()`
+时只推 desc 的长度、不再复测（滑动时照旧复核）。字节不变；`collectbench`
+ntoskrnl 13.3 MiB m3 seq **4604 → 3502 ms（−24%）**，ratio 44.59% 不变，602 个
+lib 测试 + `decode OK` 全过。详见
+[`docs/issues/compression-perf/09-dll-parse-speed.md`](docs/issues/compression-perf/09-dll-parse-speed.md)。
+
 **解压基线**（`cargo run --release --example decode_bench`，自建语料，packed
 比例 29%/41%/35%）：text 8 MiB 80 MB/s、mixed 4 MiB 91 MB/s、code-ish 4 MiB 74
 MB/s， 总体约 81 MB/s。同一批归档交给官方 `UnRAR.exe` 并扣掉其 0.10 s 进程启动：
