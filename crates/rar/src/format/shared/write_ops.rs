@@ -203,7 +203,7 @@ pub(crate) fn add_directory_only(
             cx, &name, &meta, mtime, mtime_ns, path,
         );
     }
-    crate::format::rar5::write::add::write_rar5_dir_entry(cx, &name, &meta, mtime)
+    crate::format::rar5::write::add::write_rar5_dir_entry(cx, &name, &meta, mtime, mtime_ns, path)
 }
 
 /// Add a directory, optionally recursing into its children.
@@ -266,26 +266,22 @@ fn add_directory_inner(
         .unwrap_or_default()
         .as_secs() as u32;
 
+    let mtime_ns = meta
+        .modified()
+        .unwrap_or(SystemTime::now())
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
     if cx.is_rar13() {
-        let mtime_ns = meta
-            .modified()
-            .unwrap_or(SystemTime::now())
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
         crate::format::rar13::write::write_rar13_dir_entry(cx, &name, mtime, mtime_ns)?;
     } else if cx.is_rar4() {
-        let mtime_ns = meta
-            .modified()
-            .unwrap_or(SystemTime::now())
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
         crate::format::rar4::write::member::write_rar4_dir_entry(
             cx, &name, &meta, mtime, mtime_ns, path,
         )?;
     } else {
-        crate::format::rar5::write::add::write_rar5_dir_entry(cx, &name, &meta, mtime)?;
+        crate::format::rar5::write::add::write_rar5_dir_entry(
+            cx, &name, &meta, mtime, mtime_ns, path,
+        )?;
     }
 
     if recursive {

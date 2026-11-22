@@ -493,8 +493,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
         .filter_map(|c| std::fs::metadata(&c.path).ok())
         .map(|m| m.len())
         .sum();
-    let opts = if input_total > 0 && !version.is_legacy() && !version.is_rar13() {
-        opts.estimated_size(input_total)
+    // `estimated_size` must be positive, but a directory-only or empty input
+    // (0 bytes) still picks WinRAR's smallest locator width, so clamp to 1.
+    let opts = if !version.is_legacy() && !version.is_rar13() {
+        opts.estimated_size(input_total.max(1))
     } else {
         opts
     };

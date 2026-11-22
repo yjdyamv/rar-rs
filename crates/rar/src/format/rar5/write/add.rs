@@ -876,11 +876,23 @@ pub(crate) fn write_rar5_dir_entry(
     name: &str,
     meta: &fs::Metadata,
     mtime: u32,
+    mtime_ns: u32,
+    path: &Path,
 ) -> RarResult<()> {
     let attrs = crate::platform::directory_attributes(meta);
 
-    let (mtime, file_flags) =
-        rar5_time_fields(cx, mtime, FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY, false);
+    // WinRAR stores a directory's timestamp the same way it stores a file's:
+    // in the FILE_TIME extra record (Windows keeps no mtime in the header
+    // itself), and it still sets `FILE_FLAG_CRC32` with a zero CRC.
+    let extra_data = time_extra_for(cx, meta, path, mtime, mtime_ns).unwrap_or_default();
+    let has_time_record = !extra_data.is_empty();
+    let (mtime, file_flags) = rar5_time_fields(
+        cx,
+        mtime,
+        FILE_FLAG_TIME_UNIX | FILE_FLAG_DIRECTORY | FILE_FLAG_CRC32,
+        has_time_record,
+    );
+    let mtime_ns = has_time_record.then_some(mtime_ns);
     // WinRAR stores a RAR5 directory name with no trailing separator — only
     // the FILE_FLAG_DIRECTORY bit marks it (RAR4 behaves the same way, with
     // the 0x10 attribute bit instead). Callers may pass the name either way,
@@ -890,6 +902,9 @@ pub(crate) fn write_rar5_dir_entry(
         name: name.to_string(),
         attributes: attrs,
         mtime,
+        mtime_ns,
+        crc32_val: Some(0),
+        extra_data,
         host_os: crate::platform::host_os(),
         file_flags,
         is_directory: true,

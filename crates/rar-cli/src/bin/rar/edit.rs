@@ -365,8 +365,8 @@ pub(crate) fn cmd_move(
             .iter()
             .map(|file| source_size(std::path::Path::new(file)))
             .sum();
-        if input_total > 0 && !version.is_legacy() && !version.is_rar13() {
-            writer_opts = writer_opts.estimated_size(input_total);
+        if !version.is_legacy() && !version.is_rar13() {
+            writer_opts = writer_opts.estimated_size(input_total.max(1));
         }
         crate::ops::create_writer(archive_path, writer_opts)
             .map_err(|e| CliError::from(e).context("create"))?

@@ -160,7 +160,9 @@ impl FileHeader {
         if !self.extra_data.is_empty() {
             eff_block_flags |= BLOCK_FLAG_EXTRA_DATA;
         }
-        if self.packed_size > 0 && !self.is_directory {
+        // WinRAR writes the data area even for a directory's empty one
+        // (`data_size` 0), so the flag follows the member kind, not its size.
+        if self.packed_size > 0 || self.is_directory {
             eff_block_flags |= BLOCK_FLAG_DATA_AREA;
         }
 
@@ -175,7 +177,13 @@ impl FileHeader {
         // only holds this volume's chunk (measured against 7.23: a 200 000-byte
         // member split into 32 KiB volumes writes the 3 793-byte last chunk in
         // three bytes; a 1 MiB member reserves a fourth, unsplit or not).
-        let size_width = member_size_field_width(self.unpacked_size);
+        // A directory's zero size fields are one byte wide in WinRAR; file
+        // members keep the two-byte minimum above.
+        let size_width = if self.is_directory {
+            1
+        } else {
+            member_size_field_width(self.unpacked_size)
+        };
         let unp_field = vint_at_least(self.unpacked_size, size_width);
         if eff_block_flags & BLOCK_FLAG_DATA_AREA != 0 {
             body.extend(vint_at_least(self.packed_size, size_width));
