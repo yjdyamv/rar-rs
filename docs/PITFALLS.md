@@ -1,6 +1,6 @@
 # 不变量与地雷（改代码前先看）
 
-> 最后核对：2026-11-18 @ `cb4c52e`；实现细节以源码为准。
+> 最后核对：2026-11-22 @ `60575f8`；实现细节以源码为准。
 
 本文件是**长期规则**的单一来源：所有「改回去就是 bug」「看着像 bug 其实是设计」
 「与官方有意不同」的结论都收在这里，**一条一行**。这里的每条都由源码或测试钉住
@@ -100,9 +100,9 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   块的最大长度一起算进 `quick_open_volume_reserve`， 并在 QO 放不下时整卷不写
   QO（宁可少一份目录也不溢出）。契约
   `quick_open_volumes_cache_each_volume_headers_in_that_volume`、
-  `official_unrar_validates_quick_open_volumes`。官方每卷在 ENDARC 后还留 8
-  字节零尾（与 `-rr` + `-v` 同一类松弛），我们填满不留，两种都能被 官方 `t`/`x`
-  接受。
+  `official_unrar_validates_quick_open_volumes`。官方每卷在 ENDARC 后预留 8
+  字节松弛（与 `-rr` + `-v` 同一类），我们的卷尾预算同样计入并把非末卷补零到
+  `V`，故逐字节一致（而非「填满不留」）。
 - **`quick_open` + `volume_size` 不再互斥**：`validate_combinations` 里原先
   的拒绝项已删除，`header_encrypted` + `quick_open` 仍然互斥（`-hp` 没有主头可放
   locator）。
@@ -159,9 +159,10 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   **init 为 0、块间不链式**、末 shard 按 `protected_size` 截断（不补零）。
   每个块只能写自己那 64 KiB 切片的表；把整 shard 的 CRC 抄进每个块，
   头部长度仍对但官方修复会退化（`0 blocks are recovered`）。历史上的单块旧
-  布局（一块覆盖整个 shard）仍可读，解析侧以 `legacy_whole_shard` 分支兼容。头里
-  `0x680` 的 `final_state` 官方语义未破解，我们写 parity 首 shard 的
-  CRC，官方不据此拒绝。
+  布局（一块覆盖整个 shard）仍可读，解析侧以 `legacy_whole_shard` 分支兼容。
+  头末 8 字节（`header_size - 8`）官方是**随机 nonce**（`Rar7.exe` 里由
+  `CryptGenRandom` 填充，已逆向定论），故官方 `-rr` 产物本就不确定、不可能逐字节
+  对拍；我们写确定的 `crc64_rar_state(parity[0])`，两侧修复路径都忽略该字段。
 - **`-rr` 配 `-v` 时每卷各带一份内联记录**，每卷只保护自己的前缀；卷预算按
   `recovery_volume_reserve(prefix_len)`
   的几何长度做**候选前缀二分**（直接按最大记录收窄每卷会白扔约 2 KB）。
@@ -191,14 +192,12 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   P%，偏差是扇区上的加性常数且随尺寸变），我们的规则是
   `max(2, ceil(prefix*P/(100*512)))`——只向上取整、绝不少于请求的百分比。裸
   `-rr<N>`（计数）精确对齐。
-- **带 `-rr` 的分卷会在 `ENDARC` 后补 0 填满卷**：官方 7.23 先为记录预留、再把
-  剩余空间补零（32 KiB 卷 `-rr1%`/`-rr5%` 补 7 字节、`-rr10%` 补 393 字节， 64
-  KiB 卷仍是 7 字节），我们按实际字节写出、不留填充；两者都被官方 `t`/`rc`
-  接受。`.rev` 编码本身逐字节一致（见
-  `rar5_recovery_volumes_match_winrar_byte_for_byte`），所以两条 `.rev` 只差在
-  喂进去的数据卷是否逐字节相同。对拍口径因此是「字段级」的：块序列、`RR` 的
-  百分比 extra 记录、以及 `我们的分块 = 官方的分块 + 官方的补零`
-  （`recovery_records_repeat_in_every_volume`）。
+- **带 `-rr` 的分卷：卷尾预算 + 零填充已对齐**。官方 7.23 先为记录预留
+  （`FUN_14007de58` 的 `term`），非末卷再按「gap ≤ max(V/128, 1024) 就补零到
+  `V`」填满；我们复刻了同一预算（`volume_tail_reserve` 的 `volume_term`）与补零
+  规则（`pad_volume_tail`），故非末卷**逐字节一致**。唯一差别是 `{RB}` 头的随机
+  nonce（见上），官方侧本就不确定。`.rev` 编码本身逐字节一致
+  （`rar5_recovery_volumes_match_winrar_byte_for_byte`）。
 - **`rar rr` 只在 3% 上写记录是官方缺陷**：6.23/7.23 无视
   `-rr10`/`-rr20`/已有记录一律写 3%。我们**显式强度照样生效**（与 `a`
   同一套单位），裸 `-rr` 才 3%。
