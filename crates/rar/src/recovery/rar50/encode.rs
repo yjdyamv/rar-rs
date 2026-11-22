@@ -89,6 +89,11 @@ pub(crate) fn build_structural_inline_recovery_data_with_progress(
                 .collect()
         })
         .collect();
+    // The record's last 8 header bytes. WinRAR fills this with a random nonce
+    // (CryptGenRandom in `Rar7.exe`), so its `-rr` output is not reproducible
+    // and cannot be matched byte for byte; repair ignores the field. We write a
+    // deterministic CRC64 of the first recovery shard instead, keeping our
+    // output reproducible.
     let final_state = parity
         .first()
         .map(|payload| crc64_rar_state(payload))
@@ -450,6 +455,7 @@ pub(crate) fn build_structural_inline_recovery_data_streaming<R: Read>(
         }
     }
 
+    // Deterministic stand-in for WinRAR's random nonce (see the buffered path).
     let final_state = parity
         .first()
         .map(|payload| crc64_rar_state(payload))

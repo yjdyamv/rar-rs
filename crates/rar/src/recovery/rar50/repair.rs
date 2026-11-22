@@ -759,7 +759,9 @@ pub(super) fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecovery
         data_shard_states.push(read_u64(input, pos)?);
         pos += 8;
     }
-    let _final_state = read_u64(input, pos)?;
+    // The record's last 8 header bytes: WinRAR writes a random nonce here, so
+    // there is nothing to validate it against; skip it.
+    let _nonce = read_u64(input, pos)?;
     let parity = input[header_size_usize..total_size_usize].to_vec();
     if chunk_offset.saturating_add(parity.len() as u64) > group_count {
         return Err(Error::BadRecoveryChunk);
