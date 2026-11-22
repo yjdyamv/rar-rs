@@ -36,6 +36,8 @@ pub(super) fn add_rar4_file_streaming(
     mtime_ns: u32,
     level: u8,
     attr: u32,
+    ctime: Option<(u32, u32)>,
+    atime: Option<(u32, u32)>,
 ) -> RarResult<()> {
     cx.check_cancel()?;
     crate::format::rar4::create::ensure_member_size(file_size)?;
@@ -275,6 +277,8 @@ pub(super) fn add_rar4_file_streaming(
         cx.write_ctx().solid.rar4_unp_ver,
         mtime,
         Some(mtime_ns),
+        ctime,
+        atime,
     );
     let dos_time = crate::format::rar4::write::unix_to_dos_time(mtime);
     let (encoded_name, name_flags) = crate::format::rar4::write::encode_file_name(name);

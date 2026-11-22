@@ -257,6 +257,15 @@ pub(crate) fn repack_solid_archive(
                     kept_member.mtime_ns,
                     kept_member.comment.clone(),
                     Some(kept_member.attr),
+                    // Keep the ctime/atime the source archive carried.
+                    archive.entries[kept_member.index]
+                        .header
+                        .ctime
+                        .map(|(secs, ns)| (secs as u32, ns)),
+                    archive.entries[kept_member.index]
+                        .header
+                        .atime
+                        .map(|(secs, ns)| (secs as u32, ns)),
                 )?;
             }
             // Deferred solid-append additions continue the same fresh chain.
@@ -271,6 +280,8 @@ pub(crate) fn repack_solid_archive(
                     entry.mtime_ns,
                     None,
                     Some(entry.attr),
+                    entry.ctime,
+                    entry.atime,
                 )?;
             }
             writer.close()?;
@@ -529,6 +540,15 @@ pub(crate) fn repack_multivolume_archive(
                     member.mtime_ns,
                     member.comment.clone(),
                     Some(member.attr),
+                    // Keep the ctime/atime the source archive carried.
+                    archive.entries[member.index]
+                        .header
+                        .ctime
+                        .map(|(secs, ns)| (secs as u32, ns)),
+                    archive.entries[member.index]
+                        .header
+                        .atime
+                        .map(|(secs, ns)| (secs as u32, ns)),
                 )?;
             }
             for addition in additions {
@@ -542,6 +562,8 @@ pub(crate) fn repack_multivolume_archive(
                     addition.mtime_ns,
                     None,
                     Some(addition.attr),
+                    addition.ctime,
+                    addition.atime,
                 )?;
             }
             writer.close()?;

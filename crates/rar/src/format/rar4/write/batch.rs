@@ -20,6 +20,8 @@ pub(crate) struct Rar4PreparedMember {
     pub name: String,
     pub mtime: u32,
     pub mtime_ns: u32,
+    pub ctime: Option<(u32, u32)>,
+    pub atime: Option<(u32, u32)>,
     pub file_size: u64,
     pub file_crc: u32,
     pub packed: Vec<u8>,
@@ -35,6 +37,7 @@ pub(crate) struct Rar4PreparedMember {
 /// without touching the archive stream: read + CRC + the smallest of
 /// LZ / PPMd (m4+) / auto-filter candidates / STORE. Runs on the pool;
 /// emission happens later on the writing thread.
+#[allow(clippy::too_many_arguments)] // one member's compression descriptor
 pub(crate) fn prepare_rar4_file_member(
     path: &Path,
     name: &str,
@@ -42,6 +45,8 @@ pub(crate) fn prepare_rar4_file_member(
     codec: LegacyCodec,
     filters: crate::options::FilterOptions,
     max_distance: usize,
+    save_ctime: bool,
+    save_atime: bool,
 ) -> RarResult<Rar4PreparedMember> {
     let meta = fs::metadata(path)?;
     let file_size = meta.len();
@@ -58,6 +63,8 @@ pub(crate) fn prepare_rar4_file_member(
         .unwrap_or_default()
         .subsec_nanos();
     let attr = crate::platform::rar4_file_attributes(&meta);
+    let (ctime, atime) =
+        crate::format::rar4::write::member_extra_times(save_ctime, save_atime, &meta, path);
     let mut reader = File::open(path)?;
     let mut data = Vec::with_capacity(file_size as usize);
     std::io::Read::read_to_end(&mut reader, &mut data)?;
@@ -85,6 +92,8 @@ pub(crate) fn prepare_rar4_file_member(
         name: name.to_string(),
         mtime,
         mtime_ns,
+        ctime,
+        atime,
         file_size,
         file_crc,
         packed,
@@ -103,6 +112,8 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
         name,
         mtime,
         mtime_ns,
+        ctime,
+        atime,
         file_size,
         file_crc,
         mut packed,
@@ -119,6 +130,8 @@ fn emit_rar4_prepared(cx: &mut dyn Engine, prepared: Rar4PreparedMember) -> RarR
         cx.write_ctx().solid.rar4_unp_ver,
         mtime,
         Some(mtime_ns),
+        ctime,
+        atime,
     );
 
     let password_encrypted = cx.password().is_some_and(|pw| !pw.is_empty());
@@ -277,6 +290,8 @@ pub(crate) fn add_batch_parallel_rar4(
             // The batch window is archive-wide (already capped by `-md`), so the
             // same bound applies to every member.
             let max_distance = 0x1_0000usize << cx.write_ctx().solid.rar4_dict_bits.unwrap_or(6);
+            let save_ctime = cx.write_ctx().meta.ctime;
+            let save_atime = cx.write_ctx().meta.atime;
             let prepared: Vec<RarResult<(usize, Rar4PreparedMember)>> = pool.install(|| {
                 wave.par_iter()
                     .map(|&(idx, entry)| {
@@ -291,8 +306,17 @@ pub(crate) fn add_batch_parallel_rar4(
                                 .to_string_lossy()
                                 .into_owned(),
                         };
-                        prepare_rar4_file_member(path, &name, level, codec, filters, max_distance)
-                            .map(|p| (idx, p))
+                        prepare_rar4_file_member(
+                            path,
+                            &name,
+                            level,
+                            codec,
+                            filters,
+                            max_distance,
+                            save_ctime,
+                            save_atime,
+                        )
+                        .map(|p| (idx, p))
                     })
                     .collect()
             });

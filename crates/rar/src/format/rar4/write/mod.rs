@@ -363,28 +363,64 @@ pub(crate) use crate::format::shared::legacy_time::unix_to_dos_time;
 
 /// Build the FHD_EXTTIME field for a file header.
 ///
-/// The ext-time field carries sub-second precision and the DOS field's
-/// odd-second flag for mtime. RAR4 stores the 100-ns tick count as three
-/// bytes, least significant first, with a 2-byte flags word whose bits 12-15
-/// encode PRESENT (`0x8`), ADD_SECOND (`0x4`) and the byte count. This
-/// matches what WinRAR writes and what `decode_ext_time` decodes.
-pub(crate) fn build_ext_time(mtime: u32, mtime_ns: Option<u32>) -> Option<Vec<u8>> {
-    // DOS seconds have 2-second resolution; an odd local second is
-    // recovered through ADD_SECOND.
-    let add_second = epoch_to_local_civil(mtime) % 2 == 1;
-    let ticks = mtime_ns.unwrap_or(0) / 100; // 100-ns ticks.
-    if ticks == 0 && !add_second {
+/// The ext-time field carries sub-second precision and the DOS fields'
+/// odd-second flags. RAR4 lays it out as a 2-byte flags word — one nibble per
+/// field, mtime/ctime/atime/arctime from the top — followed by the fields in
+/// that order. Each present nibble is `PRESENT (0x8) | ADD_SECOND (0x4) | tick
+/// byte count`; the 100-ns tick count is three little-endian bytes (WinRAR
+/// always writes three when the field has a fractional second — verified on
+/// 6.23), and ctime/atime carry a 4-byte DOS time of their own before theirs.
+/// The mtime nibble is absent when the header's DOS field already carries it;
+/// ctime/atime are always present, since their seconds live in the area.
+/// Matches what WinRAR writes and what `decode_ext_time` decodes.
+pub(crate) fn build_ext_time(
+    mtime: u32,
+    mtime_ns: Option<u32>,
+    ctime: Option<(u32, u32)>,
+    atime: Option<(u32, u32)>,
+) -> Option<Vec<u8>> {
+    let push_ticks = |ext: &mut Vec<u8>, nibble: u16, ticks: u32| {
+        if nibble & 0x3 != 0 {
+            ext.push((ticks & 0xFF) as u8);
+            ext.push(((ticks >> 8) & 0xFF) as u8);
+            ext.push((ticks >> 16) as u8);
+        }
+    };
+    let count = |ticks: u32| if ticks == 0 { 0u16 } else { 3 };
+    // DOS seconds have 2-second resolution; an odd local second is recovered
+    // through ADD_SECOND.
+    let mtime_ticks = mtime_ns.unwrap_or(0) / 100;
+    let mtime_add = epoch_to_local_civil(mtime) % 2 == 1;
+    let mtime_nibble: u16 = if mtime_ticks == 0 && !mtime_add {
+        0
+    } else {
+        0x8 | if mtime_add { 0x4 } else { 0 } | count(mtime_ticks)
+    };
+    // `(nibble, ticks, DOS time)` for a self-describing ctime/atime.
+    let field = |(secs, ns): (u32, u32)| -> (u16, u32, u32) {
+        let add_second = epoch_to_local_civil(secs) % 2 == 1;
+        let ticks = ns / 100;
+        (
+            0x8 | if add_second { 0x4 } else { 0 } | count(ticks),
+            ticks,
+            unix_to_dos_time(secs),
+        )
+    };
+    let ctime = ctime.map(field);
+    let atime = atime.map(field);
+
+    let flags: u16 =
+        (mtime_nibble << 12) | (ctime.map_or(0, |f| f.0) << 8) | (atime.map_or(0, |f| f.0) << 4);
+    if flags == 0 {
         return None;
     }
 
-    let byte_count: u16 = if ticks == 0 { 0 } else { 3 };
-    let mut ext = Vec::with_capacity(2 + byte_count as usize);
-    let flags: u16 = (0x8 | if add_second { 0x4 } else { 0 } | byte_count) << 12;
+    let mut ext = Vec::new();
     ext.extend_from_slice(&flags.to_le_bytes());
-    if ticks != 0 {
-        ext.push((ticks & 0xFF) as u8);
-        ext.push(((ticks >> 8) & 0xFF) as u8);
-        ext.push((ticks >> 16) as u8);
+    push_ticks(&mut ext, mtime_nibble, mtime_ticks);
+    for (nibble, ticks, dos) in [ctime, atime].into_iter().flatten() {
+        ext.extend_from_slice(&dos.to_le_bytes());
+        push_ticks(&mut ext, nibble, ticks);
     }
     Some(ext)
 }
@@ -407,11 +443,69 @@ pub(crate) fn build_member_ext_time(
     container_unp_ver: u8,
     mtime: u32,
     mtime_ns: Option<u32>,
+    ctime: Option<(u32, u32)>,
+    atime: Option<(u32, u32)>,
 ) -> Option<Vec<u8>> {
     if container_unp_ver < 29 {
         return None;
     }
-    build_ext_time(mtime, mtime_ns)
+    build_ext_time(mtime, mtime_ns, ctime, atime)
+}
+
+/// `(ctime, atime)`, each `(unix seconds, nanoseconds)` and optional.
+pub(crate) type MemberExtraTimes = (Option<(u32, u32)>, Option<(u32, u32)>);
+
+/// The ctime/atime a RAR4 member carries when `-tsc`/`-tsa` are on, in the same
+/// Unix-seconds convention the mtime is passed in (each DOS field converts on
+/// the way out). Windows reads them through `GetFileTime` like the RAR5
+/// writer; Unix through `MetadataExt`.
+pub(crate) fn member_extra_times(
+    save_ctime: bool,
+    save_atime: bool,
+    meta: &std::fs::Metadata,
+    path: &std::path::Path,
+) -> MemberExtraTimes {
+    (
+        save_ctime
+            .then(|| platform_time(meta, path, false))
+            .flatten(),
+        save_atime
+            .then(|| platform_time(meta, path, true))
+            .flatten(),
+    )
+}
+
+#[cfg(unix)]
+fn platform_time(
+    meta: &std::fs::Metadata,
+    _path: &std::path::Path,
+    want_access: bool,
+) -> Option<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    Some(if want_access {
+        (meta.atime() as u32, meta.atime_nsec() as u32)
+    } else {
+        (meta.ctime() as u32, meta.ctime_nsec() as u32)
+    })
+}
+
+#[cfg(windows)]
+fn platform_time(
+    _meta: &std::fs::Metadata,
+    path: &std::path::Path,
+    want_access: bool,
+) -> Option<(u32, u32)> {
+    crate::format::rar5::write::windows::windows_file_time(path, want_access)
+        .map(|(secs, ns)| (secs as u32, ns))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_time(
+    _meta: &std::fs::Metadata,
+    _path: &std::path::Path,
+    _want_access: bool,
+) -> Option<(u32, u32)> {
+    None
 }
 
 /// The member `unp_ver` a RAR4 FILE_HEAD carries for `requested_level`: WinRAR
@@ -670,18 +764,41 @@ mod tests {
     #[test]
     fn ext_time_marks_odd_local_seconds() {
         let odd_epoch = local_civil_to_epoch(1_700_000_001); // odd second
-        let ext = build_ext_time(odd_epoch, None).expect("odd second needs a record");
+        let ext = build_ext_time(odd_epoch, None, None, None).expect("odd second needs a record");
         assert_eq!(ext, vec![0x00, 0xC0], "PRESENT|ADD_SECOND, 0 tick bytes");
 
         let even_epoch = local_civil_to_epoch(1_700_000_002);
-        assert!(build_ext_time(even_epoch, None).is_none());
+        assert!(build_ext_time(even_epoch, None, None, None).is_none());
 
-        let ext = build_ext_time(even_epoch, Some(123_456_700)).expect("ticks need a record");
+        let ext =
+            build_ext_time(even_epoch, Some(123_456_700), None, None).expect("ticks need a record");
         assert_eq!(
             u16::from_le_bytes([ext[0], ext[1]]) >> 12,
             0xB,
             "PRESENT + 3 tick bytes"
         );
+    }
+
+    /// ctime/atime are always present (their 4-byte DOS time lives in the area),
+    /// while the mtime nibble is absent when the header field already carries
+    /// it — the shape WinRAR 6.23 writes for `-ma4 -tsc`/`-tsa`.
+    #[test]
+    fn ext_time_records_ctime_and_atime() {
+        let even = local_civil_to_epoch(1_700_000_002); // even second, no ns
+        let odd = local_civil_to_epoch(1_700_000_001);
+        let ctime = (local_civil_to_epoch(1_600_000_005), 123_456_700);
+        let ext = build_ext_time(even, None, Some(ctime), None).expect("ctime needs a record");
+        let flags = u16::from_le_bytes([ext[0], ext[1]]);
+        assert_eq!(flags >> 12, 0x0, "mtime nibble absent");
+        assert_eq!((flags >> 8) & 0xf, 0xF, "ctime PRESENT|ADD_SECOND|3 ticks");
+        assert_eq!((flags >> 4) & 0xf, 0x0, "atime absent");
+        assert_eq!(&ext[2..6], &unix_to_dos_time(ctime.0).to_le_bytes());
+
+        let atime = (local_civil_to_epoch(1_600_000_006), 0); // even, whole
+        let ext = build_ext_time(odd, None, None, Some(atime)).expect("atime needs a record");
+        let flags = u16::from_le_bytes([ext[0], ext[1]]);
+        assert_eq!(flags >> 12, 0xC, "mtime PRESENT|ADD_SECOND");
+        assert_eq!((flags >> 4) & 0xf, 0x8, "atime PRESENT, whole second");
     }
 
     /// The extended-time area is a RAR 3.0+ (`v29`) *container* construct:
@@ -695,12 +812,14 @@ mod tests {
     fn member_ext_time_needs_a_v29_container() {
         let odd = local_civil_to_epoch(1_700_000_001); // odd local second
         let even = local_civil_to_epoch(1_700_000_002);
-        assert!(build_member_ext_time(29, odd, None).is_some());
-        assert!(build_member_ext_time(29, even, Some(123_456_700)).is_some());
-        assert!(build_member_ext_time(29, even, None).is_none());
+        assert!(build_member_ext_time(29, odd, None, None, None).is_some());
+        assert!(build_member_ext_time(29, even, Some(123_456_700), None, None).is_some());
+        assert!(build_member_ext_time(29, even, None, None, None).is_none());
+        // A ctime/atime alone still needs the record.
+        assert!(build_member_ext_time(29, even, None, Some((odd, 0)), None).is_some());
         for unp_ver in [15, 20, 26] {
             assert!(
-                build_member_ext_time(unp_ver, odd, Some(123_456_700)).is_none(),
+                build_member_ext_time(unp_ver, odd, Some(123_456_700), None, None).is_none(),
                 "unp_ver {unp_ver} must not carry a record"
             );
         }

@@ -153,6 +153,12 @@ pub(crate) fn add_file_rar4(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();
+    let (ctime, atime) = crate::format::rar4::write::member_extra_times(
+        cx.write_ctx().meta.ctime,
+        cx.write_ctx().meta.atime,
+        &meta,
+        path,
+    );
 
     // Large members stream: the file is compressed (or copied) into a
     // spill file and then streamed into the archive, so the whole member
@@ -214,6 +220,8 @@ pub(crate) fn add_file_rar4(
             mtime_ns,
             stream_level,
             attr,
+            ctime,
+            atime,
         );
     }
 
@@ -230,7 +238,18 @@ pub(crate) fn add_file_rar4(
             ),
         )));
     }
-    add_rar4_data(cx, name, data, level, mtime, mtime_ns, None, Some(attr))
+    add_rar4_data(
+        cx,
+        name,
+        data,
+        level,
+        mtime,
+        mtime_ns,
+        None,
+        Some(attr),
+        ctime,
+        atime,
+    )
 }
 
 /// Splice the queued comment into the legacy main header.
@@ -347,6 +366,8 @@ pub(crate) fn add_rar4_data(
     mtime_ns: u32,
     comment: Option<Vec<u8>>,
     attr: Option<u32>,
+    ctime: Option<(u32, u32)>,
+    atime: Option<(u32, u32)>,
 ) -> RarResult<()> {
     cx.check_cancel()?;
     crate::format::rar4::create::ensure_member_size(data.len() as u64)?;
@@ -364,6 +385,8 @@ pub(crate) fn add_rar4_data(
                 mtime,
                 mtime_ns,
                 attr: attr.unwrap_or(0x20),
+                ctime,
+                atime,
             });
         return Ok(());
     }
@@ -417,6 +440,8 @@ pub(crate) fn add_rar4_data(
         cx.write_ctx().solid.rar4_unp_ver,
         mtime,
         Some(mtime_ns),
+        ctime,
+        atime,
     );
 
     // Member-level encryption (WinRAR `-p`), dispatched on the cipher
@@ -548,6 +573,7 @@ pub(crate) fn write_rar4_dir_entry(
     meta: &fs::Metadata,
     mtime_secs: u32,
     mtime_ns: u32,
+    path: &Path,
 ) -> RarResult<()> {
     use crate::format::rar4::write::{
         FileHeaderParams, build_file_header, build_member_ext_time, encode_file_name,
@@ -557,10 +583,18 @@ pub(crate) fn write_rar4_dir_entry(
     // kind it is; directories reached before any file flush it here.
     emit_pending_rar4_comment(cx)?;
     let (encoded_name, name_flags) = encode_file_name(name);
+    let (ctime, atime) = crate::format::rar4::write::member_extra_times(
+        cx.write_ctx().meta.ctime,
+        cx.write_ctx().meta.atime,
+        meta,
+        path,
+    );
     let ext_time = build_member_ext_time(
         cx.write_ctx().solid.rar4_unp_ver,
         mtime_secs,
         Some(mtime_ns),
+        ctime,
+        atime,
     );
     let mut flags = name_flags;
     if ext_time.is_some() {

@@ -248,6 +248,8 @@ pub(crate) struct SolidAppendEntry {
     pub name: String,
     pub data: Vec<u8>,
     pub level: u8,
+    pub ctime: Option<(u32, u32)>,
+    pub atime: Option<(u32, u32)>,
     pub mtime: u32,
     pub mtime_ns: u32,
     /// On-disk DOS attribute byte to re-emit with the member.

@@ -288,6 +288,12 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **`lt` 的 `Details:` 对 legacy 容器一律 `RAR 4`**（不论成员 `unp_ver`：`-ma15`
   的 v15 成员也是 `RAR 4`；RAR13 是 `RAR 1.4`、RAR5 是 `RAR 5`）——UnRAR 6.23
   实测。旧代码对 legacy 打 `RAR 1.5`。
+- **`-tsc`/`-tsa` 的写与读**：写入把 ctime/atime 放进 `FHD_EXTTIME`——每字段
+  `PRESENT|ADD_SECOND|3 个亚秒字节`；mtime nibble 无内容（偶秒且无小数）时缺席，
+  ctime/atime 只要请求了就 present（自带 4 字节 DOS 时间）。文件成员与
+  `-ma4 -tsc -tsa` 官方输出**逐字节一致**（实测 `f0ff80d612…`）。读取解回模型的
+  ctime/atime（解包会恢复）。目录同样带，但 atime 取的是**枚举之后**的值（列目录
+  本身会刷 atime）。
 
 ## 提取与安全
 

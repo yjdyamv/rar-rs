@@ -147,6 +147,8 @@ pub(crate) fn add_bytes(
             now.subsec_nanos(),
             None,
             None,
+            None,
+            None,
         );
     }
     crate::format::rar5::write::add::add_bytes_rar5(cx, arcname, data, compression_level)
@@ -198,7 +200,7 @@ pub(crate) fn add_directory_only(
     }
     if cx.is_rar4() {
         return crate::format::rar4::write::member::write_rar4_dir_entry(
-            cx, &name, &meta, mtime, mtime_ns,
+            cx, &name, &meta, mtime, mtime_ns, path,
         );
     }
     crate::format::rar5::write::add::write_rar5_dir_entry(cx, &name, &meta, mtime)
@@ -280,7 +282,7 @@ fn add_directory_inner(
             .unwrap_or_default()
             .subsec_nanos();
         crate::format::rar4::write::member::write_rar4_dir_entry(
-            cx, &name, &meta, mtime, mtime_ns,
+            cx, &name, &meta, mtime, mtime_ns, path,
         )?;
     } else {
         crate::format::rar5::write::add::write_rar5_dir_entry(cx, &name, &meta, mtime)?;

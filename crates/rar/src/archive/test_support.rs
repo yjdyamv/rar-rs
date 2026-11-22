@@ -27,7 +27,7 @@ impl RarArchive {
         attr: Option<u32>,
     ) -> RarResult<()> {
         crate::format::rar4::write::member::add_rar4_data(
-            self, name, data, level, mtime, mtime_ns, comment, attr,
+            self, name, data, level, mtime, mtime_ns, comment, attr, None, None,
         )
     }
 

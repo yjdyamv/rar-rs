@@ -1389,6 +1389,60 @@ fn create_rar4_md_caps_the_declared_window() {
     }
 }
 
+/// `-tsc`/`-tsa` (`save_ctime`/`save_atime`) record the creation and access
+/// times in the RAR4 extended-time area; the reader exposes them again.
+#[test]
+fn create_rar4_carries_ctime_and_atime() {
+    let dir = make_temp_dir();
+    let f = dir.path().join("t.bin");
+    std::fs::write(&f, b"ts payload ".repeat(200)).unwrap();
+    let expected_atime = std::fs::metadata(&f)
+        .unwrap()
+        .accessed()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let arc = dir.path().join("ts.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .save_ctime(true)
+            .save_atime(true),
+    )
+    .expect("create");
+    archive.add_path(&f, ewo(3)).expect("add");
+    archive.finish().expect("close");
+
+    let reader = ArchiveReader::open(&arc).expect("reopen");
+    let entry = reader.entries().next().expect("one member");
+    assert!(entry.ctime().is_some(), "ctime must be recorded");
+    let atime = entry.atime().expect("atime must be recorded");
+    // RAR4 keeps the DOS field in local civil time and the reader reports a
+    // civil timestamp (the same convention as the mtime), so the value differs
+    // from the file's Unix atime by at most a timezone offset.
+    assert!(
+        atime.0.abs_diff(expected_atime) <= 14 * 3600,
+        "atime {atime:?} vs file {expected_atime}"
+    );
+
+    // Without the options the area stays empty.
+    let plain = dir.path().join("plain.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &plain,
+        WriterOptions::default().compression(ArchiveVersion::V29),
+    )
+    .expect("create");
+    archive.add_path(&f, ewo(3)).expect("add");
+    archive.finish().expect("close");
+    let reader = ArchiveReader::open(&plain).expect("reopen");
+    let entry = reader.entries().next().expect("one member");
+    assert!(entry.ctime().is_none(), "ctime is off by default");
+    assert!(entry.atime().is_none(), "atime is off by default");
+}
+
 /// A RAR29 solid run never stores and never breaks (WinRAR 6.23 `-ma4 -s`): an
 /// incompressible, empty or directory member keeps a compressed method — the
 /// payload may grow, but STORE would clear `FHD_SOLID` and reset the reader's
