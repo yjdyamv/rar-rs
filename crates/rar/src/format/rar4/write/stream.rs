@@ -10,7 +10,9 @@ use std::path::Path;
 use super::cbc::{Rar4RangeEmitter, Rar15RangeEmitter, Rar20RangeEmitter, Rar30RangeEmitter};
 use super::emit::{Rar4PayloadSource, Rar4SplitParams, emit_rar4_segment, emit_rar4_split};
 use super::encode::{legacy_rar15_options, legacy_rar20_options};
-use super::member::{emit_pending_rar4_comment, push_rar4_entry, track_rar4_solid_member};
+use super::member::{
+    emit_pending_rar4_comment, push_rar4_entry, rar4_solid_never_stores, track_rar4_solid_member,
+};
 use crate::engine::Engine;
 use crate::error::{RarError, RarResult};
 use crate::format::shared::engine::{CountingWriter, CrcReader, SpillGuard, spill_path_for};
@@ -186,7 +188,7 @@ pub(super) fn add_rar4_file_streaming(
         }
         file_crc = read;
         let compressed = counter.written();
-        if compressed < file_size {
+        if compressed < file_size || rar4_solid_never_stores(cx, level) {
             packed_len = compressed;
             method = crate::format::rar4::RAR4_METHOD_STORE + level;
             if let Some(encoder) = legacy_encoder_to_commit.take() {

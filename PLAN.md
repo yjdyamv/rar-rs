@@ -18,8 +18,9 @@
 - **老容器族读取（RAR 1.3–4.x）**：三代解码器（RAR29/20/15）+ PPMd + 五大标准 VM
   过滤器 + 通用 RARVM 解释器，solid 链、分卷、`-hp`、各代数据解密。
 - **RAR4 创建全能力**：LZSS m1–m5 + PPMd + 六大标准 VM 过滤器 + `-hp` + 多卷 +
-  solid （链内亦应用 VM 过滤器与 PPMd 模型延续）+ 并行 batch + 单大成员块级
-  MT（字节同等）+ NEWSUB 恢复记录。能力表见
+  solid （链内亦应用 VM 过滤器与 PPMd 模型延续，且**绝不落 STORE**：不可压/空成员
+  照写压缩 method、目录亦带 `FHD_SOLID`，链首之后每个成员都续链，2026-11-22 对齐
+  官方 6.23）+ 并行 batch + 单大成员块级 MT（字节同等）+ NEWSUB 恢复记录。能力表见
   [`docs/rar4-creation-spec.md`](docs/rar4-creation-spec.md)。
 - **RAR 1.3 / 1.4 / 1.5 / 2.x 创建**：`-ma13` / `-ma14` / `-ma15` / `-ma2`，含
   solid、 `-p` / `-hp`、旧命名分卷、归档注释（`-ma15`/`-ma2` 把注释嵌进主头， 与

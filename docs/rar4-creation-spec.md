@@ -80,6 +80,12 @@ ArchiveWriter::close()
 [2B head_crc16] [1B head_type] [2B flags] [2B head_size] [body...]
 ```
 
+- solid 链**绝不落 STORE**（RAR29）：不可压或空成员照写压缩 method（packed 甚至
+  更大），目录写 `0x30`（无数据）但同样带 `FHD_SOLID`；链首之后每个成员都带
+  `FHD_SOLID`（官方 6.23 `-ma4 -s` 实测；对拍见
+  `create_rar4_solid_never_stores_or_breaks`）。RAR 2.x/1.5 仍保留 STORE 短路
+  （0x33 之外的旧格式，另见 `rar4_solid_store_fallback`）。这条曾是我们相对官方的
+  ratio 差异，2026-11-22 已对齐。
 - CRC16：标准 CRC-32 截断为 16 位，存储在块的前 2 字节
 - head_type：MARK_HEAD(0x72) / MAIN_HEAD(0x73) / FILE_HEAD(0x74) /
   ENDARC_HEAD(0x7b)

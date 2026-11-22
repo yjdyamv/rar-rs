@@ -152,6 +152,16 @@ pub(crate) fn add_bytes(
     crate::format::rar5::write::add::add_bytes_rar5(cx, arcname, data, compression_level)
 }
 
+/// Whether a directory keeps the RAR29 solid chain instead of resetting it:
+/// WinRAR flags a `-ma4 -s` directory `FHD_SOLID` like any later member (it
+/// stores nothing, so the window is untouched), and resetting here would drop
+/// the flag and split a chain that has an unsorted middle directory.
+fn rar4_solid_dir_keeps_chain(cx: &dyn Engine) -> bool {
+    cx.write_ctx().solid.mode
+        && crate::version::LegacyCodec::from_unp_ver(cx.write_ctx().solid.rar4_unp_ver)
+            == Some(crate::version::LegacyCodec::Rar29)
+}
+
 /// Add a directory entry only (no recursion).
 ///
 /// Writes the directory header without traversing children. Callers that
@@ -164,7 +174,7 @@ pub(crate) fn add_directory_only(
 ) -> RarResult<()> {
     cx.check_cancel()?;
     let path = path.as_ref();
-    if !solid_chain_is_position_derived(cx) {
+    if !solid_chain_is_position_derived(cx) && !rar4_solid_dir_keeps_chain(cx) {
         reset_solid_chain(cx);
     }
     let name = arcname.replace('\\', "/").trim_end_matches('/').to_string();
@@ -233,7 +243,11 @@ fn add_directory_inner(
         return Ok(());
     }
     ancestors.insert(identity.clone());
-    if !solid_chain_is_position_derived(cx) {
+    // A RAR29 directory just continues the solid chain — WinRAR flags it
+    // `FHD_SOLID` like any later member — so resetting here would drop the
+    // flag and (with an unsorted chain) split the run. RAR 1.5 is
+    // position-derived (no reset either); the other families keep the reset.
+    if !solid_chain_is_position_derived(cx) && !rar4_solid_dir_keeps_chain(cx) {
         reset_solid_chain(cx);
     }
     let name = match arcname {

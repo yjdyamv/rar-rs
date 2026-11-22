@@ -1389,6 +1389,90 @@ fn create_rar4_md_caps_the_declared_window() {
     }
 }
 
+/// A RAR29 solid run never stores and never breaks (WinRAR 6.23 `-ma4 -s`): an
+/// incompressible, empty or directory member keeps a compressed method — the
+/// payload may grow, but STORE would clear `FHD_SOLID` and reset the reader's
+/// tables — and every member after the head carries `FHD_SOLID`.
+#[test]
+fn create_rar4_solid_never_stores_or_breaks() {
+    let dir = make_temp_dir();
+    let src = dir.path().join("t");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    let mut state = 7u32;
+    let random: Vec<u8> = (0..40_000)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        })
+        .collect();
+    let text = b"repeat this line ".repeat(500);
+    std::fs::write(src.join("a.bin"), &random).unwrap();
+    std::fs::write(src.join("b.bin"), []).unwrap();
+    std::fs::write(src.join("c.bin"), &text).unwrap();
+    std::fs::write(src.join("sub/d.bin"), b"repeat this line ".repeat(100)).unwrap();
+
+    let arc = dir.path().join("solid.rar");
+    let mut archive = ArchiveWriter::create_with(
+        &arc,
+        WriterOptions::default()
+            .compression(ArchiveVersion::V29)
+            .solid_mode(SolidMode::Continuous),
+    )
+    .expect("create");
+    archive.add_path(&src, ewo(3)).expect("add solid tree");
+    archive.finish().expect("close");
+
+    // Walk the FILE_HEADs for `(name, flags, method)`.
+    let raw = std::fs::read(&arc).unwrap();
+    let mut heads = Vec::new();
+    let mut pos = 7 + 13;
+    while pos + 32 <= raw.len() && raw[pos + 2] == 0x74 {
+        let flags = u16::from_le_bytes([raw[pos + 3], raw[pos + 4]]);
+        let hs = u16::from_le_bytes([raw[pos + 5], raw[pos + 6]]) as usize;
+        let packed = u32::from_le_bytes(raw[pos + 7..pos + 11].try_into().unwrap()) as usize;
+        let method = raw[pos + 25];
+        let ns = u16::from_le_bytes([raw[pos + 26], raw[pos + 27]]) as usize;
+        let name = String::from_utf8_lossy(&raw[pos + 32..pos + 32 + ns]).into_owned();
+        heads.push((name, flags, method));
+        pos += hs + packed;
+    }
+
+    assert!(heads.len() >= 5, "members: {heads:?}");
+    // The first file heads the chain; every member after it continues it.
+    let head = heads
+        .iter()
+        .position(|(n, ..)| n.ends_with(".bin"))
+        .expect("a file member");
+    assert_eq!(
+        heads[head].1 & 0x0010,
+        0,
+        "{} heads the chain",
+        heads[head].0
+    );
+    for (name, flags, _) in heads.iter().skip(head + 1) {
+        assert_ne!(flags & 0x0010, 0, "{name} must continue the chain");
+    }
+    for (name, _, method) in heads.iter().filter(|(n, ..)| n.ends_with(".bin")) {
+        assert_ne!(*method, 0x30, "{name} must not be stored in a solid run");
+    }
+
+    let mut archive = ArchiveReader::open(&arc).expect("reopen");
+    for (name, data) in [
+        ("t/a.bin", random.as_slice()),
+        ("t/b.bin", &[][..]),
+        ("t/c.bin", text.as_slice()),
+    ] {
+        assert_eq!(
+            archive
+                .read_entry(archive.unique_entry(name).unwrap())
+                .unwrap()
+                .as_slice(),
+            data,
+            "{name}"
+        );
+    }
+}
+
 /// The `FHD` window bits are archive-wide (the *largest* member), not per
 /// member: an 8 MiB + 10 KiB pair declares 6 for both, matching WinRAR.
 #[test]

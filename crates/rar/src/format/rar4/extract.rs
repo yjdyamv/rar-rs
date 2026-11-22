@@ -133,7 +133,14 @@ fn rar4_find_chain_start(cx: &dyn Engine, target_idx: usize) -> usize {
         let Some(previous) = (0..chain_start).rev().find(|&i| !cx.entries()[i].is_dir()) else {
             break;
         };
-        if !is_rar29_codec(&cx.entries()[previous].header) {
+        // A STORE member never touches the shared window or the codec state, so
+        // it is chain-transparent: the RAR29 run reaches back across it (the
+        // writer keeps a stored member in the run and flags it FHD_SOLID, even
+        // though it declares `unp_ver 20`). Only a *compressed* member of
+        // another codec starts a fresh run.
+        if !is_rar29_codec(&cx.entries()[previous].header)
+            && !super::is_stored(cx.entries()[previous].header.comp_method)
+        {
             break;
         }
         chain_start = previous;

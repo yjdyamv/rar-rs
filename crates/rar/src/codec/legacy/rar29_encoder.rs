@@ -583,7 +583,10 @@ fn tokenize(
     // identical whether the sequential path or a parallel worker ran it: both
     // see the same `combined`.
     let mut pair_seen = vec![0u32; 1 << 16];
-    for p in start.saturating_sub(SHORT_MATCH_MAX_OFFSET)..start {
+    // `combined[p + 1]` must stay in bounds: an empty member at the end of the
+    // carried window tokenizes `start == combined.len()`, so clamp one short.
+    let seed_end = start.min(combined.len().saturating_sub(1));
+    for p in start.saturating_sub(SHORT_MATCH_MAX_OFFSET)..seed_end {
         let key = u16::from_le_bytes([combined[p], combined[p + 1]]);
         pair_seen[key as usize] = p as u32 + 1;
     }

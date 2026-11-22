@@ -276,10 +276,6 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `/`，`lb` 会打出 `sub\`；2026-10-27 修正，`rename_entries` 对源名字带斜杠的
   外来归档保持原样（不强行归一）。契约：
   `cli_directory_members_carry_no_trailing_separator`。
-- **RAR4 solid 链中不落 STORE**：官方在 `-s` 链里即使载荷不可压也照写正常
-  method（`0x33`），我们保留“压不小就 STORE”的短路。STORE 成员合法地中断链
-  （其后成员不再带 `FHD_SOLID`，读取器会重置表），但比官方少一段 ratio。 对拍
-  solid 时用可压成员，见 `solid_chain_flags_agree_with_official`。
 - **`-idn` 仍不生效、`-idc` 恒等效**（我们不打印官方版权/Trial 横幅）、`-iver`
   文案与官方不同；`rar r` 对载荷损坏的处置见上。
 

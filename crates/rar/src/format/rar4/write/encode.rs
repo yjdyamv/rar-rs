@@ -161,11 +161,11 @@ fn encode_rar29_member(cx: &mut dyn Engine, data: &[u8], level: u8) -> RarResult
     } else {
         encoder.encode_solid_member_with_filter_candidates(data, &candidates)?
     };
-    if lz.len() < data.len() {
-        Ok((lz, crate::format::rar4::RAR4_METHOD_STORE + level))
-    } else {
-        Ok((data.to_vec(), crate::format::rar4::RAR4_METHOD_STORE))
-    }
+    // A RAR29 solid member is never stored: WinRAR writes the compressed
+    // stream even when it grows (its `0x33` method), so the chain never breaks
+    // and every later member keeps `FHD_SOLID`. A STORE member would clear
+    // that flag and reset the reader's tables mid-chain.
+    Ok((lz, crate::format::rar4::RAR4_METHOD_STORE + level))
 }
 
 /// RAR 2.x ladder: candidate counts 16/64/256/512/1024 + lazy matching +

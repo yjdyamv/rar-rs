@@ -33,27 +33,33 @@ use crate::version::LegacyCodec;
 /// clear.
 pub(super) fn track_rar4_solid_member(cx: &mut dyn Engine, method: u8, unpacked_size: u64) -> bool {
     let codec = LegacyCodec::from_unp_ver(cx.write_ctx().solid.rar4_unp_ver);
+    let rar29 = codec == Some(LegacyCodec::Rar29);
     let continuation = cx.write_ctx().solid.mode
-        && method != crate::format::rar4::RAR4_METHOD_STORE
         && cx.write_ctx().solid.rar4_run_has_member
-        && matches!(codec, Some(LegacyCodec::Rar20 | LegacyCodec::Rar29));
-    if method == crate::format::rar4::RAR4_METHOD_STORE {
-        // RAR3+ flags the break with FHD_SOLID, so a STORE member ends
-        // the run. RAR 1.5 chains are position-derived and carry no
-        // flag: the reader keeps the window across STORE members, so
-        // the writer must keep the encoder alive for the next
-        // compressed member. RAR 2.x also keeps the encoder alive
-        // (official UnRAR skips `Unpack20` for STORE members and keeps
-        // `TablesRead2`); only RAR3+'s flagged break resets it here.
-        if codec == Some(LegacyCodec::Rar29) {
-            cx.write_ctx_mut().solid.rar4_encoder = None;
-            cx.write_ctx_mut().solid.legacy_encoder = None;
-            cx.write_ctx_mut().solid.rar4_run_has_member = false;
-        }
-    } else if unpacked_size != 0 {
+        && matches!(codec, Some(LegacyCodec::Rar20 | LegacyCodec::Rar29))
+        // RAR29 never stores a member (`encode_rar29_member`), so the method
+        // is irrelevant there; only the older codecs fall back to STORE.
+        && (rar29 || method != crate::format::rar4::RAR4_METHOD_STORE);
+    // A stored member ends a RAR 2.x flagged run; RAR 1.5 chains are
+    // position-derived and carry no flag (the writer keeps the encoder alive),
+    // and RAR29 never stores. Only a member with data advances the run.
+    let advances = method != crate::format::rar4::RAR4_METHOD_STORE || rar29;
+    if advances && unpacked_size != 0 {
         cx.write_ctx_mut().solid.rar4_run_has_member = true;
     }
     continuation
+}
+
+/// Whether a member of `level` in the current RAR29 solid chain must be written
+/// with its compressed stream even when that grows: WinRAR's `-ma4 -s` never
+/// stores (a `-m3` archive keeps `method 0x33`, packed > unpacked, and the
+/// chain's `FHD_SOLID`). Non-solid members, RAR 2.x and RAR 1.5 keep the STORE
+/// fallback.
+pub(super) fn rar4_solid_never_stores(cx: &dyn Engine, level: u8) -> bool {
+    let solid = &cx.write_ctx().solid;
+    solid.mode
+        && (1..=5).contains(&level)
+        && LegacyCodec::from_unp_ver(solid.rar4_unp_ver) == Some(LegacyCodec::Rar29)
 }
 
 /// Push the catalog entry for one emitted RAR4 member. Shared by the
@@ -384,22 +390,22 @@ pub(crate) fn add_rar4_data(
     if cx.write_ctx().solid.mode {
         crate::format::shared::write_ops::maybe_reset_solid_for_extension(cx, &name);
     }
-    let (mut packed, method) =
-        if crate::format::shared::write_ops::whole_member_is_incompressible(&data, level) {
-            // Random-data members would only build an O(input) token
-            // vector: store them (the RAR5 path stores them too).
-            (data, crate::format::rar4::RAR4_METHOD_STORE)
-        } else {
-            encode_rar4_member(cx, &data, level)?
-        };
+    let (mut packed, method) = if !rar4_solid_never_stores(cx, level)
+        && crate::format::shared::write_ops::whole_member_is_incompressible(&data, level)
+    {
+        // Random-data members would only build an O(input) token
+        // vector: store them (the RAR5 path stores them too). A RAR29
+        // solid chain is the exception — it must never store.
+        (data, crate::format::rar4::RAR4_METHOD_STORE)
+    } else {
+        encode_rar4_member(cx, &data, level)?
+    };
     let unpacked_size = file_size;
 
-    // Solid-chain bookkeeping (mirrors rars' `solid_run_has_member`
-    // logic): a member is a chain continuation when it compresses and the
-    // run has already emitted a member; storing a member rebuilds the
-    // encoder and ends the run. The reader keeps its window/tables across
-    // members flagged `FHD_SOLID`, so the flags and the encoder must stay
-    // in lockstep.
+    // Solid-chain bookkeeping: a member continues the run once the run has
+    // emitted one. A RAR29 chain never stores, so it never breaks
+    // mid-archive; the reader keeps its window/tables across members flagged
+    // `FHD_SOLID`, so the flags and the encoder must stay in lockstep.
     let solid_continuation = track_rar4_solid_member(cx, method, unpacked_size);
 
     let member_unp_ver = crate::format::rar4::write::member_unp_ver(
@@ -559,6 +565,12 @@ pub(crate) fn write_rar4_dir_entry(
     let mut flags = name_flags;
     if ext_time.is_some() {
         flags |= crate::format::rar4::FHD_EXTTIME;
+    }
+    // A directory in a RAR29 solid run continues the chain: WinRAR flags it
+    // `FHD_SOLID` too (it stores nothing, so the window is untouched, but the
+    // reader must not reset its tables when it sees the entry).
+    if track_rar4_solid_member(cx, crate::format::rar4::RAR4_METHOD_STORE, 0) {
+        flags |= crate::format::rar4::FHD_SOLID;
     }
     // The directory's own DOS attributes (directory bit plus hidden/system),
     // like WinRAR; the model entry carries the same byte.
