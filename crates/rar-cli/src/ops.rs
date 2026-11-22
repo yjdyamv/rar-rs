@@ -270,7 +270,10 @@ fn archive_details(rar: &ArchiveReader, view: &VolumeView) -> String {
     let version = first.map(|entry| entry.version());
     let mut details = match version {
         Some(rc) if rc.is_rar13() => "RAR 1.4",
-        Some(rc) if rc.is_legacy() => "RAR 1.5",
+        // The whole legacy RAR 1.5–4.x container reports as one family
+        // (`RAR 4`), whatever the member `unp_ver`: verified against UnRAR
+        // 6.23, which labels `-ma15`/`-ma2`/`-ma4` archives alike.
+        Some(rc) if rc.is_legacy() => "RAR 4",
         Some(ArchiveVersion::V70)
             if first
                 .and_then(|entry| entry.dict_size_bytes())

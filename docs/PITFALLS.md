@@ -279,6 +279,16 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **`-idn` 仍不生效、`-idc` 恒等效**（我们不打印官方版权/Trial 横幅）、`-iver`
   文案与官方不同；`rar r` 对载荷损坏的处置见上。
 
+## RAR4 读取
+
+- **目录标志与 host 无关**：成员是目录，要么 `file_attr & 0x10`（host 0/1/2/4 的
+  DOS 位），要么高位属性字是 Unix 目录模式（host 3/5）——两者是**并集**，不按 host
+  分流。旧的 host 二选一实现把 OS/2/Mac 的目录读成 0 字节文件；UnRAR 6.23 对
+  host=0..4 一律按并集判定。契约 `directory_flag_is_host_independent`。
+- **`lt` 的 `Details:` 对 legacy 容器一律 `RAR 4`**（不论成员 `unp_ver`：`-ma15`
+  的 v15 成员也是 `RAR 4`；RAR13 是 `RAR 1.4`、RAR5 是 `RAR 5`）——UnRAR 6.23
+  实测。旧代码对 legacy 打 `RAR 1.5`。
+
 ## 提取与安全
 
 - **固实链里的滤波记录是成员内坐标**：解码器在 `apply_complete_filters` 用

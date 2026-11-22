@@ -30,6 +30,18 @@ fn cli_ma4_creates_rar4_archive() {
         "archive must carry the RAR4 signature"
     );
 
+    // `l` labels the whole legacy container `RAR 4`: UnRAR 6.23 prints the same
+    // for a `-ma4`/`-ma2`/`-ma15` archive, whatever the member version is.
+    let listing = std::process::Command::new(RAR_CLI)
+        .arg("l")
+        .arg(&arc)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&listing.stdout).contains("Details: RAR 4"),
+        "legacy container must report RAR 4"
+    );
+
     let mut rar = rar_rs::ArchiveReader::open(&arc).unwrap();
     let mut names: Vec<String> = rar.entries().map(|e| e.name().to_string()).collect();
     names.sort();

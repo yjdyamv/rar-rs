@@ -400,6 +400,16 @@ pub(crate) fn file_header_crc_end(header: &[u8]) -> usize {
     ext_end
 }
 
+/// Whether a RAR4 attribute word marks a directory: the DOS
+/// `FILE_ATTRIBUTE_DIRECTORY` bit (MS-DOS, OS/2, Windows and Mac entries, host
+/// 0/1/2/4) or a Unix directory mode in the high word (host 3/5). The two tests
+/// are a union, not host-switched — verified against UnRAR 6.23, which lists a
+/// directory for every host value with either bit set (our old host match
+/// missed OS/2 and Mac entries and read their directories as 0-byte files).
+fn rar4_is_directory(attr: u32) -> bool {
+    attr & 0x10 != 0 || (attr >> 16) & 0o170000 == 0o040000
+}
+
 /// Parse a RAR4 FILE_HEAD block body into the format-neutral `FileHeader`,
 /// mapping fields to the common model (`format_version: 4`). File data offsets are
 /// absolute within the stream.
@@ -500,13 +510,7 @@ fn parse_file_header(block: &Rar4Block) -> RarResult<FileHeader> {
     // ext-time word.
     let mtime = dos_time_to_unix(file_time).wrapping_add(u32::from(add_second));
 
-    let is_directory = match host_os {
-        // MS-DOS / Windows: FILE_ATTRIBUTE_DIRECTORY in the low attribute word.
-        0 | 2 => attr & 0x10 != 0,
-        // Unix: high attribute word holds the mode bits; S_IFDIR = 0o040000.
-        3 => (attr >> 16) & 0o170000 == 0o040000,
-        _ => false,
-    };
+    let is_directory = rar4_is_directory(attr);
 
     // RAR4 host OS: 0 = MS-DOS, 1 = OS/2, 2 = Windows, 3 = Unix, 4 = Mac.
     // The model keeps the raw byte so display can distinguish DOS/OS/2 from
@@ -870,6 +874,16 @@ mod tests {
         let (c, len) = parse_file_comment(&b, 0);
         assert_eq!(c.unwrap(), payload);
         assert_eq!(len, b.len());
+    }
+
+    /// The directory flag is host-independent: the DOS bit for hosts 0/1/2/4,
+    /// a Unix mode for hosts 3/5 (UnRAR 6.23 agrees for every host value).
+    #[test]
+    fn directory_flag_is_host_independent() {
+        assert!(rar4_is_directory(0x10)); // DOS directory bit
+        assert!(rar4_is_directory(0o040755 << 16)); // Unix S_IFDIR mode
+        assert!(!rar4_is_directory(0x20)); // archive bit, a plain file
+        assert!(!rar4_is_directory(0o100644u32 << 16)); // Unix regular file
     }
 
     #[test]
