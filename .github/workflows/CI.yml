@@ -396,10 +396,11 @@ jobs:
           echo "declared rust-version: $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Install the MSRV toolchain
+        # `dtolnay/rust-toolchain` has no `profile` input — it installs with a
+        # minimal profile by default — so passing one only logged a warning.
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
-          profile: minimal
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
