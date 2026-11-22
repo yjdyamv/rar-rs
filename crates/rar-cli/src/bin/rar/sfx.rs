@@ -59,9 +59,13 @@ pub(crate) fn cmd_sfx(args: &SfxArgs, assume_yes: bool) -> CliResult<()> {
     if !assume_yes && std::path::Path::new(&out_path).exists() {
         return Err(format!("{out_path} already exists (use -y to overwrite)").into());
     }
-    let mut out = Vec::with_capacity(module_bytes.len() + input.len());
+    // Official `rar s` re-serializes the embedded archive (shortest member size
+    // fields, rebuilt quick-open catalog, no inline recovery record, recomputed
+    // locator), so mirror it rather than prepending the module verbatim.
+    let payload = rar_rs::wire::reserialize_for_sfx(&input);
+    let mut out = Vec::with_capacity(module_bytes.len() + payload.len());
     out.extend_from_slice(&module_bytes);
-    out.extend_from_slice(&input);
+    out.extend_from_slice(&payload);
     std::fs::write(&out_path, &out).map_err(|e| format!("write: {e}"))?;
     info!("Created {out_path}");
     Ok(())

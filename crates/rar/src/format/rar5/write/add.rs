@@ -698,19 +698,24 @@ pub(crate) fn add_file_rar5(
 /// operation will append to the volume (its header, plus any payload). The
 /// end-of-archive block, this volume's inline recovery record and its
 /// quick-open record are reserved on top, the recovery record sized from the
-/// prefix it protects. `added` also bounds the quick-open entry the header will
-/// add to this volume's catalog (the entry caches the header, never more than
-/// the header plus its payload). No-op for single-volume archives, and a volume
-/// too small for one header errors instead of rolling forever (matching the
-/// file-member splitter).
-pub(super) fn ensure_rar5_volume_space(cx: &mut dyn Engine, added: u64) -> RarResult<()> {
+/// prefix it protects. `packed_run` is the member's packed data run, which
+/// decides whether its header joins this volume's quick-open catalog at all
+/// (the entry caches the header, never more than the header plus its payload).
+/// No-op for single-volume archives, and a volume too small for one header
+/// errors instead of rolling forever (matching the file-member splitter).
+pub(super) fn ensure_rar5_volume_space(
+    cx: &mut dyn Engine,
+    added: u64,
+    packed_run: u64,
+) -> RarResult<()> {
     let Some(volume_size) = cx.write_ctx().output.volume_size else {
         return Ok(());
     };
     let mut rolled = false;
     loop {
         let used = cx.bytes_written();
-        let needed = super::emit::volume_tail_reserve(cx, used + added, Some(added)) + added;
+        let needed =
+            super::emit::volume_tail_reserve(cx, used + added, Some((added, packed_run))) + added;
         if volume_size.saturating_sub(used) >= needed {
             return Ok(());
         }
@@ -852,8 +857,8 @@ pub(crate) fn add_redirect_with_time(
     };
     let hdr_bytes = fh.to_bytes();
     let hdr_on_disk = cx.on_disk_header_len(hdr_bytes.len() as u64);
-    ensure_rar5_volume_space(cx, hdr_on_disk)?;
-    cx.record_quick_open_entry(&hdr_bytes)?;
+    ensure_rar5_volume_space(cx, hdr_on_disk, 0)?;
+    cx.record_quick_open_entry(&hdr_bytes, 0)?;
     cx.write_block_header(&hdr_bytes)?;
     cx.add_bytes_written(hdr_on_disk);
     cx.push_entry(ArchiveEntry {
@@ -893,8 +898,8 @@ pub(crate) fn write_rar5_dir_entry(
 
     let hdr_bytes = fh.to_bytes();
     let hdr_on_disk = cx.on_disk_header_len(hdr_bytes.len() as u64);
-    ensure_rar5_volume_space(cx, hdr_on_disk)?;
-    cx.record_quick_open_entry(&hdr_bytes)?;
+    ensure_rar5_volume_space(cx, hdr_on_disk, 0)?;
+    cx.record_quick_open_entry(&hdr_bytes, 0)?;
     cx.write_block_header(&hdr_bytes)?;
     cx.add_bytes_written(hdr_on_disk);
     cx.push_entry(ArchiveEntry {

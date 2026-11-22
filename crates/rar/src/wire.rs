@@ -14,6 +14,7 @@
 
 pub use crate::crypto::{EncryptionParams, decrypt_data, derive_keys, encrypt_data};
 pub use crate::format::rar5::headers::{BlockMeta, DataChunk, FileHeader, RawBlock, read_block};
+pub use crate::format::rar5::sfx::reserialize_for_sfx;
 pub use crate::recovery::rar50::{
     build_structural_inline_recovery_data, crc64_rar_state, crc64_xz,
 };

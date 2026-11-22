@@ -342,6 +342,194 @@ fn cli_ad1_ad2_pick_the_archive_directory() {
     }
 }
 
+fn sfx_rar5_offset(buf: &[u8]) -> Option<usize> {
+    let sig: [u8; 8] = [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00];
+    buf.windows(8).position(|w| w == sig)
+}
+
+fn sfx_read_vint(buf: &[u8], mut p: usize) -> (u64, usize) {
+    let start = p;
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let byte = buf[p];
+        p += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    (value, p - start)
+}
+
+/// Framed length (`[CRC32][size vint][body]`) of the first RAR5 block of
+/// `want_type` in `buf`.
+fn sfx_first_block_frame(buf: &[u8], want_type: u64) -> Option<usize> {
+    let mut off = sfx_rar5_offset(buf)? + 8;
+    while off + 5 <= buf.len() {
+        let (hsize, sl) = sfx_read_vint(buf, off + 4);
+        let body_start = off + 4 + sl;
+        let body_end = body_start + hsize as usize;
+        let (btype, tl) = sfx_read_vint(buf, body_start);
+        let (flags, fl) = sfx_read_vint(buf, body_start + tl);
+        let mut p = body_start + tl + fl;
+        if flags & 0x1 != 0 {
+            p += sfx_read_vint(buf, p).1;
+        }
+        let dsize = if flags & 0x2 != 0 {
+            sfx_read_vint(buf, p).0 as usize
+        } else {
+            0
+        };
+        if btype == want_type {
+            return Some(4 + sl + hsize as usize);
+        }
+        if btype == 5 {
+            break;
+        }
+        off = body_end + dsize;
+    }
+    None
+}
+
+/// `rar s` re-serializes the embedded archive like WinRAR: the 9 KB member's
+/// framed header shrinks from 44 to 42 bytes (its `data_size`/`unpacked_size`
+/// vints drop to their shortest width), so the embedded archive must not grow,
+/// and the SFX still extracts byte-identically.
+#[test]
+fn cli_sfx_reserializes_embedded_archive() {
+    let dir = make_temp_dir();
+    let big: Vec<u8> = (0..9000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    std::fs::write(dir.path().join("big.bin"), &big).unwrap();
+    std::fs::write(dir.path().join("small.txt"), b"tiny").unwrap();
+    let module = dir.path().join("module.sfx");
+    std::fs::write(&module, b"DUMMY-SFX-STUB-BYTES").unwrap();
+
+    let archive = dir.path().join("base.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-idq"])
+        .arg(&archive)
+        .args(["big.bin", "small.txt"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let base_len = std::fs::metadata(&archive).unwrap().len();
+    let base_hdr = std::fs::read(&archive).unwrap();
+    // Our writer reserves a 3-byte field for a 9 KB member (> 7.5 KiB).
+    let base_frame = sfx_first_block_frame(&base_hdr, 2).unwrap();
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s", "--sfx-module"])
+        .arg(&module)
+        .arg("base.rar")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let exe = std::fs::read(dir.path().join("base.exe")).unwrap();
+    assert_eq!(
+        sfx_first_block_frame(&exe, 2),
+        Some(base_frame - 2),
+        "`s` must re-emit both size vints at their shortest width"
+    );
+    let embedded = &exe[sfx_rar5_offset(&exe).unwrap()..];
+    assert!(
+        embedded.len() < base_len as usize,
+        "re-serialized archive must not grow ({} vs {base_len})",
+        embedded.len()
+    );
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["x", "-idq", "-y"])
+        .arg(dir.path().join("base.exe"))
+        .args(["--dest"])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read(out.join("big.bin")).unwrap(), big);
+    assert_eq!(std::fs::read(out.join("small.txt")).unwrap(), b"tiny");
+}
+
+/// Data-area length of the RAR5 quick-open (`QO`) service block, if present.
+fn sfx_qo_data_size(buf: &[u8]) -> Option<usize> {
+    let mut off = sfx_rar5_offset(buf)? + 8;
+    while off + 5 <= buf.len() {
+        let (hsize, sl) = sfx_read_vint(buf, off + 4);
+        let body_start = off + 4 + sl;
+        let body_end = body_start + hsize as usize;
+        let (btype, tl) = sfx_read_vint(buf, body_start);
+        let (flags, fl) = sfx_read_vint(buf, body_start + tl);
+        let mut p = body_start + tl + fl;
+        if flags & 0x1 != 0 {
+            p += sfx_read_vint(buf, p).1;
+        }
+        let (dsize, dsl) = if flags & 0x2 != 0 {
+            sfx_read_vint(buf, p)
+        } else {
+            (0, 0)
+        };
+        p += dsl;
+        if btype == 3 {
+            // data_size is read; skip file_flags, unpacked, attrs, comp, host.
+            let mut q = p;
+            for _ in 0..5 {
+                q += sfx_read_vint(buf, q).1;
+            }
+            let (nl, nll) = sfx_read_vint(buf, q);
+            q += nll;
+            if buf.get(q..q + nl as usize) == Some(&b"QO"[..]) {
+                return Some(dsize as usize);
+            }
+        }
+        if btype == 5 {
+            break;
+        }
+        off = body_end + dsize as usize;
+    }
+    None
+}
+
+/// The automatic quick-open rule caches only members whose packed run exceeds
+/// 4096 bytes: a small member must add no `QO` entry, so an archive with one
+/// 9 KB member has the same `QO` payload whether or not a 64-byte member joins
+/// it. (Our writer used to cache every header.)
+#[test]
+fn cli_quick_open_skips_small_members() {
+    let dir = make_temp_dir();
+    let big: Vec<u8> = (0..9000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    std::fs::write(dir.path().join("big.bin"), &big).unwrap();
+    std::fs::write(dir.path().join("tiny.bin"), [7u8; 64]).unwrap();
+
+    let one = dir.path().join("one.rar");
+    let two = dir.path().join("two.rar");
+    for (arc, files) in [
+        (&one, &["big.bin"][..]),
+        (&two, &["big.bin", "tiny.bin"][..]),
+    ] {
+        let status = std::process::Command::new(RAR_CLI)
+            .args(["a", "-m0", "-idq"])
+            .arg(arc)
+            .args(files)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let qo_one = sfx_qo_data_size(&std::fs::read(&one).unwrap());
+    let qo_two = sfx_qo_data_size(&std::fs::read(&two).unwrap());
+    assert!(qo_one.is_some(), "a 9 KB member must earn a QO record");
+    assert_eq!(qo_one, qo_two, "a 64-byte member must not add a QO entry");
+}
+
 /// `a -sfx` prepends the default SFX module at create time (skipped when
 /// no module is installed).
 #[test]

@@ -190,6 +190,10 @@ impl VolumeOps for RarArchive {
         RarArchive::quick_open_volume_reserve(self, pending_header)
     }
 
+    fn quick_open_caches(&self, packed_run: u64) -> bool {
+        RarArchive::quick_open_caches(self, packed_run)
+    }
+
     fn mark_quick_open_data(&mut self, packed_run: u64) {
         RarArchive::mark_quick_open_data(self, packed_run);
     }
@@ -234,8 +238,8 @@ impl WriteServices for RarArchive {
         self.cancel.as_deref()
     }
 
-    fn record_quick_open_entry(&mut self, header_bytes: &[u8]) -> RarResult<()> {
-        if !self.write_ctx().locator.quick_open {
+    fn record_quick_open_entry(&mut self, header_bytes: &[u8], packed_run: u64) -> RarResult<()> {
+        if !RarArchive::quick_open_caches(self, packed_run) {
             return Ok(());
         }
         let pos = self.stream_mut()?.stream_position()?;

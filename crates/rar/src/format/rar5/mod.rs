@@ -21,6 +21,7 @@ pub(crate) mod extract;
 #[doc(hidden)]
 pub mod headers;
 pub(crate) mod payload;
+pub(crate) mod sfx;
 
 pub(crate) mod write;
 

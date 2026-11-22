@@ -442,6 +442,15 @@ impl RarArchive {
         }
     }
 
+    /// Whether a member header whose packed data run in the current volume is
+    /// `packed_run` earns a quick-open entry. WinRAR caches only members whose
+    /// run exceeds [`QUICK_OPEN_AUTO_THRESHOLD`]; `-qo+` caches every header and
+    /// `-qo-` none.
+    pub(super) fn quick_open_caches(&self, packed_run: u64) -> bool {
+        let locator = &self.write_ctx().locator;
+        locator.quick_open && (!locator.quick_open_auto || packed_run > QUICK_OPEN_AUTO_THRESHOLD)
+    }
+
     /// Move the staged write files over their final paths. Called on
     /// successful close only; on failure the staged files are left in
     /// place for [`Drop`] to clean up.

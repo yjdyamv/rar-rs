@@ -39,14 +39,16 @@ pub(super) enum SplitPhase {
 /// it inside `volume_size` too — a volume carrying one holds slightly less
 /// payload than a volume that does not.
 ///
-/// `pending_header` is the plain length of the member header the caller is
-/// about to emit: the quick-open catalog caches every header written in the
-/// volume, so the one still to come is part of the reservation.
+/// `pending` is the member header the caller is about to emit — its plain
+/// length and the packed data run it will hold in this volume: the quick-open
+/// catalog caches only headers whose run passes the automatic rule, so the one
+/// still to come is part of the reservation only when it qualifies.
 pub(super) fn volume_tail_reserve(
     cx: &dyn Engine,
     prefix_len: u64,
-    pending_header: Option<u64>,
+    pending: Option<(u64, u64)>,
 ) -> u64 {
+    let pending_header = pending.and_then(|(len, run)| cx.quick_open_caches(run).then_some(len));
     let quick_open = cx.quick_open_volume_reserve(pending_header);
     // Header-encrypted sets keep the earlier geometry (their reserve has an
     // extra `-hp` term we have not measured); so does a caller with no volume
@@ -84,10 +86,10 @@ fn data_budget(
     used: u64,
     hdr: u64,
     remaining: u64,
-    pending_header: Option<u64>,
+    pending: Option<(u64, u64)>,
 ) -> u64 {
     let fits = |budget: u64| {
-        hdr + budget + volume_tail_reserve(cx, used + hdr + budget, pending_header) <= remaining
+        hdr + budget + volume_tail_reserve(cx, used + hdr + budget, pending) <= remaining
     };
     let mut lo = 0u64;
     let mut hi = remaining.saturating_sub(hdr);
@@ -127,7 +129,7 @@ pub(crate) fn write_file_entry(
         // The record this volume may need depends on the run it holds, so
         // settle the automatic rule before anything is written.
         cx.mark_quick_open_data(packed_data.len() as u64);
-        cx.record_quick_open_entry(&hdr_bytes)?;
+        cx.record_quick_open_entry(&hdr_bytes, packed_data.len() as u64)?;
         cx.write_block_header(&hdr_bytes)?;
         let stream = cx.stream_mut()?;
         stream.write_all(packed_data)?;
@@ -163,20 +165,22 @@ pub(crate) fn write_file_entry(
     // so that is the data run this volume may end up holding: settle the
     // automatic quick-open rule on it before the reserve is computed, or the
     // record it earns would never be budgeted.
-    cx.mark_quick_open_data(total_packed.min(remaining));
+    let run = total_packed.min(remaining);
+    cx.mark_quick_open_data(run);
     // The recovery record protects this member too, so the tail reserve is
-    // sized from the prefix the member would leave behind.
+    // sized from the prefix the member would leave behind. The member's own
+    // entry counts against the reserve iff its *total* packed run is cached.
     let total_needed = hdr_on_disk
         + total_packed
         + volume_tail_reserve(
             cx,
             used + hdr_on_disk + total_packed,
-            Some(hdr_bytes.len() as u64),
+            Some((hdr_bytes.len() as u64, total_packed)),
         );
 
     if total_needed <= remaining {
         // Fits entirely
-        cx.record_quick_open_entry(&hdr_bytes)?;
+        cx.record_quick_open_entry(&hdr_bytes, total_packed)?;
         cx.write_block_header(&hdr_bytes)?;
         let stream = cx.stream_mut()?;
         stream.write_all(packed_data)?;
@@ -266,7 +270,7 @@ pub(super) fn write_split_member(
     if total_packed == 0 {
         let hdr_bytes = fh_base.to_bytes();
         let hdr_size = cx.on_disk_header_len(hdr_bytes.len() as u64);
-        let pending = Some(hdr_bytes.len() as u64);
+        let pending = Some((hdr_bytes.len() as u64, 0));
         let used = cx.bytes_written();
         let remaining = volume_size.saturating_sub(used);
         if remaining < hdr_size + volume_tail_reserve(cx, used + hdr_size, pending) {
@@ -279,7 +283,7 @@ pub(super) fn write_split_member(
                 )));
             }
         }
-        cx.record_quick_open_entry(&hdr_bytes)?;
+        cx.record_quick_open_entry(&hdr_bytes, 0)?;
         cx.write_block_header(&hdr_bytes)?;
         let data_offset = cx.stream_mut()?.stream_position()?;
         let volume_index = cx.current_volume_index();
@@ -393,12 +397,13 @@ pub(super) fn write_split_member(
         // settled against the tail reserve the chunk's own prefix implies.
         // That reserve also holds the quick-open record of this volume, whose
         // catalog lists every header written here — this chunk's included.
-        let pending = Some(last_hdr_plain.len() as u64);
         let used = cx.bytes_written();
         let remaining_member = total_packed - offset;
         // The chunk this volume takes is at most what is left of it, which is
         // the run the automatic quick-open rule keys on.
-        cx.mark_quick_open_data(remaining_member.min(remaining_vol));
+        let run = remaining_member.min(remaining_vol);
+        cx.mark_quick_open_data(run);
+        let pending = Some((last_hdr_plain.len() as u64, total_packed));
         let bytes_for_data = data_budget(cx, used, hdr_size, remaining_vol, pending);
         let bytes_for_last = data_budget(cx, used, last_hdr_size, remaining_vol, pending);
 
@@ -466,7 +471,7 @@ pub(super) fn write_split_member(
 
         let final_hdr = final_fh.to_bytes();
         let final_hdr_disk = cx.on_disk_header_len(final_hdr.len() as u64);
-        cx.record_quick_open_entry(&final_hdr)?;
+        cx.record_quick_open_entry(&final_hdr, total_packed)?;
         cx.write_block_header(&final_hdr)?;
         let data_offset = phase(cx, SplitPhase::Write, offset, chunk_size, is_last)?;
         cx.add_bytes_written(final_hdr_disk + chunk_size);

@@ -172,7 +172,7 @@ fn write_streamed_payload(
         // quick-open rule keys on that run, exactly as it does on the
         // compressed path.
         cx.mark_quick_open_data(packed_size);
-        cx.record_quick_open_entry(&hdr_bytes)?;
+        cx.record_quick_open_entry(&hdr_bytes, packed_size)?;
         cx.write_block_header(&hdr_bytes)?;
         let written = {
             let stream = cx.stream_mut()?;
@@ -930,7 +930,7 @@ pub(crate) fn write_stream_record(
         &extra,
     );
     let hdr_disk = cx.on_disk_header_len(hdr.len() as u64);
-    super::add::ensure_rar5_volume_space(cx, hdr_disk + packed.len() as u64)?;
+    super::add::ensure_rar5_volume_space(cx, hdr_disk + packed.len() as u64, packed.len() as u64)?;
     cx.write_block_header(&hdr)?;
     let stream = cx.stream_mut()?;
     stream.write_all(&packed)?;
