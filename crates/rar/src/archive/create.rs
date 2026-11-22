@@ -16,7 +16,8 @@ use crate::detect::RAR5_SIGNATURE;
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::EndOfArchiveHeader;
 use crate::format::rar5::{
-    ARCHIVE_FLAG_RECOVERY, ARCHIVE_FLAG_SOLID, ARCHIVE_FLAG_VOLUME, END_FLAG_NEXT_VOLUME,
+    ARCHIVE_FLAG_RECOVERY, ARCHIVE_FLAG_SOLID, ARCHIVE_FLAG_VOLUME, BLOCK_FLAG_EXTRA_DATA,
+    END_FLAG_NEXT_VOLUME,
 };
 use crate::fs::atomic::{
     commit_files, install_durable, parent_dir, read_write_create, recover_interrupted_commit,
@@ -30,6 +31,43 @@ use crate::vint;
 /// locator either way. Measured against 7.23 and 6.23: 4096 bytes writes no
 /// record, 4097 does.
 pub(super) const QUICK_OPEN_AUTO_THRESHOLD: u64 = 4096;
+
+/// Clear `ARCHIVE_FLAG_VOLUME` in a staged single-volume archive's main header
+/// and recompute its CRC, in place. Used when a `-v` set turned out to hold a
+/// single volume: WinRAR writes it as the plain archive you would get without
+/// `-v`. Clearing only the low bit cannot change the flags vint's width, so the
+/// header length (and every later offset) is stable.
+fn clear_volume_flag(path: &Path) -> RarResult<()> {
+    let mut bytes = std::fs::read(path)?;
+    let sig = RAR5_SIGNATURE.len();
+    let (size, size_len) = vint::decode_from_slice(&bytes, sig + 4)
+        .map_err(|e| RarError::format(format!("volume main header size: {e}")))?;
+    let mut p = sig + 4 + size_len;
+    let (_ty, n) = vint::decode_from_slice(&bytes, p)?;
+    p += n;
+    let (block_flags, n) = vint::decode_from_slice(&bytes, p)?;
+    p += n;
+    if block_flags & BLOCK_FLAG_EXTRA_DATA != 0 {
+        let (_extra, n) = vint::decode_from_slice(&bytes, p)?;
+        p += n;
+    }
+    let (arch_flags, flags_len) = vint::decode_from_slice(&bytes, p)?;
+    let cleared = vint::encode(arch_flags & !ARCHIVE_FLAG_VOLUME);
+    let body_end = sig
+        + 4
+        + size_len
+        + usize::try_from(size)
+            .map_err(|_| RarError::format("volume main header size overflows usize"))?;
+    if cleared.len() != flags_len || body_end > bytes.len() {
+        return Ok(());
+    }
+    bytes[p..p + flags_len].copy_from_slice(&cleared);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&bytes[sig + 4..body_end]);
+    bytes[sig..sig + 4].copy_from_slice(&hasher.finalize().to_le_bytes());
+    std::fs::write(path, &bytes)?;
+    Ok(())
+}
 
 impl RarArchive {
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -473,6 +511,17 @@ impl RarArchive {
                 // the final names carry the same padding.
                 let nd = self.volume_paths.len();
                 let width = nd.to_string().len().max(1);
+                // WinRAR demotes a set that turned out to hold a single volume
+                // to a plain `{base}.rar` with no `ARCHIVE_FLAG_VOLUME` (a
+                // `-v` that fits in one volume is the archive you would get
+                // without `-v`). A header-encrypted first volume cannot be
+                // parsed, and a `.rev` set keeps its volume naming.
+                let demote = nd == 1
+                    && !self.is_rar13()
+                    && !self.is_legacy()
+                    && !self.header_encryption
+                    && self.recovery_volumes_percent.is_none()
+                    && self.recovery_volumes_count.is_none();
                 let mut data_paths = Vec::with_capacity(nd);
                 let mut install = Vec::with_capacity(nd);
                 for n in 1..=nd {
@@ -486,9 +535,14 @@ impl RarArchive {
                         volume_path_rar4(parent, final_base, n)
                     } else if self.is_legacy() {
                         self.rar4_final_volume_path(parent, final_base, n, width)
+                    } else if demote {
+                        parent.join(format!("{final_base}.rar"))
                     } else {
                         volume_path_padded(parent, final_base, n, width)
                     };
+                    if demote {
+                        clear_volume_flag(&tmp)?;
+                    }
                     data_paths.push(final_path.clone());
                     install.push((tmp, final_path));
                 }

@@ -530,6 +530,63 @@ fn cli_quick_open_skips_small_members() {
     assert_eq!(qo_one, qo_two, "a 64-byte member must not add a QO entry");
 }
 
+/// `ARCHIVE_FLAG_*` from a RAR5 archive's main header.
+fn rar5_main_archive_flags(buf: &[u8]) -> u64 {
+    let mut p = sfx_rar5_offset(buf).unwrap() + 8 + 4;
+    let (_size, sl) = sfx_read_vint(buf, p);
+    p += sl;
+    let (_ty, n) = sfx_read_vint(buf, p);
+    p += n;
+    let (flags, n) = sfx_read_vint(buf, p);
+    p += n;
+    if flags & 0x1 != 0 {
+        p += sfx_read_vint(buf, p).1;
+    }
+    sfx_read_vint(buf, p).0
+}
+
+/// A `-v` set that fits in a single volume is written as the plain archive
+/// WinRAR would produce without `-v`: named `{base}.rar` with no
+/// `ARCHIVE_FLAG_VOLUME`; a real set keeps `.partN.rar` and the volume flag.
+#[test]
+fn cli_single_volume_dash_v_is_a_plain_archive() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.bin"), vec![9u8; 4096]).unwrap();
+    let small = dir.path().join("small.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-v1g", "-idq"])
+        .arg(&small)
+        .arg("f.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(small.exists(), "single volume must be named {{base}}.rar");
+    assert!(!dir.path().join("small.part1.rar").exists());
+    assert_eq!(
+        rar5_main_archive_flags(&std::fs::read(&small).unwrap()) & 0x1,
+        0,
+        "a single volume must not set ARCHIVE_FLAG_VOLUME"
+    );
+
+    std::fs::write(dir.path().join("big.bin"), vec![3u8; 40 * 1024]).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-m0", "-v16k", "-idq"])
+        .arg("big.rar")
+        .arg("big.bin")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let first = dir.path().join("big.part1.rar");
+    assert!(first.exists(), "a multi-volume set keeps .partN.rar");
+    assert_eq!(
+        rar5_main_archive_flags(&std::fs::read(&first).unwrap()) & 0x1,
+        1,
+        "a volume set sets ARCHIVE_FLAG_VOLUME"
+    );
+}
+
 /// `a -sfx` prepends the default SFX module at create time (skipped when
 /// no module is installed).
 #[test]

@@ -564,13 +564,16 @@ fn shrinking_multivolume_overwrite_retires_stale_parts() {
     writer.add_bytes("small.bin", b"tiny", stored()).unwrap();
     let report = writer.finish().unwrap();
     assert_eq!(report.volume_paths().len(), 1);
+    // A set that shrank to a single volume is the plain `shrink.rar` (WinRAR
+    // demotes it), and the previous set's parts are retired.
+    assert_eq!(report.volume_paths()[0].file_name().unwrap(), "shrink.rar");
 
     let parts: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|name| name.starts_with("shrink.part"))
         .collect();
-    assert_eq!(parts.len(), 1, "stale parts left behind: {parts:?}");
+    assert!(parts.is_empty(), "stale parts left behind: {parts:?}");
 }
 
 /// Overwriting a volume set without recovery volumes must retire the
