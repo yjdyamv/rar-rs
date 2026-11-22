@@ -10,10 +10,11 @@ job 能证明什么）与 [`docs/testing.md`](docs/testing.md)（测试分层）
   …）；`Generated-by`、`Signed-off-by`
   之类的协作/生成工具署名行同样禁止。提交消息只写标题与正文。
 - 标题用
-  `area: imperative`（`ci: …`、`rar5: …`、`docs: …`）。这不是风格问题：release
+  `type(area): imperative`（`feat(rar4): …`、`fix(rar5): …`、`docs: …`、`ci: …`）。这不是风格问题：release
   notes 由 `git log --no-merges`
-  的前缀分组生成——`^(feat|perf)`、`^(fix)`、`^(docs|style|chore|test)`，其余一律落进
-  "Everything else"。
+  的前缀分组生成——`^(feat|perf)` 进 Features、`^(fix)` 进 Fixes、
+  `^(docs|style|chore|test)` 只计数不列出，其余（如无 type 前缀的 `rar4:`/`rar5:`）落进
+  "Other changes"。
 
 ## 推之前
 
