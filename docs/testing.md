@@ -63,12 +63,14 @@ duplication: the second pass over the 10 generated-corpus targets, this time
 against a scalar (`default = []`) library build, and — in the Windows job — the
 same corpus with `SA_REQUIRE_WINRAR=1`. The `--all-features` pass on every push
 already executes those suites; the extra passes buy a different library
-configuration for a second compile of the crate plus every test binary. A third
-job, `lint-windows`, runs on `windows-latest` on the same triggers: clippy over
-all features and targets plus `cli_behavior`, `volume_bare_name` and the
-binding's lib tests, and `release` waits on it — everything under
-`#[cfg(windows)]` used to be compiled for the first time by the release matrix
-itself. A `test-i686` job mirrors `test`'s three commands
+configuration for a second compile of the crate plus every test binary. Two
+Windows jobs run on `windows-latest` on the same triggers, split like `check` /
+`test`: `check-windows` is clippy over all features and targets, `test-windows`
+is `cli_behavior`, `volume_bare_name` and the binding's lib tests (plus, on
+tags/dispatches, the generated corpus, `official_interop` and `winrar_interop`
+against the official Windows builds), and `release` waits on both — everything
+under `#[cfg(windows)]` used to be compiled for the first time by the release
+matrix itself. A `test-i686` job mirrors `test`'s three commands
 (`rar-rs --all-features`, the rar-cli hermetic targets, the binding's lib tests)
 on `i686-unknown-linux-gnu` — 32-bit `usize`, where the
 `#[cfg(target_pointer_width = "32")]` regression tests (the rar29 VM block-start
@@ -110,7 +112,7 @@ drift:
 
 ## The other two platforms
 
-`check`/`test` run on Linux and `lint-windows` only covers Windows, so a green
+`check`/`test` run on Linux and the `*-windows` jobs only cover Windows, so a green
 run on one says nothing about the other two surfaces. They stay local and
 check-only (`clippy`/`check` do not link, so no cross toolchain is needed):
 
@@ -340,8 +342,8 @@ rows are in `THIRD_PARTY_LICENSES.md` under `## Test data`. The generated one
 (`dense-x86-prefix.bin`) is rebuilt by `scripts/gen-x86-fixture.sh` from
 `scripts/fixtures/dense-x86-corpus.rs` when its shape needs to change.
 
-Consequence for CI: `test` and `lint-windows` both run `scripts/fetch_winrar.py`
-first, so the generated suites execute there instead of skipping. `lint-windows`
+Consequence for CI: `test` and `test-windows` both run `scripts/fetch_winrar.py`
+first, so the generated suites execute there instead of skipping. `test-windows`
 fetches the full set and runs them with `SA_REQUIRE_WINRAR=1` (a missing tool or
 a failed generation fails the job); `test` (Ubuntu) runs the same targets
 against the Linux builds without that flag, because 2.90/3.00 have no Linux

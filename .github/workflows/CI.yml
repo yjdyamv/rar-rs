@@ -79,7 +79,7 @@ env:
   # committed lockfiles against the advisory database so a new advisory is
   # noticed here instead of on the next unrelated push. Only `check` and `test`
   # run: the heavy binding matrix stays tag/dispatch-only via `RUN_HEAVY`, and
-  # `lint-windows` opts out of `schedule` for the same cost reason.
+  # the Windows jobs opt out of `schedule` too (the weekly run is advisories only).
   schedule:
     - cron: '0 4 * * 1'
 # One run per ref. PR runs cancel their predecessor — a superseded commit is
@@ -107,8 +107,9 @@ permissions:
 #
 # Trigger split (see `RUN_HEAVY`): every push/PR runs `check`, `test`, the
 # 32-bit `test-i686` and `msrv`; tags and manual dispatches additionally build
-# the binding matrix and check rustdoc. `lint-windows` shares those triggers
-# and gates `release`, so a `#[cfg(windows)]` break cannot reach a published tag
+# the binding matrix and check rustdoc. The Windows `check-windows`/`test-windows`
+# share those triggers and gate `release`, so a `#[cfg(windows)]` break cannot
+# reach a published tag
 # through the matrix. A weekly `schedule` reruns `check` because the RustSec
 # advisory database moves without a commit.
 # `release` (tags, or a dispatch naming a tag) assembles the GitHub Release
@@ -312,7 +313,7 @@ jobs:
       - name: Fetch WinRAR test builds
         # The legacy suites build their archives at run time instead of shipping
         # blobs. rarlab published Linux tarballs from 3.93 on, so 2.90 and 3.00 —
-        # and every recipe that needs them — self-skip here; `lint-windows` runs
+        # and every recipe that needs them — self-skip here; `test-windows` runs
         # the full set.
         run: python3 scripts/fetch_winrar.py
       - name: Verify WinRAR test builds
@@ -354,7 +355,7 @@ jobs:
         # Windows ones (host OS field, path separators, mtime/tz). No
         # `SA_REQUIRE_WINRAR` here: the releases this host has no build for must
         # keep skipping instead of failing the job. The target list lives in the
-        # script, shared with `lint-windows` and `scripts/ci-lint.sh`.
+        # script, shared with `test-windows` and `scripts/ci-lint.sh`.
         #
         # Weekly and on tags only, because the step above already ran these
         # suites under `--all-features`: this step's added value is the same
@@ -475,19 +476,20 @@ jobs:
         # in deps (rayon, wide) that can raise the floor on their own, so a
         # default-features check would not prove the declared number.
         run: cargo check --workspace --all-features --locked
-  # `check` and `test` run on Linux only. Everything under `#[cfg(windows)]` — the
-  # WinRAR switch contract in cli_behavior, the separator hazards, the
-  # windows-sys code paths — would otherwise be compiled for the first time
-  # by the release matrix. Those suites are hermetic (temp dirs plus the
-  # CARGO_BIN_EXE_* binaries); this job additionally downloads the official
-  # builds and runs the generated legacy corpus, which is the only place the
-  # RAR 1.5-4.x decode paths are exercised against real archives.
-  lint-windows:
-    name: Checks + tests (windows)
+  # `check` and `test` run on Linux only. Everything under `#[cfg(windows)]` —
+  # the WinRAR switch contract in cli_behavior, the separator hazards, the
+  # windows-sys code paths — would otherwise be compiled for the first time by
+  # the release matrix. Split into the same `check`/`test` pair Linux uses so a
+  # red run names the failure kind. It used to be one job to save "runner
+  # cost", but this repository is public and Actions minutes are free, so that
+  # reason does not hold; the only price of the split is a second checkout,
+  # toolchain install and cache restore (time, not money), and Windows runners
+  # are slower and scarcer than Linux ones.
+  check-windows:
+    name: Checks (windows)
     runs-on: windows-latest
-    timeout-minutes: 45
-    # The weekly run exists only to re-evaluate RustSec advisories, which
-    # `check` already does; it is not worth a 45-minute Windows run.
+    timeout-minutes: 30
+    # The weekly run only re-evaluates RustSec advisories, which `check` does.
     if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v7
@@ -498,11 +500,34 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: lint-windows
+          # Shared with `test-windows`: same toolchain and lock, so one
+          # dependency cache serves both (as `linux` does for check/test).
+          shared-key: windows
+      - name: Clippy (workspace, all features and targets)
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+  # The `#[cfg(windows)]` code that only *running* executes: the CLI switch
+  # contract, the unit tests, the binding's `error.rs`/`guard.rs` tests, and —
+  # on tags/dispatches — the generated legacy corpus against the official
+  # Windows builds (`SA_REQUIRE_WINRAR=1`), the only place the RAR 1.5-4.x
+  # decode paths are exercised against real archives.
+  test-windows:
+    name: Tests (windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # The weekly run only re-evaluates RustSec advisories, which `check` does.
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
       - name: Cache WinRAR test builds
         # Release-shaped runs only: the corpus below is the only consumer, and
         # the fetch is the most expensive thing this job does on Windows (four
-        # official releases, minutes of download, billed at 4x the Linux rate).
+        # official releases, minutes of download).
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/cache@v6
         with:
@@ -522,13 +547,32 @@ jobs:
         # a gap names the release instead.
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: python scripts/fetch_winrar.py --check
-      - name: Clippy (workspace, all features and targets)
-        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Cargo test (official rar/unrar interop)
+        # Tag/dispatch only: needs the official binaries fetched above. The same
+        # `SA_OFFICIAL_*` env the Linux `test` job sets, pointed at the Windows
+        # builds (6-23 writes RAR4, 7-23 reads). `SA_REQUIRE_OFFICIAL=1` turns a
+        # missing binary into a failure instead of a silent skip.
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          SA_OFFICIAL_RAR: ${{ github.workspace }}/.cache/winrar/6-23/Rar.exe
+          SA_OFFICIAL_UNRAR: ${{ github.workspace }}/.cache/winrar/7-23/UnRAR.exe
+          SA_OFFICIAL_SFX: ${{ github.workspace }}/.cache/winrar/6-23/Default.SFX
+          SA_REQUIRE_OFFICIAL: "1"
+        run: cargo test -p rar-rs --test official_interop --locked
+      - name: Cargo test (WinRAR interop, rar-cli)
+        # `rar-cli`'s Windows-native suite drives a real `WinRAR.exe`/`UnRAR.exe`
+        # for the switch contract. `SA_WINRAR_DIR` is the fetched 7-23 dir;
+        # `rar4_623_bin()` still pulls 6-23 from the cache for the RAR4 writer.
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          SA_WINRAR_DIR: ${{ github.workspace }}/.cache/winrar/7-23
+          SA_REQUIRE_WINRAR: "1"
+        run: cargo test -p rar-cli --test winrar_interop --locked
       - name: Cargo test (library unit tests)
         # The `#[cfg(windows)]` unit tests: clippy compiles them, only a run
-        # executes them, and they are the part of this job a pull request
-        # actually needs. Split out of the corpus step so that step can be
-        # release-only without taking the unit tests with it.
+        # executes them, and they are the part a pull request actually needs.
+        # Split out of the corpus step so that step can be release-only without
+        # taking the unit tests with it.
         run: cargo test -p rar-rs --lib --locked
       - name: Cargo test (official-tool generated corpus)
         # Release-shaped runs only, for the reason the cache step above gives.
@@ -770,7 +814,8 @@ jobs:
       - test
       - test-i686
       - msrv
-      - lint-windows
+      - check-windows
+      - test-windows
       - build
       - build-wasm
     permissions:

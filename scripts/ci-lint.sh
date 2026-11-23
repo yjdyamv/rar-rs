@@ -27,7 +27,7 @@
 # gate (cargo deny) and the hermetic JS path-mapping test — plus the same test
 # targets `test` runs.
 #
-# Not covered: the Windows-only `lint-windows` job (run it on Windows), the
+# Not covered: the Windows-only `check-windows`/`test-windows` jobs (run them on Windows), the
 # 32-bit `test-i686` job (needs an `i686-unknown-linux-gnu` toolchain plus
 # `gcc-multilib`), the binding build / `tsc` matrix and the official-tool interop
 # suites. Markdown formatting is the one optional extra, under `dprint` below.

@@ -55,8 +55,7 @@
   与 rar-rs 各 feature 组合 / wasm 目标 `cargo check` / 确定性测试 smoke /
   版本一致性 / cargo deny / rustdoc / 声明的 MSRV（`rust-version = 1.95`， 用
   1.95 真跑 `cargo check`），绑定侧的类型闸门 `tsc --noEmit` 在 build
-  矩阵里跑一次；另有一条 `lint-windows`（clippy 全目标 + WinRAR 开关契约 +
-  绑定单元测试），cargo deny 每周定时重跑一次以接住新的 RustSec 公告；七目标
+  矩阵里跑一次；另有两条 Windows job（`check-windows` = clippy 全目标，`test-windows` = WinRAR 开关契约 + 绑定单元测试），cargo deny 每周定时重跑一次以接住新的 RustSec 公告；七目标
   fuzz；取消钩子；QO 快路径；流式修复； 零填充分卷。**发布路径不再只在打 tag
   时才第一次执行**：资产收集与 release notes 已抽成
   `scripts/ci/collect-release-assets.sh` / `scripts/ci/release-notes.sh` 并由

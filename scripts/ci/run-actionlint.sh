@@ -2,7 +2,7 @@
 # Download a pinned actionlint and run it over the workflow files.
 #
 # Why this exists: the workflows are the one part of this repo that nothing
-# compiles or lints. A stale `actions/cache@v4` sat in `lint-windows` while the
+# compiles or lints. A stale `actions/cache@v4` sat in the Windows job while the
 # build matrix had moved to `v6` — no CI step could have noticed, because no CI
 # step reads the workflow files. actionlint does (unknown action inputs, broken
 # expressions, missing `needs`, shell problems inside `run:` blocks).

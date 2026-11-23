@@ -5,11 +5,11 @@
 # archives are built at run time by the official tool (see
 # `crates/rar/tests/support/generate.rs`); they self-skip when no tool is
 # present. Three places used to repeat this target list — the `lint` job, the
-# `lint-windows` job and `scripts/ci-lint.sh` — so a new suite could be added
+# `test-windows` job and `scripts/ci-lint.sh` — so a new suite could be added
 # to one and silently stay out of the others.
 #
 # `lint` runs this against rarlab's Linux builds without `SA_REQUIRE_WINRAR`
-# (2.90/3.00 have no Linux tarball and must keep skipping); `lint-windows` sets
+# (2.90/3.00 have no Linux tarball and must keep skipping); `test-windows` sets
 # `SA_REQUIRE_WINRAR=1` so a gap fails instead.
 #
 # Usage: scripts/ci/test-generated-corpus.sh [extra cargo test args]
