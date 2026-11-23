@@ -83,8 +83,8 @@ pub(crate) fn parse_archive_encrypt_header(raw: &RawBlock) -> RarResult<Encrypti
     let iterations = 1u32 << strength;
 
     Ok(EncryptionParams {
-        version: version as u8,
-        flags: flags as u8,
+        version: u8::try_from(version).map_err(|_| RarError::format("encr version"))?,
+        flags: u8::try_from(flags).map_err(|_| RarError::format("encr flags"))?,
         strength,
         salt,
         iv,

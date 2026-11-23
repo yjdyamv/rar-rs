@@ -15,6 +15,7 @@
 //! This module does the same, so our `s` output is byte-identical to WinRAR's.
 //! Anything exotic (header encryption, a volume set) is left untouched: the
 //! caller then prepends the module to the archive unchanged, still a valid SFX.
+#![deny(clippy::cast_possible_truncation)] // this walk turns untrusted header sizes into `usize`; no silent narrowing
 
 use crate::error::{RarError, RarResult};
 use crate::vint;
@@ -200,7 +201,10 @@ fn parse_size_fields(body: &[u8]) -> RarResult<SizeFields> {
 /// The packed data size of a FILE header (its `data_size` field).
 fn file_data_size(body: &[u8]) -> RarResult<usize> {
     let sf = parse_size_fields(body)?;
-    Ok(sf.data_size.map_or(0, |(_, v)| v as usize))
+    match sf.data_size {
+        Some((_, v)) => usize::try_from(v).map_err(|_| RarError::format("data size")),
+        None => Ok(0),
+    }
 }
 
 /// Re-emit one framed FILE header with the two size fields at their natural
@@ -255,7 +259,10 @@ fn service_name(body: &[u8]) -> &[u8] {
         Err(_) => return &[],
     };
     p += n;
-    let end = p.saturating_add(name_len as usize);
+    let Ok(name_len) = usize::try_from(name_len) else {
+        return &[];
+    };
+    let end = p.saturating_add(name_len);
     body.get(p..end).unwrap_or(&[])
 }
 

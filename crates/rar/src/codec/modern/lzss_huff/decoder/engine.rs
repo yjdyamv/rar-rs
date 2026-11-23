@@ -7,6 +7,7 @@
 //! held-back output by [`MAX_STREAMING_FILTER_BUFFER`]. The solid-chain entry
 //! points reuse the window and symbol state owned by
 //! [`super::DecoderState`].
+#![deny(clippy::cast_possible_truncation)] // filter records are untrusted; their offsets/lengths must not truncate to `usize`
 
 use super::*;
 
@@ -182,7 +183,11 @@ fn run_engine(
                         "match distance {dist} exceeds the {max_dist}-byte window"
                     )));
                 }
-                window.copy_match(dist as usize, len as usize);
+                let dist = usize::try_from(dist)
+                    .map_err(|_| RarError::format("match distance overflows usize"))?;
+                let len = usize::try_from(len)
+                    .map_err(|_| RarError::format("match length overflows usize"))?;
+                window.copy_match(dist, len);
                 written += len as u64;
             }
             Symbol::Filter(filter) => pending_filters.push(*filter),
@@ -268,8 +273,9 @@ impl<'a> OutputSink<'a> {
         if to <= from {
             return Ok(());
         }
-        let length = (to - from) as usize;
-        if self.staging_len() + length > MAX_STREAMING_FILTER_BUFFER as usize {
+        let length = usize::try_from(to - from)
+            .map_err(|_| RarError::format("filtered region too large"))?;
+        if self.staging_len() as u64 + length as u64 > MAX_STREAMING_FILTER_BUFFER {
             return Err(RarError::format(format!(
                 "filtered output region exceeds streaming buffer limit {}",
                 MAX_STREAMING_FILTER_BUFFER
@@ -285,8 +291,11 @@ impl<'a> OutputSink<'a> {
             if staging_end < filt.block_start + filt.block_length {
                 continue; // region not fully produced yet
             }
-            let start_off = (filt.block_start - self.staging_start) as usize;
-            let end_off = start_off + filt.block_length as usize;
+            let start_off = usize::try_from(filt.block_start - self.staging_start)
+                .map_err(|_| RarError::format("filter start overflows usize"))?;
+            let end_off = start_off
+                + usize::try_from(filt.block_length)
+                    .map_err(|_| RarError::format("filter length overflows usize"))?;
             // `consumed` bytes were already written out but not yet
             // compacted, so the staging slot for `staging_start` is at
             // index `consumed`, not 0.
@@ -319,7 +328,8 @@ impl<'a> OutputSink<'a> {
             .min()
             .unwrap_or(written);
         let drain_to = earliest_filter.min(written);
-        let n = (drain_to - self.staging_start) as usize;
+        let n = usize::try_from(drain_to - self.staging_start)
+            .map_err(|_| RarError::format("drain range overflows usize"))?;
         if n > self.staging_len() {
             return Err(RarError::format("internal drain beyond staging"));
         }

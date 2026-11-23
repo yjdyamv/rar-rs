@@ -28,6 +28,7 @@
 //! Only archives whose creator added `-rr` are repairable — without the
 //! redundant parity there is nothing to rebuild from. The legacy `.rev`
 //! recovery volumes are a separate follow-up.
+#![deny(clippy::cast_possible_truncation)] // offsets/sizes read from a damaged archive are u64; no silent narrowing
 
 use crate::detect::RAR4_SIGNATURE;
 use crate::error::{RarError, RarResult};
@@ -214,9 +215,12 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
                     // the record: resync past it and keep looking, the way
                     // WinRAR searches for the record.
                     Err(error) if tolerant && !matches!(error, RarError::Io(_)) => {
-                        match crate::format::rar4::resync_block(&mut *stream, pos as u64 + 1)? {
+                        match crate::format::rar4::resync_block(
+                            &mut *stream,
+                            (pos as u64).saturating_add(1),
+                        )? {
                             Some(block) => {
-                                pos = block.offset as usize;
+                                pos = usize::try_from(block.offset).unwrap_or(usize::MAX);
                                 resynced = Some(block);
                                 continue;
                             }
@@ -227,11 +231,11 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
                 }
             }
         };
-        let start = block.offset as usize;
+        let start = usize::try_from(block.offset).unwrap_or(usize::MAX);
         let header = &block.header;
         let head_type = block.head_type;
         let flags = block.flags;
-        let on_disk_header = block.on_disk_header() as usize;
+        let on_disk_header = usize::try_from(block.on_disk_header()).unwrap_or(usize::MAX);
         // `total_size` is a 64-bit on-disk field: a crafted LONG_BLOCK can push
         // it past `usize` on a 32-bit host, where the old `as usize` wrapped.
         // Treat a value that does not fit, or a range past the file, the same
@@ -244,9 +248,10 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
             // The size fields are unusable (a damaged header derailed the
             // walk): resync to the next valid block rather than giving up on
             // finding the record at all.
-            match crate::format::rar4::resync_block(&mut *stream, start as u64 + 1)? {
+            match crate::format::rar4::resync_block(&mut *stream, (start as u64).saturating_add(1))?
+            {
                 Some(block) => {
-                    pos = block.offset as usize;
+                    pos = usize::try_from(block.offset).unwrap_or(usize::MAX);
                     resynced = Some(block);
                     continue;
                 }
@@ -506,7 +511,7 @@ pub(crate) fn repair_protect_head(
                 }
             }
             sectors.push(LegacyDamagedSector {
-                index: missing as u32,
+                index: u32::try_from(missing).unwrap_or(u32::MAX),
                 offset,
                 recovered,
             });
@@ -586,7 +591,7 @@ pub(crate) fn recovery_sector_count(prefix_len: usize, percent: u8) -> u32 {
     let percent = u64::from(percent);
     let bytes = (prefix_len as u64).saturating_mul(percent);
     let count = bytes.div_ceil(100 * 512);
-    (count as u32).max(2)
+    u32::try_from(count).unwrap_or(u32::MAX).max(2)
 }
 
 /// Build a complete RAR 3.x/4.x NEWSUB (0x7a) recovery block — the shape
@@ -603,14 +608,16 @@ pub(crate) fn recovery_sector_count(prefix_len: usize, percent: u8) -> u32 {
 pub(crate) fn build_legacy_recovery_block(prefix: &[u8], rec_sectors: u32) -> RarResult<Vec<u8>> {
     let (tags, parity, total_blocks) = legacy_record_data(prefix, rec_sectors)?;
     let data_len = tags.len() + parity.len();
+    let data_len_u32 = u32::try_from(data_len)
+        .map_err(|_| RarError::format("RAR4: recovery data size overflows u32"))?;
     let mut header = Vec::with_capacity(32 + 2 + 20);
     // CRC placeholder + type + flags (LONG_BLOCK) + head_size + add_size.
     header.extend_from_slice(&[0u8; 2]);
     header.push(0x7a); // NEWSUB_HEAD
     header.extend_from_slice(&(0xC000u16).to_le_bytes()); // LONG_BLOCK
     header.extend_from_slice(&(54u16).to_le_bytes()); // head_size
-    header.extend_from_slice(&(data_len as u32).to_le_bytes()); // packed/add
-    header.extend_from_slice(&(data_len as u32).to_le_bytes()); // unpacked
+    header.extend_from_slice(&data_len_u32.to_le_bytes()); // packed/add
+    header.extend_from_slice(&data_len_u32.to_le_bytes()); // unpacked
     header.push(2); // host_os: Windows
     header.extend_from_slice(&0u32.to_le_bytes()); // file_crc (unused)
     header.extend_from_slice(&0u32.to_le_bytes()); // file_time
@@ -649,11 +656,13 @@ pub(crate) fn build_legacy_protect_head_block(
         .map_err(|_| RarError::invalid_option("recovery sector count overflows a 16-bit field"))?;
     let (tags, parity, total_blocks) = legacy_record_data(prefix, u32::from(rec_sectors))?;
     let data_len = tags.len() + parity.len();
+    let data_len_u32 = u32::try_from(data_len)
+        .map_err(|_| RarError::format("RAR4: recovery data size overflows u32"))?;
     let mut header = vec![0u8; 26];
     header[2] = 0x78; // PROTECT_HEAD
     header[3..5].copy_from_slice(&0x8000u16.to_le_bytes()); // LONG_BLOCK
     header[5..7].copy_from_slice(&26u16.to_le_bytes()); // head_size
-    header[7..11].copy_from_slice(&(data_len as u32).to_le_bytes()); // add_size
+    header[7..11].copy_from_slice(&data_len_u32.to_le_bytes()); // add_size
     header[12..14].copy_from_slice(&rec_sectors.to_le_bytes());
     header[14..18].copy_from_slice(&total_blocks.to_le_bytes());
     header[18..26].copy_from_slice(b"Protect!");
@@ -675,7 +684,8 @@ fn legacy_record_data(prefix: &[u8], rec_sectors: u32) -> RarResult<(Vec<u8>, Ve
             "RAR4: recovery record needs at least one parity sector",
         ));
     }
-    let total_blocks = prefix.len().div_ceil(512) as u32;
+    let total_blocks = u32::try_from(prefix.len().div_ceil(512))
+        .map_err(|_| RarError::format("RAR4: too many recovery sectors"))?;
     if total_blocks == 0 {
         return Err(RarError::format(
             "RAR4: recovery record over an empty archive",
@@ -712,6 +722,7 @@ fn legacy_record_data(prefix: &[u8], rec_sectors: u32) -> RarResult<(Vec<u8>, Ve
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::cast_possible_truncation)] // test fixtures build small in-memory lengths, not on-disk quantities
     use super::*;
 
     /// A NEWSUB `RR` block whose `name_size` pushes `Protect+` to the end of

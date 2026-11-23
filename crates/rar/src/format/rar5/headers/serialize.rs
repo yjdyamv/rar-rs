@@ -327,7 +327,9 @@ pub(crate) fn file_time_extra_record(
     // Segment layout (like WinRAR): all second fields first, then all
     // nanosecond fields, in mtime/ctime/atime order.
     for (secs, _) in [mtime, ctime, atime].into_iter().flatten() {
-        record.extend_from_slice(&(secs as u32).to_le_bytes());
+        // HTIME holds whole seconds in a 4-byte field: clamp past 2106 rather
+        // than silently wrap the timestamp.
+        record.extend_from_slice(&u32::try_from(secs).unwrap_or(u32::MAX).to_le_bytes());
     }
     if ns_precision {
         for (_, ns) in [mtime, ctime, atime].into_iter().flatten() {

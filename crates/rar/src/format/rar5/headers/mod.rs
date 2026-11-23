@@ -1,3 +1,4 @@
+#![deny(clippy::cast_possible_truncation)] // the RAR5 header parse/serialize boundary: untrusted vints become sizes; no silent narrowing
 /// The outer RAR5 block envelope is shared by every header:
 /// ```text
 /// [Header CRC32]  4 bytes LE

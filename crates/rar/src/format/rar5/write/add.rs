@@ -32,6 +32,13 @@ use crate::model::FileHeader;
 #[cfg(windows)]
 use super::windows;
 
+/// A `SystemTime`'s Unix seconds as the RAR5 4-byte time field: saturated
+/// past 2106 (the field's ceiling) rather than wrapped, so the header mtime
+/// and the FILE_TIME record agree on what an out-of-range time becomes.
+pub(super) fn unix_time_secs_u32(t: SystemTime) -> u32 {
+    u32::try_from(t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()).unwrap_or(u32::MAX)
+}
+
 /// Build the FILE_TIME extra record per explicit `-ts` settings (the
 /// off-thread parallel batch path has no engine); `None` when no
 /// time needs the extra record. On Windows the access/creation times are
@@ -371,12 +378,7 @@ pub(crate) fn add_file_rar5(
         )));
     }
     let file_size = meta.len();
-    let mtime = meta
-        .modified()
-        .unwrap_or(SystemTime::now())
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as u32;
+    let mtime = unix_time_secs_u32(meta.modified().unwrap_or(SystemTime::now()));
     let mtime_ns = meta
         .modified()
         .unwrap_or(SystemTime::now())
@@ -965,10 +967,7 @@ pub(crate) fn add_bytes_rar5(
     } else {
         None
     };
-    let mtime = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as u32;
+    let mtime = unix_time_secs_u32(SystemTime::now());
     let time_extra = mtime_record(cx, mtime);
 
     let method = level_to_method(compression_level);
@@ -1087,4 +1086,25 @@ pub(crate) fn add_bytes_rar5(
     cx.report_progress(data.len() as u64, data.len() as u64);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unix_time_secs_u32;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    /// The 4-byte time field saturates past 2106 instead of wrapping, so the
+    /// header mtime and the FILE_TIME record cannot disagree on the value.
+    #[test]
+    fn unix_seconds_saturate_past_the_u32_field() {
+        let max = u64::from(u32::MAX);
+        assert_eq!(
+            unix_time_secs_u32(UNIX_EPOCH + Duration::from_secs(max)),
+            u32::MAX
+        );
+        assert_eq!(
+            unix_time_secs_u32(UNIX_EPOCH + Duration::from_secs(max + 1)),
+            u32::MAX
+        );
+    }
 }

@@ -647,7 +647,10 @@ fn parse_extra_records(
                         // sub-second remainder becomes the nanosecond field.
                         let ft = u64::from_le_bytes(extra_data[p..p + 8].try_into().unwrap());
                         secs[i] = (ft / 10_000_000).saturating_sub(11_644_473_600);
-                        nss[i] = ((ft % 10_000_000) * 100) as u32;
+                        // `ft % 10^7 < 10^7`, so `* 100 < 10^9` fits `u32`.
+                        #[allow(clippy::cast_possible_truncation)]
+                        let ns = ((ft % 10_000_000) * 100) as u32;
+                        nss[i] = ns;
                         p += 8;
                     }
                 }

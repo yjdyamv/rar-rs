@@ -2,6 +2,7 @@
 //! semantics. The STORE fallback probe itself lives in
 //! [`crate::codec::common::incompressible`] so that the codec entry points
 //! can apply it to bare `encode` calls too.
+#![deny(clippy::cast_possible_truncation)] // the `-md` dictionary caps are u64; a 32-bit `usize` must not truncate them
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -88,8 +89,10 @@ pub(crate) fn dict_params_for(
         // RAR5 log ceiling of 4 GiB is already below any v70 dict; the
         // clamp matters for force_v70's small dicts.)
         let declared = capped.max(cap_floor);
-        let window_log = dict_log_for(data_size, requested_log, level, cap_floor)
-            .min((63 - (declared / base).leading_zeros()) as u8);
+        // `declared >= base`, so the implied log is 0..=63 and fits `u8`.
+        #[allow(clippy::cast_possible_truncation)]
+        let declared_log = (63 - (declared / base).leading_zeros()) as u8;
+        let window_log = dict_log_for(data_size, requested_log, level, cap_floor).min(declared_log);
         (window_log, Some(declared))
     } else {
         // The 2x-file-size cap fell into the RAR5 range: plain v50 member

@@ -206,6 +206,7 @@ fn placeholder_width(hdr: &[u8], field: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::cast_possible_truncation)] // test fixtures build small in-memory values
     use super::*;
     use crate::format::rar5::headers::{
         ArchiveHeader, BlockMeta, locator_quick_open_offset, main_header_locator_fields,

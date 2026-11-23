@@ -392,6 +392,17 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   容器、成员是 STORE（`unp_ver` 20）。**别把成员改回 29**，那会破坏 `-m0`
   的逐字节对拍。
 
+## 整数宽度（32 位目标）
+
+`usize` 是**指针宽度**，不是长度类型。在 Debian i386 的 rustc 目标 `i686-unknown-linux-gnu` 上 `usize == u32`，而且 release 构建会把算术溢出**静默回绕**。历史上 rar29 的 VM block start、rar5 的字典上限与编码器字典、rar4 的 `LONG_BLOCK` 收窄、恢复网格等 bug 全是这一形状：一个上界由格式定义（常 > 2³²）的量被放进了 `usize`。CI 的 `test-i686` job 是运行时兜底，跑的正是 `#[cfg(target_pointer_width = "32")]` 那些只有 32 位才存在的测试。
+
+- **磁盘/格式量不进 `usize`**：成员大小、偏移、字典尺寸、扇区/块计数一律在 `u64`（或格式字段自身的宽度：RAR5 用 u64、RAR4 用 u32）里算，只在真正下标内存的那一步用 `usize::try_from(..)` 降下来。
+- **收窄一律 `try_from`，禁止裸 `as`**：`as usize` / `as u32` / `as u8` 都可能截断；用 `try_from(..)?`（返回错误）或 `saturating_*`（有明确上限时）。clippy 的 `cast_possible_truncation` 是**目标宽度感知**的——在 x86_64 上也会为 `u64 as usize` 报警（"on targets with 32-bit wide pointers"），不需要 32 位主机就能拦。`format/rar5/sfx.rs` 与 `format/rar5/headers/encrypt.rs` 已用 `#![deny(clippy::cast_possible_truncation)]` 钉住，是照抄的模板；其余模块**清一个、钉一个**。
+- **算术用 `checked_*`/`saturating_*`**：来自文件头或用户 `-md` 的值不要裸 `+ - * <<`；`block_start += 258`、`1usize << log`、`file_pow2 * 2` 都是这样来的。`recovery/legacy.rs` 第 239 行 `usize::try_from(..).unwrap_or(usize::MAX)` 是范例。
+- **32 位回归测试**：能在 64 位也成立的断言就别 `cfg` 掉（`format/rar5/write/layout.rs` 的 multi-GiB 测试是无条件的）；只有 64 位根本复现不了（如 `0xFFFF_FFFF + 258`）才 `#[cfg(target_pointer_width = "32")]`——而每个这样的测试都必须有能跑它的 job。
+- **待清点（burndown）**：`codec/*`、`recovery/{legacy,rev50}.rs`、`format/rar5/write/*` 等仍有大量收窄（多数是有界安全的：位读取 `read_bits(8)? as u8`、掩码后的 `(x & MASK) as u8`、`.min(u32::MAX) as u32`）。加 `#![deny]` 前先清到零；热循环里的有界转换就地写 `#[allow(clippy::cast_possible_truncation)] // 原因`。
+- **清点时按门禁的 cfg 扫**：`check` 用 `--target x86_64-unknown-linux-gnu` 编译，所以计数也用它（`cargo clippy -p rar-rs --all-features --all-targets --target x86_64-unknown-linux-gnu -- -W clippy::cast_possible_truncation`）；`#[cfg(unix)]`/`#[cfg(windows)]` 分支必须各自的目标各扫一遍——只扫开发机（Windows）会漏掉 unix-only 的收窄。
+
 ## 工程与架构
 
 - **分层单向**：层次与逐条约束的**权威**在

@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "parallel")]
-use super::add::{mtime_record, owner_extra_cfg, time_extra_cfg};
+use super::add::{mtime_record, owner_extra_cfg, time_extra_cfg, unix_time_secs_u32};
 #[cfg(feature = "parallel")]
 use super::layout::{DICT_BASE_FLOOR, dict_params_for, sample_is_incompressible};
 #[cfg(feature = "parallel")]
@@ -141,10 +141,7 @@ fn prepare_batch_wave(
     // (exactly as the sequential `add_bytes_rar5` builds it); on Unix the
     // record is `None` and the header's 4-byte mtime carries it. Computing it
     // once per wave keeps `Engine` out of the parallel closure.
-    let bytes_mtime = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as u32;
+    let bytes_mtime = unix_time_secs_u32(SystemTime::now());
     let bytes_time_extra = mtime_record(cx, bytes_mtime);
 
     let ctx = BatchPrepareCtx {
@@ -505,12 +502,7 @@ fn prepare_file_entry(
         )));
     }
     let file_size = meta.len();
-    let mtime = meta
-        .modified()
-        .unwrap_or(SystemTime::now())
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as u32;
+    let mtime = unix_time_secs_u32(meta.modified().unwrap_or(SystemTime::now()));
     let mtime_ns = meta
         .modified()
         .unwrap_or(SystemTime::now())
