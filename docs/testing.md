@@ -66,9 +66,10 @@ already executes those suites; the extra passes buy a different library
 configuration for a second compile of the crate plus every test binary. Two
 Windows jobs run on `windows-latest` on the same triggers, split like `check` /
 `test`: `check-windows` is clippy over all features and targets, `test-windows`
-is `cli_behavior`, `volume_bare_name` and the binding's lib tests (plus, on
-tags/dispatches, the generated corpus, `official_interop` and `winrar_interop`
-against the official Windows builds), and `release` waits on both — everything
+is `cli_behavior`, `volume_bare_name`, the binding's lib tests and the two
+interop suites (`official_interop`, `winrar_interop`) against the official
+Windows builds (plus, on tags/dispatches, the generated corpus), and `release`
+waits on both — everything
 under `#[cfg(windows)]` used to be compiled for the first time by the release
 matrix itself. A `test-i686` job mirrors `test`'s three commands
 (`rar-rs --all-features`, the rar-cli hermetic targets, the binding's lib tests)
@@ -343,12 +344,13 @@ rows are in `THIRD_PARTY_LICENSES.md` under `## Test data`. The generated one
 `scripts/fixtures/dense-x86-corpus.rs` when its shape needs to change.
 
 Consequence for CI: `test` and `test-windows` both run `scripts/fetch_winrar.py`
-first, so the generated suites execute there instead of skipping. `test-windows`
-fetches the full set and runs them with `SA_REQUIRE_WINRAR=1` (a missing tool or
-a failed generation fails the job); `test` (Ubuntu) runs the same targets
-against the Linux builds without that flag, because 2.90/3.00 have no Linux
-release. `scripts/wsl/ci-linux.sh` still fetches the tools for the local Linux
-gate.
+first, so the interop and generated suites execute there instead of skipping.
+`test-windows` fetches the full set unconditionally (the interop suites need it
+on every push) and runs the generated corpus with `SA_REQUIRE_WINRAR=1` (a
+missing tool or a failed generation fails the job); `test` (Ubuntu) runs the
+same corpus targets against the Linux builds without that flag, because
+2.90/3.00 have no Linux release. `scripts/wsl/ci-linux.sh` still fetches the
+tools for the local Linux gate.
 
 ## Why test targets are optimized
 

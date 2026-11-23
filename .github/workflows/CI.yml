@@ -525,10 +525,9 @@ jobs:
         with:
           shared-key: windows
       - name: Cache WinRAR test builds
-        # Release-shaped runs only: the corpus below is the only consumer, and
-        # the fetch is the most expensive thing this job does on Windows (four
-        # official releases, minutes of download).
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        # Every push now runs the interop suites below, so the fetch is no
+        # longer release-only: the cache is what keeps an everyday run from
+        # re-downloading four official releases (minutes on Windows).
         uses: actions/cache@v6
         with:
           path: .cache/winrar
@@ -537,22 +536,20 @@ jobs:
           # then hit the gap. A fresh key forces one clean fetch.
           key: winrar-tools-v2-${{ hashFiles('scripts/fetch_winrar.py') }}
       - name: Fetch WinRAR test builds
-        # The legacy suites build their archives with the official tool at run
-        # time instead of shipping blobs, so they need the releases on disk.
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        # The interop suites and the legacy corpus build their archives with the
+        # official tool at run time instead of shipping blobs, so they need the
+        # releases on disk.
         run: python scripts/fetch_winrar.py
       - name: Verify WinRAR test builds
-        # `SA_REQUIRE_WINRAR=1` below turns a missing tool into a panic deep
-        # inside the corpus generator. Check the cache right after the fetch so
-        # a gap names the release instead.
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        # `SA_REQUIRE_WINRAR` / `SA_REQUIRE_OFFICIAL` turn a missing tool into a
+        # panic deep inside a suite. Check the cache right after the fetch so a
+        # gap names the release instead.
         run: python scripts/fetch_winrar.py --check
       - name: Cargo test (official rar/unrar interop)
-        # Tag/dispatch only: needs the official binaries fetched above. The same
-        # `SA_OFFICIAL_*` env the Linux `test` job sets, pointed at the Windows
-        # builds (6-23 writes RAR4, 7-23 reads). `SA_REQUIRE_OFFICIAL=1` turns a
-        # missing binary into a failure instead of a silent skip.
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        # Every push, like the Linux `test` job's copy: the same `SA_OFFICIAL_*`
+        # env pointed at the Windows builds (6-23 writes RAR4, 7-23 reads).
+        # `SA_REQUIRE_OFFICIAL=1` turns a missing binary into a failure instead
+        # of a silent skip.
         env:
           SA_OFFICIAL_RAR: ${{ github.workspace }}/.cache/winrar/6-23/Rar.exe
           SA_OFFICIAL_UNRAR: ${{ github.workspace }}/.cache/winrar/7-23/UnRAR.exe
@@ -560,10 +557,10 @@ jobs:
           SA_REQUIRE_OFFICIAL: "1"
         run: cargo test -p rar-rs --test official_interop --locked
       - name: Cargo test (WinRAR interop, rar-cli)
-        # `rar-cli`'s Windows-native suite drives a real `WinRAR.exe`/`UnRAR.exe`
-        # for the switch contract. `SA_WINRAR_DIR` is the fetched 7-23 dir;
-        # `rar4_623_bin()` still pulls 6-23 from the cache for the RAR4 writer.
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        # Every push: `rar-cli`'s Windows-native suite drives a real
+        # `WinRAR.exe`/`UnRAR.exe` for the switch contract. `SA_WINRAR_DIR` is
+        # the fetched 7-23 dir; `rar4_623_bin()` still pulls 6-23 from the cache
+        # for the RAR4 writer.
         env:
           SA_WINRAR_DIR: ${{ github.workspace }}/.cache/winrar/7-23
           SA_REQUIRE_WINRAR: "1"
@@ -575,10 +572,11 @@ jobs:
         # taking the unit tests with it.
         run: cargo test -p rar-rs --lib --locked
       - name: Cargo test (official-tool generated corpus)
-        # Release-shaped runs only, for the reason the cache step above gives.
-        # `SA_REQUIRE_WINRAR=1` turns a missing tool or a failed generation into
-        # a test failure, so this run proves the RAR 1.5-4.x decode coverage
-        # actually ran rather than silently skipping.
+        # Still release-shaped: the interop suites above run every push, but the
+        # corpus generates and decodes its whole legacy set, which is worth a tag
+        # rather than every push. `SA_REQUIRE_WINRAR=1` turns a missing tool or a
+        # failed generation into a test failure, so this run proves the RAR
+        # 1.5-4.x decode coverage actually ran rather than silently skipping.
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         shell: bash
         env:
