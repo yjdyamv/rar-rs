@@ -38,9 +38,11 @@ tracker and a `Collect` policy that silently behaved like `Abort` reached main.
 `--bins` covers just the 104 unit tests inside the binaries, so the hermetic CLI
 integration targets are named explicitly — `cli_behavior` (the WinRAR switch
 contract) and `volume_bare_name` (a regression that only surfaced on Unix), so
-adding a hermetic suite cannot silently stay out of CI. `official_interop` and
-`winrar_interop` stay local: they need an installed WinRAR/UnRAR and self-skip,
-so running them here would only produce a wall of skip markers. The static
+adding a hermetic suite cannot silently stay out of CI. `official_interop` runs
+here too: the job fetches the Linux `rar`/`unrar` and points `SA_OFFICIAL_RAR` /
+`SA_OFFICIAL_UNRAR` at them, so the suite executes instead of printing skip
+markers. `winrar_interop` stays local — it needs the Windows `WinRAR.exe`, which
+the Linux runner cannot install. The static
 counterpart, the `check` job, keeps fmt, the guards, clippy (which subsumes
 `cargo check`), the wasm-target `cargo check`, `cargo deny` and rustdoc; the
 binding's `tsc --noEmit` gate runs in the `build` matrix, on the one target

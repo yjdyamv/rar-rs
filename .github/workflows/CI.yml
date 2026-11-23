@@ -282,6 +282,15 @@ jobs:
     name: Tests (linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Point the `official_interop` tests at the Linux rar/unrar this job fetches
+    # into `.cache/winrar` below. Without these paths that whole suite prints
+    # SKIPPED and passes, so a green run never proved the official tools read
+    # our archives. The fetch is unconditional here and `--check` fails on an
+    # incomplete cache, so the binaries exist by the time the tests run.
+    env:
+      SA_OFFICIAL_RAR: ${{ github.workspace }}/.cache/winrar/6-23/rar
+      SA_OFFICIAL_UNRAR: ${{ github.workspace }}/.cache/winrar/7-23/unrar
+      SA_OFFICIAL_SFX: ${{ github.workspace }}/.cache/winrar/6-23/default.sfx
     steps:
       - uses: actions/checkout@v7
       - name: Install rust toolchain
@@ -316,7 +325,7 @@ jobs:
       - name: Cargo test (library + CLI suites)
         # Tests are a local gate by default (see docs/testing.md), but a stale
         # test assertion shipped with 0.12.0 because nothing ran them here. This
-        # deterministic smoke — the library and CLI suites, no official-tool
+        # deterministic smoke — the library and CLI suites, the official-tool
         # interop, no JS/WASI binding suite (the earlier flake source) — closes
         # that gap without making a red run ambiguous.
         #
@@ -331,9 +340,10 @@ jobs:
         # The CLI targets are the two binaries' unit tests, `cli_behavior` (the
         # WinRAR switch contract, hermetic: temp dirs plus the
         # `CARGO_BIN_EXE_*` binaries this step builds) and `volume_bare_name`
-        # (a Unix-only regression that no CI step ran). `official_interop` and
-        # `winrar_interop` stay local: they need the official tools and
-        # self-skip, so running them here would only print skip markers.
+        # (a Unix-only regression that no CI step ran). `official_interop` runs
+        # here too, pointed at the fetched Linux binaries by the job `env`, so it
+        # executes instead of printing skip markers; `winrar_interop` stays local
+        # (it needs the Windows `WinRAR.exe`).
         run: |
           cargo test -p rar-rs --all-features --locked
           cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
