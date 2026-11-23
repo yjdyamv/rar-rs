@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-11-22 @ `89472f2`; every timing number here is a
+> Last verified: 2026-11-23 @ `c756675`; every timing number here is a
 > host-specific snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing
