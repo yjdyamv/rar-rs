@@ -135,7 +135,17 @@ wasi_files=(
   wasi-worker.mjs
   wasi-worker-browser.mjs
 )
+cli_archives=(
+  rar-rs-cli.darwin-arm64.tar.gz
+  rar-rs-cli.win32-x64-msvc.tar.gz
+  rar-rs-cli.win32-ia32-msvc.tar.gz
+  rar-rs-cli.win32-arm64-msvc.tar.gz
+  rar-rs-cli.linux-x64-gnu.tar.gz
+  rar-rs-cli.linux-x64-musl.tar.gz
+  rar-rs-cli.linux-arm64-musl.tar.gz
+)
 expected_files=$(( ${#addon_targets[@]} + ${#wasi_files[@]} + 2 + 3 + 2 + 1 ))
+expected_files_cli=$(( expected_files + ${#cli_archives[@]} ))
 
 make_fixture() {
   local dir=$1
@@ -158,6 +168,13 @@ make_fixture() {
   local name
   for name in "${wasi_files[@]}"; do
     printf 'wasi %s\n' "$name" >"$dir/wasm/$name"
+  done
+  # The CLI archives are present in every fixture; a run without `--cli` ignores
+  # them, and the `--cli` cases below are what require them.
+  mkdir -p "$dir/bindings/cli"
+  local archive
+  for archive in "${cli_archives[@]}"; do
+    printf 'cli %s\n' "$archive" >"$dir/bindings/cli/$archive"
   done
 }
 
@@ -197,6 +214,25 @@ else
   not_ok 'assets: one copy of the generated loader'
 fi
 
+# `--cli` is the `release` job's mode: it also requires and copies one rar/unrar
+# archive per CLI row of the build matrix. A fresh fixture, because collect is
+# not idempotent for the flattened license names (the second pass would collide
+# with the files the first one left in `release/`).
+make_fixture "$fixture"
+bash "$here/collect-release-assets.sh" --cli \
+  "$fixture/bindings" "$fixture/wasm" "$fixture/release" "$fixture" >/dev/null
+cli_count=$(find "$fixture/release" -maxdepth 1 -type f | wc -l | tr -d ' ')
+if [ "$cli_count" = "$expected_files_cli" ]; then
+  ok "assets: a --cli payload carries the CLI archives too ($cli_count files)"
+else
+  not_ok "assets: a --cli payload (expected $expected_files_cli files, found $cli_count)"
+fi
+if [ -f "$fixture/release/rar-rs-cli.linux-x64-musl.tar.gz" ]; then
+  ok 'assets: the CLI archive reaches the payload'
+else
+  not_ok 'assets: the CLI archive reaches the payload'
+fi
+
 # Negative cases: each rule that protects a release must actually fire.
 make_fixture "$fixture"
 rm "$fixture/bindings/linux-arm-gnueabihf/rar-rs-napi.linux-arm-gnueabihf.node"
@@ -228,6 +264,12 @@ expect_failure 'assets: missing license tree fails' bash "$here/collect-release-
 make_fixture "$fixture"
 printf 'dupes\n' >"$fixture/LICENSES/vendor__MIT.txt"
 expect_failure 'assets: flattened license collision fails' bash "$here/collect-release-assets.sh" \
+  "$fixture/bindings" "$fixture/wasm" "$fixture/release" "$fixture"
+
+make_fixture "$fixture"
+rm "$fixture/bindings/cli/rar-rs-cli.win32-arm64-msvc.tar.gz"
+expect_failure 'assets: a CLI build that never ran fails the --cli payload' \
+  bash "$here/collect-release-assets.sh" --cli \
   "$fixture/bindings" "$fixture/wasm" "$fixture/release" "$fixture"
 
 # ---------------------------------------------------------------------------
@@ -470,9 +512,10 @@ mv "$tmp/held-worker.mjs" "$payload/wasi-worker.mjs"
 
 
 # ---------------------------------------------------------------------------
-# The two lists that have to agree: what the build matrix produces and what the
-# release insists on. Editing one without the other is the failure mode this
-# whole file exists to catch, so check it here rather than in a comment.
+# The lists that have to agree: what the build matrix produces (addons and the
+# CLI archives) and what the release insists on. Editing one without the other
+# is the failure mode this whole file exists to catch, so check it here rather
+# than in a comment.
 # ---------------------------------------------------------------------------
 matrix_addons=$(grep -o "addon: '[^']*'" "$here/build-matrix.js" | sed "s/addon: '//; s/'$//" | sort)
 release_addons=$(grep -o 'rar-rs-napi\.[a-z0-9-]*\.node' "$here/collect-release-assets.sh" | sort -u)
@@ -481,6 +524,15 @@ if [ "$matrix_addons" = "$release_addons" ]; then
 else
   not_ok 'contract: the build matrix and the release addon lists disagree'
   diff <(echo "$release_addons") <(echo "$matrix_addons") >&2 || true
+fi
+
+matrix_cli=$(grep -oE "cli: '[^']+'" "$here/build-matrix.js" | sed "s/cli: '//; s/'$//" | sort)
+release_cli=$(grep -o 'rar-rs-cli\.[a-z0-9.-]*\.tar\.gz' "$here/collect-release-assets.sh" | sort -u)
+if [ "$matrix_cli" = "$release_cli" ]; then
+  ok 'contract: the build matrix ships exactly the CLI archives the release expects'
+else
+  not_ok 'contract: the build matrix and the release CLI lists disagree'
+  diff <(echo "$release_cli") <(echo "$matrix_cli") >&2 || true
 fi
 
 smoke_entries=$(grep -c '^    smoke: true' "$here/build-matrix.js" || true)

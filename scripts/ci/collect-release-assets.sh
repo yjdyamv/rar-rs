@@ -9,20 +9,33 @@
 # it against fixtures on every push (and so a failed release can be reproduced
 # locally with the downloaded artifacts).
 #
-# Usage: collect-release-assets.sh [BINDINGS_DIR] [WASM_DIR] [OUT_DIR] [ROOT]
+# Usage: collect-release-assets.sh [--cli] [BINDINGS_DIR] [WASM_DIR] [OUT_DIR] [ROOT]
 #
 # Defaults are the paths the workflow uses: bindings/, wasm/, release/, `.`.
 # `ROOT` is where LICENSE, NOTICE, THIRD_PARTY_LICENSES.md and LICENSES/ live.
+#
+# `--cli` additionally requires the per-platform `rar`/`unrar` archives
+# (`rar-rs-cli.*.tar.gz`, built by the `build` job) and copies them into the
+# payload. The `release` job passes it; `publish-npm` does not, so a missing CLI
+# build fails the release without changing what the npm tarball carries.
 #
 # Needs bash 4 (`mapfile`) and coreutils sha256sum; i.e. the CI image, Git Bash
 # and Linux — not macOS's bash 3.2.
 set -euo pipefail
 export LC_ALL=C
 
-bindings=${1:-bindings}
-wasm=${2:-wasm}
-out=${3:-release}
-root=${4:-.}
+with_cli=0
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --cli) with_cli=1 ;;
+    *) args+=("$arg") ;;
+  esac
+done
+bindings=${args[0]:-bindings}
+wasm=${args[1]:-wasm}
+out=${args[2]:-release}
+root=${args[3]:-.}
 
 fail() {
   if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::error::$*" >&2; else echo "!! $*" >&2; fi
@@ -40,6 +53,18 @@ EXPECTED_ADDONS=(
   rar-rs-napi.linux-arm64-gnu.node
   rar-rs-napi.linux-arm64-musl.node
   rar-rs-napi.linux-arm-gnueabihf.node
+)
+# Every `cli` row of the build matrix (`scripts/ci/build-matrix.js`) has to
+# deliver its archive on a `--cli` run; the head of that file says which rows
+# build the CLI and why the other two do not.
+EXPECTED_CLI=(
+  rar-rs-cli.darwin-arm64.tar.gz
+  rar-rs-cli.win32-x64-msvc.tar.gz
+  rar-rs-cli.win32-ia32-msvc.tar.gz
+  rar-rs-cli.win32-arm64-msvc.tar.gz
+  rar-rs-cli.linux-x64-gnu.tar.gz
+  rar-rs-cli.linux-x64-musl.tar.gz
+  rar-rs-cli.linux-arm64-musl.tar.gz
 )
 # Every listed WASI file is part of the same contract.
 WASI_FILES=(
@@ -67,6 +92,19 @@ for addon in "${EXPECTED_ADDONS[@]}"; do
   fi
   cp "${matches[0]}" "$out/"
 done
+
+# The rar/unrar executables ride in per-platform tarballs, present only on a
+# `--cli` run. One copy each: a missing archive is a build that never ran, and a
+# duplicate means two jobs wrote the same name.
+if (( with_cli )); then
+  for archive in "${EXPECTED_CLI[@]}"; do
+    mapfile -d '' -t matches < <(find "$bindings" -type f -name "$archive" -print0 2>/dev/null | sort -z)
+    if (( ${#matches[@]} != 1 )); then
+      fail "expected exactly one $archive artifact, found ${#matches[@]}"
+    fi
+    cp "${matches[0]}" "$out/"
+  done
+fi
 
 for name in "${WASI_FILES[@]}"; do
   if [ ! -f "$wasm/$name" ]; then

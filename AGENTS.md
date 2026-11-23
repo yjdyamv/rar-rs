@@ -37,7 +37,10 @@ job 能证明什么）与 [`docs/testing.md`](docs/testing.md)（测试分层）
   比对它们与 workspace 版本，`check` 和 `release` 都跑。
 - **addon 名单纯数据**在 `scripts/ci/build-matrix.js`（9 条，一条标
   `smoke`），必须与 `scripts/ci/collect-release-assets.sh` 的 `EXPECTED_ADDONS`
-  一致：`test-release-scripts.sh` 会断言两者相等，改一个就要改另一个。
+  一致：`test-release-scripts.sh` 会断言两者相等，改一个就要改另一个。同一文件
+  里每行的 `cli`（`rar`/`unrar` 归档名，只有无需新交叉链接器的 7 行有）对应同一
+  脚本的 `EXPECTED_CLI`，也被断言相等：`release` 以 `--cli` 跑、`publish-npm`
+  不跑。
 - **每个 crate 目录里的许可证副本**：`LICENSE`、`NOTICE`、
   `THIRD_PARTY_LICENSES.md`、`LICENSES/Apache-2.0.txt` 在
   `crates/rar`、`crates/rar-cli`、`crates/rar-napi`

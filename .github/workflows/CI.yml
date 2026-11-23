@@ -699,6 +699,38 @@ jobs:
       - name: Build
         working-directory: crates/rar-napi
         run: ${{ matrix.settings.build }}
+      - name: Build the rar/unrar CLI
+        if: matrix.settings.cli != ''
+        # The two executables crates/rar-cli publishes, built for the same
+        # target as the addon above: `cargo zigbuild` for the static musl rows
+        # (zig and cargo-zigbuild are on PATH from the step above), plain
+        # `cargo build` otherwise. The target itself is already installed.
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='${{ matrix.settings.target }}'
+          if [[ "$target" == *musl* ]]; then
+            cargo zigbuild --release -p rar-cli --target "$target"
+          else
+            cargo build --release -p rar-cli --target "$target"
+          fi
+      - name: Package the rar/unrar CLI
+        if: matrix.settings.cli != ''
+        # A tarball, not two loose assets, so `rar` and `unrar` from the same
+        # build stay together and the payload has one entry per platform. The
+        # bytes are repacked on every run (tar records mtimes), so a consumer
+        # that wants a stable digest hashes the executables inside.
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='${{ matrix.settings.target }}'
+          ext=''
+          case "$target" in *windows*) ext='.exe';; esac
+          src="target/$target/release"
+          staging=$(mktemp -d)
+          cp "$src/rar$ext" "$src/unrar$ext" "$staging/"
+          tar -czf "crates/rar-napi/${{ matrix.settings.cli }}" -C "$staging" "rar$ext" "unrar$ext"
       - name: Typecheck the binding's public types
         if: matrix.settings.target == 'x86_64-unknown-linux-gnu'
         working-directory: crates/rar-napi
@@ -737,6 +769,17 @@ jobs:
           # `release` downloads these in the same run, minutes later; the 90-day
           # default stores 9 addons for three months in the org's quota for no
           # reason. A re-release rebuilds them anyway (the matrix runs again).
+          retention-days: 7
+      - name: Upload the CLI artifact
+        if: matrix.settings.cli != ''
+        # A separate artifact, so `release` can pull the CLI archives without
+        # them landing in the npm payload (`publish-npm` downloads only
+        # `bindings-*`).
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-${{ matrix.settings.target }}
+          path: crates/rar-napi/${{ matrix.settings.cli }}
+          if-no-files-found: error
           retention-days: 7
   build-wasm:
     name: build - wasm32-wasip1-threads
@@ -868,13 +911,22 @@ jobs:
         with:
           name: bindings-wasm32-wasip1-threads
           path: wasm
+      - name: Download the CLI binaries
+        # Into `bindings` beside the addons, so the single `--cli` collect pass
+        # sees both families. `publish-npm` deliberately does not download these,
+        # so the CLI archives never reach the npm payload.
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          path: bindings
       - name: Collect release assets
         # A script, because its rules are what make a release complete: one
         # addon per platform, every WASI file, byte-identical generated loaders,
-        # no collision when the license tree is flattened. Inline, the first
-        # execution of that logic was a tag; as a script it is fixture-tested on
-        # every push by scripts/ci/test-release-scripts.sh.
-        run: bash scripts/ci/collect-release-assets.sh
+        # no collision when the license tree is flattened, and (with `--cli`)
+        # one rar/unrar archive per CLI row. Inline, the first execution of that
+        # logic was a tag; as a script it is fixture-tested on every push by
+        # scripts/ci/test-release-scripts.sh.
+        run: bash scripts/ci/collect-release-assets.sh --cli
         shell: bash
       - name: Generate release notes from commits
         env:

@@ -62,6 +62,10 @@ cargo build --release --locked
 # Binaries: target/release/rar and target/release/unrar
 ```
 
+Prebuilt `rar` and `unrar` executables for the platforms the release builds are
+attached to each GitHub Release as `rar-rs-cli.<platform>.tar.gz` (the same two
+binaries `cargo install rar-cli` produces), beside the Node/WASI artifacts.
+
 On Windows the binding crate (`crates/rar-napi`) needs an **MSVC** target — Node
 is MSVC-built, and `napi-build`'s `windows-gnu` path wants a `libnode.dll` that
 no Node distribution ships — so a host whose rustup default is GNU should build
