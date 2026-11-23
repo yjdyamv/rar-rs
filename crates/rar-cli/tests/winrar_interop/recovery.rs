@@ -405,18 +405,24 @@ fn rar4_recovery_record_interops_with_winrar() {
             win_fixed.exists(),
             "WinRAR must write fixed.our_rr4_damaged.rar"
         );
-        let out_dir = dir.path().join("win_rr4_out");
-        std::fs::create_dir_all(&out_dir).unwrap();
-        let (ok, out) = run(Command::new(unrar_bin().unwrap())
-            .args(["x", "-idq", "-o+", "-y"])
-            .arg(&win_fixed)
-            .arg(&out_dir));
-        assert!(ok, "UnRAR x of the WinRAR-fixed archive failed:\n{out}");
-        assert_eq!(
-            file_sha256(&out_dir.join("rr4.bin")),
-            file_sha256(&src),
-            "WinRAR rebuilt different bytes from our RAR4 RR record"
-        );
+        // The extract check needs `unrar`, which a Windows WinRAR install
+        // provides; the Linux tool cache may hold only `rar`, so skip this
+        // one check rather than unwrap a missing tool (the same `if let
+        // Some(...)` guard the rest of the suite uses).
+        if let Some(unrar) = unrar_bin() {
+            let out_dir = dir.path().join("win_rr4_out");
+            std::fs::create_dir_all(&out_dir).unwrap();
+            let (ok, out) = run(Command::new(unrar)
+                .args(["x", "-idq", "-o+", "-y"])
+                .arg(&win_fixed)
+                .arg(&out_dir));
+            assert!(ok, "UnRAR x of the WinRAR-fixed archive failed:\n{out}");
+            assert_eq!(
+                file_sha256(&out_dir.join("rr4.bin")),
+                file_sha256(&src),
+                "WinRAR rebuilt different bytes from our RAR4 RR record"
+            );
+        }
     }
 
     // WinRAR -> ours: WinRAR 6.23 creates the record, we repair damage.

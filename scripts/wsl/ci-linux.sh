@@ -179,7 +179,7 @@ if want 14; then
     fi
   done
   SA_REQUIRE_OFFICIAL=1 run cargo test -p rar-rs --locked \
-    --test official_interop --test rewrite_tests --test rar4_solid_store_fallback \
+    --test official_interop --test rewrite_tests --test rar4_edge_cases \
     -- --nocapture
 fi
 

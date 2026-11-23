@@ -2486,10 +2486,13 @@ fn official_unrar_validates_rar5_multivolume_append() {
         "unrar rejected the RAR5 volume set:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // WinRAR's `-z` stores the comment file verbatim *plus* a trailing NUL
+    // (the CMT block declares 22 bytes for a 21-byte file), and the reader
+    // exposes the raw comment bytes. The rewrite must preserve that byte.
     let mut reader = ArchiveReader::open(&after[0]).unwrap();
     assert_eq!(
         reader.comment().unwrap().as_deref(),
-        Some(&b"official set comment\n"[..])
+        Some(&b"official set comment\n\0"[..])
     );
     let names: Vec<String> = reader.entries().map(|e| e.name().to_string()).collect();
     assert_eq!(names, ["a.bin", "b.bin", "c.bin"]);
