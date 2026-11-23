@@ -92,6 +92,7 @@ DEFAULT_VERSIONS = os.environ.get(
 WINDOWS = os.name == "nt"
 RAR_NAMES = ("Rar.exe", "rar")
 UNRAR_NAMES = ("UnRAR.exe", "unrar")
+SFX_NAMES = ("Default.SFX", "default.sfx")
 SEVEN_ZIP_CANDIDATES = (
     "7z",
     "7za",
@@ -265,7 +266,7 @@ def install_windows(version: str, installer: Path) -> None:
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy2(rar, dest / "Rar.exe")
         shutil.copy2(unrar, dest / "UnRAR.exe")
-        sfx = find_tool(stage, ("Default.SFX", "default.sfx"))
+        sfx = find_tool(stage, SFX_NAMES)
         if sfx is not None:
             shutil.copy2(sfx, dest / "Default.SFX")
         readme = find_tool(stage, ("Rar.txt",))
@@ -304,6 +305,7 @@ def have_version(version: str) -> bool:
     return (
         find_tool(dest, rar_names) is not None
         and find_tool(dest, unrar_names) is not None
+        and find_tool(dest, SFX_NAMES) is not None
     )
 
 
