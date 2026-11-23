@@ -38,11 +38,12 @@ tracker and a `Collect` policy that silently behaved like `Abort` reached main.
 `--bins` covers just the 104 unit tests inside the binaries, so the hermetic CLI
 integration targets are named explicitly — `cli_behavior` (the WinRAR switch
 contract) and `volume_bare_name` (a regression that only surfaced on Unix), so
-adding a hermetic suite cannot silently stay out of CI. `official_interop` runs
-here too: the job fetches the Linux `rar`/`unrar` and points `SA_OFFICIAL_RAR` /
-`SA_OFFICIAL_UNRAR` at them, so the suite executes instead of printing skip
-markers. `winrar_interop` stays local — it needs the Windows `WinRAR.exe`, which
-the Linux runner cannot install. The static
+adding a hermetic suite cannot silently stay out of CI. `official_interop` has
+its own jobs — `test-interop` on Linux and `test-interop-windows` on Windows:
+each fetches the official builds, points `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR`
+at them and sets `SA_REQUIRE_OFFICIAL=1`, so the suite executes instead of
+printing skip markers. `winrar_interop` needs the Windows `WinRAR.exe`, so it
+runs in `test-interop-windows` (and locally). The static
 counterpart, the `check` job, keeps fmt, the guards, clippy (which subsumes
 `cargo check`), the wasm-target `cargo check`, `cargo deny` and rustdoc; the
 binding's `tsc --noEmit` gate runs in the `build` matrix, on the one target
@@ -66,10 +67,11 @@ already executes those suites; the extra passes buy a different library
 configuration for a second compile of the crate plus every test binary. Two
 Windows jobs run on `windows-latest` on the same triggers, split like `check` /
 `test`: `check-windows` is clippy over all features and targets, `test-windows`
-is `cli_behavior`, `volume_bare_name`, the binding's lib tests and the two
+is `cli_behavior`, `volume_bare_name` and the binding's lib tests (plus, on
+tags/dispatches, the generated corpus), and `test-interop-windows` is the two
 interop suites (`official_interop`, `winrar_interop`) against the official
-Windows builds (plus, on tags/dispatches, the generated corpus), and `release`
-waits on both — everything
+Windows builds. On Linux the same two axes are `test` and `test-interop`.
+`release` waits on all of them — everything
 under `#[cfg(windows)]` used to be compiled for the first time by the release
 matrix itself. A `test-i686` job mirrors `test`'s three commands
 (`rar-rs --all-features`, the rar-cli hermetic targets, the binding's lib tests)
@@ -343,12 +345,14 @@ rows are in `THIRD_PARTY_LICENSES.md` under `## Test data`. The generated one
 (`dense-x86-prefix.bin`) is rebuilt by `scripts/gen-x86-fixture.sh` from
 `scripts/fixtures/dense-x86-corpus.rs` when its shape needs to change.
 
-Consequence for CI: `test` and `test-windows` both run `scripts/fetch_winrar.py`
-first, so the interop and generated suites execute there instead of skipping.
-`test-windows` fetches the full set unconditionally (the interop suites need it
-on every push) and runs the generated corpus with `SA_REQUIRE_WINRAR=1` (a
-missing tool or a failed generation fails the job); `test` (Ubuntu) runs the
-same corpus targets against the Linux builds without that flag, because
+Consequence for CI: every job that needs the tools runs
+`scripts/fetch_winrar.py` first — `test` and `test-interop` (Ubuntu),
+`test-interop-windows` on every push, and `test-windows` only on
+tags/dispatches, where it runs the generated corpus. The interop jobs set
+`SA_REQUIRE_OFFICIAL` / `SA_REQUIRE_WINRAR`, so a missing tool fails instead of
+self-skipping; `test-windows` runs the corpus with `SA_REQUIRE_WINRAR=1` (a
+missing tool or a failed generation fails the job), while `test` (Ubuntu) runs
+the same corpus targets against the Linux builds without that flag because
 2.90/3.00 have no Linux release. `scripts/wsl/ci-linux.sh` still fetches the
 tools for the local Linux gate.
 

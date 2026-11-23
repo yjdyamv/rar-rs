@@ -283,15 +283,10 @@ jobs:
     name: Tests (linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Point the `official_interop` tests at the Linux rar/unrar this job fetches
-    # into `.cache/winrar` below. Without these paths that whole suite prints
-    # SKIPPED and passes, so a green run never proved the official tools read
-    # our archives. The fetch is unconditional here and `--check` fails on an
-    # incomplete cache, so the binaries exist by the time the tests run.
-    env:
-      SA_OFFICIAL_RAR: ${{ github.workspace }}/.cache/winrar/6-23/rar
-      SA_OFFICIAL_UNRAR: ${{ github.workspace }}/.cache/winrar/7-23/unrar
-      SA_OFFICIAL_SFX: ${{ github.workspace }}/.cache/winrar/6-23/default.sfx
+    # The official-tool cross-checks live in their own job (`test-interop`), so
+    # this one no longer sets `SA_OFFICIAL_*`: the `official_interop` target
+    # still compiles here but self-skips, and the fetch below stays for the
+    # generated-corpus targets that read `.cache/winrar` off disk.
     steps:
       - uses: actions/checkout@v7
       - name: Install rust toolchain
@@ -341,10 +336,9 @@ jobs:
         # The CLI targets are the two binaries' unit tests, `cli_behavior` (the
         # WinRAR switch contract, hermetic: temp dirs plus the
         # `CARGO_BIN_EXE_*` binaries this step builds) and `volume_bare_name`
-        # (a Unix-only regression that no CI step ran). `official_interop` runs
-        # here too, pointed at the fetched Linux binaries by the job `env`, so it
-        # executes instead of printing skip markers; `winrar_interop` stays local
-        # (it needs the Windows `WinRAR.exe`).
+        # (a Unix-only regression that no CI step ran). The official-tool
+        # interop is no longer here — it is `test-interop` — so these suites are
+        # the hermetic smoke that must stay fast and deterministic.
         run: |
           cargo test -p rar-rs --all-features --locked
           cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
@@ -381,6 +375,43 @@ jobs:
         # that a previous release run got wrong. Unset GITHUB_PATH so the
         # fixture's fake zig is not appended to this job's real PATH.
         run: env -u GITHUB_PATH REPO="$GITHUB_WORKSPACE" bash scripts/ci/test-install-zig.sh
+  # The official rar/unrar cross-checks, split out of `test`: on its own the
+  # suite runs in parallel with the one it was buried in, and `SA_REQUIRE_OFFICIAL`
+  # turns a missing tool into a failure instead of the skip marker a bare run
+  # prints — a green `test` never proved the official tools read our archives,
+  # which is what let the v0.16.1 tag fail on a Windows-only assumption. The
+  # Windows half is `test-interop-windows`.
+  test-interop:
+    name: Interop (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SA_OFFICIAL_RAR: ${{ github.workspace }}/.cache/winrar/6-23/rar
+      SA_OFFICIAL_UNRAR: ${{ github.workspace }}/.cache/winrar/7-23/unrar
+      SA_OFFICIAL_SFX: ${{ github.workspace }}/.cache/winrar/6-23/default.sfx
+      SA_REQUIRE_OFFICIAL: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        # Same `shared-key` as `check`/`test`; the interop compile reuses it.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux
+      - name: Cache WinRAR test builds
+        uses: actions/cache@v6
+        with:
+          path: .cache/winrar
+          key: winrar-tools-linux-${{ hashFiles('scripts/fetch_winrar.py') }}
+      - name: Fetch WinRAR test builds
+        run: python3 scripts/fetch_winrar.py
+      - name: Verify WinRAR test builds
+        # `SA_REQUIRE_OFFICIAL` above would fail on a missing binary; check the
+        # cache right after the fetch so a gap names the release instead.
+        run: python3 scripts/fetch_winrar.py --check
+      - name: Cargo test (official rar/unrar interop)
+        run: cargo test -p rar-rs --test official_interop --locked
   # The 32-bit word size, where the x86_64 suites are blind. Every
   # pointer-width bug this tree has had — rar29's VM block start, the rar5
   # dictionary caps and the encoder's dictionary shift, rar4's LONG_BLOCK
@@ -525,9 +556,11 @@ jobs:
         with:
           shared-key: windows
       - name: Cache WinRAR test builds
-        # Every push now runs the interop suites below, so the fetch is no
-        # longer release-only: the cache is what keeps an everyday run from
-        # re-downloading four official releases (minutes on Windows).
+        # Release-shaped: the generated corpus below is the only consumer left
+        # here — the interop suites moved to `test-interop-windows`, which
+        # fetches every push. The four official releases are minutes of
+        # download, so only the release-shaped run pays for them.
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/cache@v6
         with:
           path: .cache/winrar
@@ -536,35 +569,16 @@ jobs:
           # then hit the gap. A fresh key forces one clean fetch.
           key: winrar-tools-v2-${{ hashFiles('scripts/fetch_winrar.py') }}
       - name: Fetch WinRAR test builds
-        # The interop suites and the legacy corpus build their archives with the
-        # official tool at run time instead of shipping blobs, so they need the
-        # releases on disk.
+        # The legacy corpus builds its archives with the official tool at run
+        # time instead of shipping blobs, so it needs the releases on disk.
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: python scripts/fetch_winrar.py
       - name: Verify WinRAR test builds
-        # `SA_REQUIRE_WINRAR` / `SA_REQUIRE_OFFICIAL` turn a missing tool into a
-        # panic deep inside a suite. Check the cache right after the fetch so a
-        # gap names the release instead.
+        # `SA_REQUIRE_WINRAR` turns a missing tool into a panic deep inside the
+        # corpus generator. Check the cache right after the fetch so a gap names
+        # the release instead.
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: python scripts/fetch_winrar.py --check
-      - name: Cargo test (official rar/unrar interop)
-        # Every push, like the Linux `test` job's copy: the same `SA_OFFICIAL_*`
-        # env pointed at the Windows builds (6-23 writes RAR4, 7-23 reads).
-        # `SA_REQUIRE_OFFICIAL=1` turns a missing binary into a failure instead
-        # of a silent skip.
-        env:
-          SA_OFFICIAL_RAR: ${{ github.workspace }}/.cache/winrar/6-23/Rar.exe
-          SA_OFFICIAL_UNRAR: ${{ github.workspace }}/.cache/winrar/7-23/UnRAR.exe
-          SA_OFFICIAL_SFX: ${{ github.workspace }}/.cache/winrar/6-23/Default.SFX
-          SA_REQUIRE_OFFICIAL: "1"
-        run: cargo test -p rar-rs --test official_interop --locked
-      - name: Cargo test (WinRAR interop, rar-cli)
-        # Every push: `rar-cli`'s Windows-native suite drives a real
-        # `WinRAR.exe`/`UnRAR.exe` for the switch contract. `SA_WINRAR_DIR` is
-        # the fetched 7-23 dir; `rar4_623_bin()` still pulls 6-23 from the cache
-        # for the RAR4 writer.
-        env:
-          SA_WINRAR_DIR: ${{ github.workspace }}/.cache/winrar/7-23
-          SA_REQUIRE_WINRAR: "1"
-        run: cargo test -p rar-cli --test winrar_interop --locked
       - name: Cargo test (library unit tests)
         # The `#[cfg(windows)]` unit tests: clippy compiles them, only a run
         # executes them, and they are the part a pull request actually needs.
@@ -572,11 +586,12 @@ jobs:
         # taking the unit tests with it.
         run: cargo test -p rar-rs --lib --locked
       - name: Cargo test (official-tool generated corpus)
-        # Still release-shaped: the interop suites above run every push, but the
-        # corpus generates and decodes its whole legacy set, which is worth a tag
-        # rather than every push. `SA_REQUIRE_WINRAR=1` turns a missing tool or a
-        # failed generation into a test failure, so this run proves the RAR
-        # 1.5-4.x decode coverage actually ran rather than silently skipping.
+        # Still release-shaped: it generates and decodes its whole legacy set,
+        # which is worth a tag rather than every push (the interop suites moved
+        # to `test-interop-windows`, which does run every push).
+        # `SA_REQUIRE_WINRAR=1` turns a missing tool or a failed generation into
+        # a test failure, so this run proves the RAR 1.5-4.x decode coverage
+        # actually ran rather than silently skipping.
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         shell: bash
         env:
@@ -588,6 +603,57 @@ jobs:
         run: |
           cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name
           cargo test -p rar-rs-napi --lib --locked
+  # The Windows half of the official-tool cross-checks (see `test-interop`),
+  # split out of `test-windows` so both compile and run in parallel: on its own
+  # this job was the single longest step of `test-windows` (~3 of its ~6 min).
+  # It fetches the releases every push; the corpus stays in `test-windows`,
+  # release-shaped.
+  test-interop-windows:
+    name: Interop (windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        # Same `shared-key` as `check-windows`/`test-windows`.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+      - name: Cache WinRAR test builds
+        # Every push: the interop suites below need the releases on disk, and
+        # the cache keeps an everyday run from re-downloading them.
+        uses: actions/cache@v6
+        with:
+          path: .cache/winrar
+          key: winrar-tools-v2-${{ hashFiles('scripts/fetch_winrar.py') }}
+      - name: Fetch WinRAR test builds
+        run: python scripts/fetch_winrar.py
+      - name: Verify WinRAR test builds
+        # `SA_REQUIRE_OFFICIAL`/`SA_REQUIRE_WINRAR` turn a missing tool into a
+        # panic deep inside a suite. Check the cache right after the fetch so a
+        # gap names the release instead.
+        run: python scripts/fetch_winrar.py --check
+      - name: Cargo test (official rar/unrar interop)
+        # The same `SA_OFFICIAL_*` env the Linux `test-interop` sets, pointed at
+        # the Windows builds (6-23 writes RAR4, 7-23 reads). `SA_REQUIRE_OFFICIAL=1`
+        # turns a missing binary into a failure instead of a silent skip.
+        env:
+          SA_OFFICIAL_RAR: ${{ github.workspace }}/.cache/winrar/6-23/Rar.exe
+          SA_OFFICIAL_UNRAR: ${{ github.workspace }}/.cache/winrar/7-23/UnRAR.exe
+          SA_OFFICIAL_SFX: ${{ github.workspace }}/.cache/winrar/6-23/Default.SFX
+          SA_REQUIRE_OFFICIAL: "1"
+        run: cargo test -p rar-rs --test official_interop --locked
+      - name: Cargo test (WinRAR interop, rar-cli)
+        # `rar-cli`'s Windows-native suite drives a real `WinRAR.exe`/`UnRAR.exe`
+        # for the switch contract. `SA_WINRAR_DIR` is the fetched 7-23 dir;
+        # `rar4_623_bin()` still pulls 6-23 from the cache for the RAR4 writer.
+        env:
+          SA_WINRAR_DIR: ${{ github.workspace }}/.cache/winrar/7-23
+          SA_REQUIRE_WINRAR: "1"
+        run: cargo test -p rar-cli --test winrar_interop --locked
   # Chooses the `build` matrix per event. The list itself lives in
   # scripts/ci/build-matrix.js — one entry per shipped addon, one of them marked
   # `smoke` — so a pull request rehearses the release pipeline on a single
@@ -853,10 +919,12 @@ jobs:
     needs:
       - check
       - test
+      - test-interop
       - test-i686
       - msrv
       - check-windows
       - test-windows
+      - test-interop-windows
       - build
       - build-wasm
     permissions:

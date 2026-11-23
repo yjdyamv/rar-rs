@@ -20,12 +20,14 @@ flowchart TD
   subgraph linux[Linux, every trigger]
     check["check — static gate<br/>actionlint · shellcheck · fmt ·<br/>guards · wasm check · clippy ×4 · deny<br/>(+ rustdoc on heavy runs)"]
     test["test — behaviour gate<br/>unit + CLI + napi lib · JS path map<br/>· zig installer<br/>(scalar corpus on schedule/tag)"]
+    interop["test-interop — official rar/unrar interop<br/>(fetched Linux builds, SA_REQUIRE_OFFICIAL)"]
     test32["test-i686 — the 32-bit word size<br/>test's three cargo suites on i686<br/>(the target_pointer_width=32 tests)"]
     msrv["msrv — declared floor<br/>rust-version from Cargo.toml"]
   end
 
   checkwin["check-windows — clippy on windows-latest<br/>(not on schedule)"]
-  testwin["test-windows — unit + CLI + binding + interop tests<br/>(corpus on tags/dispatches; not on schedule)"]
+  testwin["test-windows — unit + CLI + binding tests<br/>(corpus on tags/dispatches; not on schedule)"]
+  interopwin["test-interop-windows — official + WinRAR interop<br/>(not on schedule)"]
 
   sel["build-matrix — pick targets from<br/>scripts/ci/build-matrix.js:<br/>9 on heavy runs, 1 on a PR"]
 
@@ -40,11 +42,11 @@ flowchart TD
 
   pubnpm["publish-npm — one npm package<br/>every platform binary in one tarball<br/>· version already up skipped"]
 
-  pr --> check & test & test32 & msrv & checkwin & testwin
-  main --> check & test & test32 & msrv & checkwin & testwin
-  cron --> check & test & test32 & msrv
-  tag --> check & test & test32 & msrv & checkwin & testwin
-  disp --> check & test & test32 & msrv & checkwin & testwin
+  pr --> check & test & interop & test32 & msrv & checkwin & testwin & interopwin
+  main --> check & test & interop & test32 & msrv & checkwin & testwin & interopwin
+  cron --> check & test & interop & test32 & msrv
+  tag --> check & test & interop & test32 & msrv & checkwin & testwin & interopwin
+  disp --> check & test & interop & test32 & msrv & checkwin & testwin & interopwin
   pr --> sel & wasm
   cron --> sel & wasm
   tag --> sel & wasm
@@ -55,10 +57,12 @@ flowchart TD
 
   check --> rel
   test --> rel
+  interop --> rel
   test32 --> rel
   msrv --> rel
   checkwin --> rel
   testwin --> rel
+  interopwin --> rel
   build -->|"one addon + one CLI archive per target"| rel
   wasm -->|"bindings-wasm32-wasip1-threads"| rel
   rel -->|"only after the Release exists"| pub
@@ -68,11 +72,11 @@ flowchart TD
 Two properties of the shape are worth reading off the diagram:
 
 - **Nothing is upstream of
-  `check`/`test`/`test-i686`/`msrv`/`check-windows`/`test-windows`/`build-matrix`. They start
-  together on every trigger, so a PR gets its answer in the time of the slowest
-  job instead of the sum. The price is that a formatting mistake also burns the
-  test minutes; paid on purpose — a red `check` names the problem, and a
-  serialised pipeline would give one failure at a time.
+  `check`/`test`/`test-interop`/`test-i686`/`msrv`/`check-windows`/`test-windows`/`test-interop-windows`/`build-matrix`.
+  They start together on every trigger, so a PR gets its answer in the time of
+  the slowest job instead of the sum. The price is that a formatting mistake also
+  burns the test minutes; paid on purpose — a red `check` names the problem, and
+  a serialised pipeline would give one failure at a time.
 - **`release` and the two publish jobs are the only ones with `needs`.**
   Everything else is independent, so a broken job can never hide behind an
   earlier failure, and `release` cannot assemble a partial artifact set. `build`
@@ -86,11 +90,13 @@ Two properties of the shape are worth reading off the diagram:
 | Job                 | Proves                                                                                                                                                                                                                                                                                                     | Not merged into a neighbour because                                                                                                                                                                                                                                                                         |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `check`             | The tree compiles, is formatted, is lint-clean, its manifest invariants hold, its dependencies are legal, its docs build.                                                                                                                                                                                  | Runs no test suite: a red `check` and a red `test` mean different things, and the log you open first should be the right one.                                                                                                                                                                               |
-| `test`              | Behaviour: library unit tests, the CLI suites, the binding's Rust tests, the JS path-mapping test, the zig installer's failure modes — plus the 10 generated legacy-corpus targets, which the first step already runs under `--all-features`; the second, scalar-build run of them is `schedule`/tag only — plus the official rar/unrar interop, run against the fetched Linux builds via `SA_OFFICIAL_*` instead of skipping. | Same reason, mirrored. It also installs no clippy/rustfmt and no wasm target — `-D warnings` on the test profile would report a warning that `check` already fails on.                                                                                                                                      |
+| `test`              | Behaviour: library unit tests, the CLI suites, the binding's Rust tests, the JS path-mapping test, the zig installer's failure modes — plus the 10 generated legacy-corpus targets, which the first step already runs under `--all-features`; the second, scalar-build run of them is `schedule`/tag only. The `official_interop` target still compiles here but self-skips (no `SA_OFFICIAL_*`); its real run is `test-interop`. | Same reason, mirrored. It also installs no clippy/rustfmt and no wasm target — `-D warnings` on the test profile would report a warning that `check` already fails on.                                                                                                                                      |
 | `test-i686`         | `test`'s three commands — `rar-rs --all-features`, the rar-cli hermetic targets, the binding's lib tests — on `i686-unknown-linux-gnu`, where the `#[cfg(target_pointer_width = "32")]` regression tests (rar29's VM block-start overflow, rar4's `LONG_BLOCK` narrowing, the rar5 dictionary caps, the decoder's dictionary test) finally execute at all. No WinRAR fetch, so the corpus suites self-skip here. | A 32-bit word size is a second axis, not a second platform: every pointer-width bug in this tree was `usize == u32` arithmetic that the x86_64 suites cannot see, and a release build wraps it silently instead of panicking. Linux/glibc rather than Windows x86 because that is the target the Debian i386 port (where the reports came from) actually runs. |
 | `msrv`              | The `rust-version` in `Cargo.toml` compiles, using exactly that toolchain with `--all-features`.                                                                                                                                                                                                           | `check`/`test` run whatever `stable` is today, so without this job `rust-version` is a comment. Kept separate so the failure reads "the floor broke", not "the tree broke".                                                                                                                                 |
 | `check-windows`     | Everything under `#[cfg(windows)]` compiles and is clippy-clean (`cargo clippy --workspace --all-features --all-targets -- -D warnings`). | Split from the tests for the same reason Linux splits `check`/`test`: a red run names the failure kind. The old single job saved "runner cost", but this repository is public and Actions minutes are free — the split only costs a second checkout/toolchain/cache restore (time, not money). |
-| `test-windows`      | The `#[cfg(windows)]` code that only *running* exercises: the CLI switch contract, the unit tests, the binding's `error.rs`/`guard.rs` tests, and `official_interop` + `winrar_interop` against the official Windows builds (`SA_REQUIRE_OFFICIAL=1`, `SA_REQUIRE_WINRAR=1`, `SA_OFFICIAL_*`, `SA_WINRAR_DIR`); on tags and dispatches, also the generated corpus. | Same split as `check-windows`. The two interop suites run every push (the Linux `test` job does the same), so the tool fetch they need is unconditional too; only the heavier corpus stays release-shaped. |
+| `test-windows`      | The `#[cfg(windows)]` code that only *running* exercises: the CLI switch contract, the unit tests, the binding's `error.rs`/`guard.rs` tests; on tags and dispatches, also the generated corpus. | Same split as `check-windows`. The interop suites it used to carry are `test-interop-windows`; only the heavier corpus stays release-shaped, so this stays a plain unit/CLI run. |
+| `test-interop`      | The official rar/unrar cross-checks on the fetched Linux builds (`SA_OFFICIAL_*`, `SA_REQUIRE_OFFICIAL=1`): our archives validated by the official tools, and theirs read by us. | Split out of `test` so it runs in parallel with the suite it was buried in, and so `SA_REQUIRE_OFFICIAL=1` makes a missing tool a failure instead of the skip marker a bare `test` run printed — a green `test` never proved the official tools read our archives, which is how the v0.16.1 tag failed on a Windows-only assumption. |
+| `test-interop-windows` | The same cross-checks against the Windows builds (6-23 writes RAR4, 7-23 reads), plus `rar-cli`'s `winrar_interop` driving a real `WinRAR.exe`/`UnRAR.exe` (`SA_WINRAR_DIR`). | Split out of `test-windows`, where the two suites were ~3 of the job's ~6 minutes; in a job of its own the compile and run happen in parallel with the unit/CLI work instead of after it. Fetches the releases every push (cached). |
 | `build-matrix`      | Which addon targets this event builds: the whole list on tags, dispatches and the weekly run; the one `smoke` entry on a pull request.                                                                                                                                                                     | The list is data (`scripts/ci/build-matrix.js`), not a `matrix:` literal, because two events need two different subsets of the same list, and a duplicated literal would let the PR smoke target drift away from the target the release builds.                                                             |
 | `build` (`×1`–`×9`) | A loadable `.node` exists for each target the selector chose, plus the `tsc` type gate once (on the entry that generated `binding.d.ts`), plus a `rar`/`unrar` tarball on the seven rows whose target needs no fresh cross linker.                                                                          | One job per target so `fail-fast: false` reports every broken platform in one run instead of one per push. On a PR one target runs, so the napi pipeline and the type gate are exercised before a tag (see below).                                                                                          |
 | `build-wasm`        | The wasi bundle: 8 files, loader patched for Windows host paths.                                                                                                                                                                                                                                           | Cheap and independent; a red wasm run should not make 9 addon jobs look broken.                                                                                                                                                                                                                             |
