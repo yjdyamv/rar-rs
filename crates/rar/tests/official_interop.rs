@@ -1203,8 +1203,11 @@ fn official_sfx_cross_validation() {
     let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(src.join("a.bin"), &payload).unwrap();
 
-    // Our reader on an official SFX archive.
-    let sfx = dir.path().join("off.sfx");
+    // Our reader on an official SFX archive. Official `rar s` names the result
+    // after the archive with the platform's executable spelling: `.exe` on
+    // Windows, `.sfx` elsewhere.
+    let sfx_name = if cfg!(windows) { "off.exe" } else { "off.sfx" };
+    let sfx = dir.path().join(sfx_name);
     std::fs::write(src.join("c.bin"), b"second member").unwrap();
     let status = std::process::Command::new(&rar_bin)
         .args(["a", "-m3", "-idq"])
@@ -1692,8 +1695,15 @@ fn official_unrar_validates_rar4_add_bytes() {
 }
 
 /// Comment cross-validation: WinRAR 6.23 reads a comment our editor set on
-/// a RAR4 archive (`rar cw` reproduces the text byte-for-byte), and we read
-/// the comment from a 6.23-created archive.
+/// a RAR4 archive (`rar cw` reproduces the text), and we read the comment from
+/// a 6.23-created archive.
+///
+/// RAR4 comments are codepage text — only RAR5 comments are UTF-8 — so the
+/// official tool round-trips a non-ASCII comment byte-for-byte only where its
+/// ANSI codepage *is* UTF-8. On Windows it transcodes through the local ANSI
+/// codepage (the CI runners turn our UTF-8 into `?`), so the non-ASCII case is
+/// unix-only and Windows cross-validates the same paths with an ASCII comment,
+/// which every codepage agrees on.
 #[test]
 fn official_tools_validate_rar4_comments() {
     let rar_bin = match std::env::var_os("SA_OFFICIAL_RAR") {
@@ -1718,7 +1728,11 @@ fn official_tools_validate_rar4_comments() {
             .unwrap();
         archive.finish().unwrap();
     }
-    let comment: &[u8] = "归档注释 with ünï and 中文".as_bytes();
+    let comment: &[u8] = if cfg!(windows) {
+        b"archive comment, ascii"
+    } else {
+        "归档注释 with ünï and 中文".as_bytes()
+    };
     {
         let mut editor = rar_rs::ArchiveEditor::open(&path).unwrap();
         editor
@@ -1739,7 +1753,12 @@ fn official_tools_validate_rar4_comments() {
     // 6.23 sets a comment; we read it back.
     let theirs = dir.path().join("official-comment.rar");
     let comment_file = dir.path().join("theirs.txt");
-    std::fs::write(&comment_file, b"official comment \xe4\xb8\xad\xe6\x96\x87").unwrap();
+    let official_comment: &[u8] = if cfg!(windows) {
+        b"official comment ascii"
+    } else {
+        b"official comment \xe4\xb8\xad\xe6\x96\x87"
+    };
+    std::fs::write(&comment_file, official_comment).unwrap();
     {
         let mut archive = rar_rs::ArchiveWriter::create_with(
             &theirs,
@@ -1763,10 +1782,7 @@ fn official_tools_validate_rar4_comments() {
         .unwrap();
     assert!(status.success(), "6.23 could not set the comment");
     let mut archive = ArchiveReader::open(&theirs).unwrap();
-    assert_eq!(
-        archive.comment().unwrap(),
-        Some(b"official comment \xe4\xb8\xad\xe6\x96\x87".to_vec())
-    );
+    assert_eq!(archive.comment().unwrap(), Some(official_comment.to_vec()));
 }
 
 /// WinRAR 6.23 validates RAR4 archives after our stage-B member deletion
