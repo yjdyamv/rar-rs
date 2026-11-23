@@ -28,8 +28,9 @@
 # targets `test` runs.
 #
 # Not covered: the Windows-only `lint-windows` job (run it on Windows), the
-# binding build / `tsc` matrix and the official-tool interop suites. Markdown
-# formatting is the one optional extra, under `dprint` below.
+# 32-bit `test-i686` job (needs an `i686-unknown-linux-gnu` toolchain plus
+# `gcc-multilib`), the binding build / `tsc` matrix and the official-tool interop
+# suites. Markdown formatting is the one optional extra, under `dprint` below.
 # `scripts/wsl/ci-linux.sh` is the full Linux gate under WSL2; this script is
 # the portable static gate that also runs on Windows Git Bash.
 #

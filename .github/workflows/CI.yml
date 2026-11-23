@@ -105,12 +105,12 @@ permissions:
 # The binding's JS tests run with `node --test` under crates/rar-napi; they are
 # a local gate, like the Rust suites.
 #
-# Trigger split (see `RUN_HEAVY`): every push/PR runs `check`, `test` and
-# `msrv`; tags and manual dispatches additionally build the binding matrix and
-# check rustdoc. `lint-windows` shares those triggers and gates `release`, so a
-# `#[cfg(windows)]` break cannot reach a published tag through the matrix. A
-# weekly `schedule` reruns `check` because the RustSec advisory database moves
-# without a commit.
+# Trigger split (see `RUN_HEAVY`): every push/PR runs `check`, `test`, the
+# 32-bit `test-i686` and `msrv`; tags and manual dispatches additionally build
+# the binding matrix and check rustdoc. `lint-windows` shares those triggers
+# and gates `release`, so a `#[cfg(windows)]` break cannot reach a published tag
+# through the matrix. A weekly `schedule` reruns `check` because the RustSec
+# advisory database moves without a commit.
 # `release` (tags, or a dispatch naming a tag) assembles the GitHub Release
 # from those artifacts.
 #
@@ -370,6 +370,61 @@ jobs:
         # that a previous release run got wrong. Unset GITHUB_PATH so the
         # fixture's fake zig is not appended to this job's real PATH.
         run: env -u GITHUB_PATH REPO="$GITHUB_WORKSPACE" bash scripts/ci/test-install-zig.sh
+  # The 32-bit word size, where the x86_64 suites are blind. Every
+  # pointer-width bug this tree has had — rar29's VM block start, the rar5
+  # dictionary caps and the encoder's dictionary shift, rar4's LONG_BLOCK
+  # narrowing, the recovery grid — was `usize == u32` arithmetic reported by a
+  # Debian i386 packager: on x86_64 the same code is correct, and a release
+  # build wraps silently instead of panicking. `crates/rar` carries
+  # `#[cfg(target_pointer_width = "32")]` regression tests (rar29.rs,
+  # rar4_edit/layout.rs, the rar5 payload/quick_open caps, the decoder) that no
+  # other job even compiles; this job is where they execute and fail.
+  #
+  # Linux/glibc i686 on purpose, not Windows x86: the fixes came from Debian's
+  # i386 port, so `i686-unknown-linux-gnu` is the target a crate consumer on
+  # Debian i386 actually gets. It mirrors `test`'s suite — `rar-rs
+  # --all-features`, the rar-cli hermetic targets, the binding's lib tests —
+  # one target triple apart; the default test profile keeps `overflow-checks`
+  # on, which is what turns the wrap into the panic these tests assert.
+  test-i686:
+    name: Tests (linux, i686)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the 32-bit C runtime and linker
+        # rustc links an i686 binary through `cc`, which needs the 32-bit crt
+        # and libc under /usr/lib32; `gcc-multilib` is the one package cargo's
+        # own contributor guide names, and it pulls `libc6-i386` (the 32-bit
+        # loader the test binaries run under). Without it the link dies on
+        # `gnu/stubs-32.h` and nothing executes.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+      - name: Install rust toolchain (stable + i686 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+      - name: Cache cargo
+        # Own key: a different target triple means a different artifact tree,
+        # and sharing with `linux` would let the two evict each other.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-i686
+      - name: Cargo test (rar-rs, all features, i686)
+        # `test`'s first command, one target triple apart: the
+        # `#[cfg(target_pointer_width = "32")]` regression tests and every
+        # 32-bit-arithmetic path run here and nowhere else. No WinRAR fetch, so
+        # the corpus suites self-skip — the 32-bit bugs live in hermetic unit
+        # and integration tests, not in the generated archives.
+        run: cargo test -p rar-rs --all-features --locked --target i686-unknown-linux-gnu
+      - name: Cargo test (rar-cli hermetic suites, i686)
+        # `test`'s second command: the CLI switch contract and the Unix-only
+        # `volume_bare_name` regression, now at the 32-bit word size too.
+        run: cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name --target i686-unknown-linux-gnu
+      - name: Cargo test (rar-rs-napi lib, i686)
+        # `test`'s third command: the binding's public error contract at 32 bits.
+        run: cargo test -p rar-rs-napi --lib --locked --target i686-unknown-linux-gnu
   # The floor declared in Cargo.toml (`rust-version`), compiled by that exact
   # toolchain. Without this job `rust-version` is a comment: `check`/`test` run
   # whatever `stable` is today, so a change that quietly requires a newer
@@ -703,6 +758,7 @@ jobs:
     needs:
       - check
       - test
+      - test-i686
       - msrv
       - lint-windows
       - build

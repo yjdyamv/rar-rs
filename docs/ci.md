@@ -20,6 +20,7 @@ flowchart TD
   subgraph linux[Linux, every trigger]
     check["check — static gate<br/>actionlint · shellcheck · fmt ·<br/>guards · wasm check · clippy ×4 · deny<br/>(+ rustdoc on heavy runs)"]
     test["test — behaviour gate<br/>unit + CLI + napi lib · JS path map<br/>· zig installer<br/>(scalar corpus on schedule/tag)"]
+    test32["test-i686 — the 32-bit word size<br/>test's three cargo suites on i686<br/>(the target_pointer_width=32 tests)"]
     msrv["msrv — declared floor<br/>rust-version from Cargo.toml"]
   end
 
@@ -38,11 +39,11 @@ flowchart TD
 
   pubnpm["publish-npm — one npm package<br/>every platform binary in one tarball<br/>· version already up skipped"]
 
-  pr --> check & test & msrv & win
-  main --> check & test & msrv & win
-  cron --> check & test & msrv
-  tag --> check & test & msrv & win
-  disp --> check & test & msrv & win
+  pr --> check & test & test32 & msrv & win
+  main --> check & test & test32 & msrv & win
+  cron --> check & test & test32 & msrv
+  tag --> check & test & test32 & msrv & win
+  disp --> check & test & test32 & msrv & win
   pr --> sel & wasm
   cron --> sel & wasm
   tag --> sel & wasm
@@ -53,6 +54,7 @@ flowchart TD
 
   check --> rel
   test --> rel
+  test32 --> rel
   msrv --> rel
   win --> rel
   build -->|"one addon artifact per target"| rel
@@ -63,11 +65,12 @@ flowchart TD
 
 Two properties of the shape are worth reading off the diagram:
 
-- **Nothing is upstream of `check`/`test`/`msrv`/`lint-windows`/`build-matrix`.
-  They start together on every trigger, so a PR gets its answer in the time of
-  the slowest job instead of the sum. The price is that a formatting mistake
-  also burns the test minutes; paid on purpose — a red `check` names the
-  problem, and a serialised pipeline would give one failure at a time.
+- **Nothing is upstream of
+  `check`/`test`/`test-i686`/`msrv`/`lint-windows`/`build-matrix`. They start
+  together on every trigger, so a PR gets its answer in the time of the slowest
+  job instead of the sum. The price is that a formatting mistake also burns the
+  test minutes; paid on purpose — a red `check` names the problem, and a
+  serialised pipeline would give one failure at a time.
 - **`release` and the two publish jobs are the only ones with `needs`.**
   Everything else is independent, so a broken job can never hide behind an
   earlier failure, and `release` cannot assemble a partial artifact set. `build`
@@ -82,6 +85,7 @@ Two properties of the shape are worth reading off the diagram:
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `check`             | The tree compiles, is formatted, is lint-clean, its manifest invariants hold, its dependencies are legal, its docs build.                                                                                                                                                                                  | Runs no test suite: a red `check` and a red `test` mean different things, and the log you open first should be the right one.                                                                                                                                                                               |
 | `test`              | Behaviour: library unit tests, the CLI suites, the binding's Rust tests, the JS path-mapping test, the zig installer's failure modes — plus the 10 generated legacy-corpus targets, which the first step already runs under `--all-features`; the second, scalar-build run of them is `schedule`/tag only. | Same reason, mirrored. It also installs no clippy/rustfmt and no wasm target — `-D warnings` on the test profile would report a warning that `check` already fails on.                                                                                                                                      |
+| `test-i686`         | `test`'s three commands — `rar-rs --all-features`, the rar-cli hermetic targets, the binding's lib tests — on `i686-unknown-linux-gnu`, where the `#[cfg(target_pointer_width = "32")]` regression tests (rar29's VM block-start overflow, rar4's `LONG_BLOCK` narrowing, the rar5 dictionary caps, the decoder's dictionary test) finally execute at all. No WinRAR fetch, so the corpus suites self-skip here. | A 32-bit word size is a second axis, not a second platform: every pointer-width bug in this tree was `usize == u32` arithmetic that the x86_64 suites cannot see, and a release build wraps it silently instead of panicking. Linux/glibc rather than Windows x86 because that is the target the Debian i386 port (where the reports came from) actually runs. |
 | `msrv`              | The `rust-version` in `Cargo.toml` compiles, using exactly that toolchain with `--all-features`.                                                                                                                                                                                                           | `check`/`test` run whatever `stable` is today, so without this job `rust-version` is a comment. Kept separate so the failure reads "the floor broke", not "the tree broke".                                                                                                                                 |
 | `lint-windows`      | Everything under `#[cfg(windows)]`: the CLI switch contract, separator hazards, the binding's `error.rs`/`guard.rs` tests; on tags and dispatches, also the generated corpus against the official Windows builds (`SA_REQUIRE_WINRAR=1`).                                                                  | Windows minutes are ~4× Linux; splitting it into a static and a test job would double the runner cost for a log-clarity gain that the Linux split already provides. The WinRAR fetch is what makes the corpus step expensive, so it follows the corpus and runs release-shaped.                             |
 | `build-matrix`      | Which addon targets this event builds: the whole list on tags, dispatches and the weekly run; the one `smoke` entry on a pull request.                                                                                                                                                                     | The list is data (`scripts/ci/build-matrix.js`), not a `matrix:` literal, because two events need two different subsets of the same list, and a duplicated literal would let the PR smoke target drift away from the target the release builds.                                                             |
@@ -139,15 +143,16 @@ Rough runner-minutes per event (Linux ≈ 1×, Windows ≈ 4× billed):
 
 | Event                      | Jobs | Notes                                                                                                                                                                  |
 | -------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PR                         | 7    | ~2 min faster than a run that also re-ran the corpus against a scalar build; the static gates answer in ~2 min, the single addon build sets the tail                   |
-| push to main               | 4    | no addon work — the pull request already built that tree                                                                                                               |
-| push of a tag              | 18   | dominated by the 9-target build matrix; `release`, then `publish` (usually skipping every crate) and `publish-npm` in parallel                                         |
-| weekly schedule            | 14   | the full matrix + wasi bundle, so the heavy path is proven without publishing; also the advisory DB and "does today's stable build it"                                 |
-| dispatch, no `release_tag` | 15   | the smoke path for workflow changes: builds the matrix against the default branch, publishes nothing                                                                   |
-| dispatch, `release_tag`    | 18   | `release` re-uploads the assets, `publish` proves the OIDC exchange and skips every version already on the index, `publish-npm` does the same against the npm registry |
+| PR                         | 8    | ~2 min faster than a run that also re-ran the corpus against a scalar build; the static gates answer in ~2 min, the single addon build sets the tail                   |
+| push to main               | 5    | no addon work — the pull request already built that tree                                                                                                               |
+| push of a tag              | 19   | dominated by the 9-target build matrix; `release`, then `publish` (usually skipping every crate) and `publish-npm` in parallel                                         |
+| weekly schedule            | 15   | the full matrix + wasi bundle, so the heavy path is proven without publishing; also the advisory DB and "does today's stable build it"                                 |
+| dispatch, no `release_tag` | 16   | the smoke path for workflow changes: builds the matrix against the default branch, publishes nothing                                                                   |
+| dispatch, `release_tag`    | 19   | `release` re-uploads the assets, `publish` proves the OIDC exchange and skips every version already on the index, `publish-npm` does the same against the npm registry |
 
 Caches that keep this down: `Swatinem/rust-cache` with one `linux` key shared by
 `check`/`test` (same toolchain and lock, so one dependency cache serves both), a
+separate `linux-i686` key (`test-i686` builds a different target triple), a
 separate `msrv` key (different toolchain), a per-target `cargo` key for the
 build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
 
@@ -180,6 +185,7 @@ build matrix, and the zig/cargo-zigbuild and WinRAR-download caches.
 | clippy ×4, not ×5                                            | `crates/rar` has `default = []` and exactly two features, so `--features parallel,simd` _is_ `--all-features`, which the workspace step already runs. The ungated build and the two single-feature builds are what the matrix still adds — each one is a configuration the workspace build cannot see.                                                                                                                |
 | The scalar-build corpus run is `schedule`/tag only           | The `--all-features` step above it already executes those suites on every push, so what this step adds is the same assertions against a `default = []` library — worth one extra compile of the crate plus every test binary, not worth it on every push. `check` keeps the scalar configuration compiling on every push.                                                                                             |
 | The Windows corpus is release-shaped                         | Its setup is four official WinRAR releases plus minutes of download at 4× billing, and the corpus is the only consumer. The `#[cfg(windows)]` unit tests and clippy stay on every PR: those are the parts a PR is actually at risk of breaking.                                                                                                                                                                       |
+| The 32-bit gate is Linux i686, not Windows x86               | Every pointer-width bug here arrived from Debian's i386 port, so `i686-unknown-linux-gnu` is the target those consumers run and the one a fix has to hold. It is also the cheapest way to buy a 32-bit word size (Linux 1×, one `apt-get install gcc-multilib`) and it runs on every push, not only at the tag. The Windows x86 addon is the only published 32-bit binary but is not the axis any of the bugs came from — it is built for the release, never run by a test. |
 | No markdown gate                                             | `dprint` left CI (2026-11): the check pulled the npm package and `plugins.dprint.dev` on every run, so a network hiccup was a red build unrelated to the change, and its markdown plugin wraps on whitespace only — it cannot break Chinese prose, so on this repo's docs it mostly re-flowed text into meaningless breaks. It stays in `dprint.json` and in `scripts/ci-lint.sh` for whoever has the binary on PATH. |
 | One installer for zig and cargo-zigbuild                     | Only the two musl rows need either, and they need both (`napi build -x` is cargo-zigbuild, which drives `zig`). The script installs whichever half its version variable names, which is also what lets `scripts/ci/test-install-zig.sh` exercise the zig half alone.                                                                                                                                                  |
 

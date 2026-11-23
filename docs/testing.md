@@ -66,7 +66,14 @@ job, `lint-windows`, runs on `windows-latest` on the same triggers: clippy over
 all features and targets plus `cli_behavior`, `volume_bare_name` and the
 binding's lib tests, and `release` waits on it — everything under
 `#[cfg(windows)]` used to be compiled for the first time by the release matrix
-itself. A fourth, `msrv`, installs the `rust-version` read out of `Cargo.toml`
+itself. A `test-i686` job mirrors `test`'s three commands
+(`rar-rs --all-features`, the rar-cli hermetic targets, the binding's lib tests)
+on `i686-unknown-linux-gnu` — 32-bit `usize`, where the
+`#[cfg(target_pointer_width = "32")]` regression tests (the rar29 VM block-start
+overflow, the rar5 dictionary caps, the rar4 `LONG_BLOCK` narrowing, the
+decoder) exist at all; Linux/glibc rather than Windows x86 because the reports
+came from Debian's i386 port, and `release` waits on it. A fifth, `msrv`,
+installs the `rust-version` read out of `Cargo.toml`
 (1.95) and runs `cargo check --workspace --all-features --locked` with it, so
 the declared floor is executed rather than asserted; `release` waits on it too,
 because publishing a crate whose stated MSRV does not compile is a broken
