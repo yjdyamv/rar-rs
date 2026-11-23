@@ -1,6 +1,6 @@
 //! GF(2^8) Reed-Solomon codec for the legacy `.rev` recovery volumes
-//! (RAR 1.5–4.x), ported from `rars`' `recovery/rar3.rs` (MIT OR
-//! Apache-2.0 per the rars workspace metadata; the upstream file carries no
+//! (RAR 1.5–4.x), ported from `rars`' `recovery/rar3.rs` (Apache-2.0 per
+//! the rars workspace metadata; the upstream file carries no
 //! header — see NOTICE).
 //!
 //! A codeword holds one symbol per volume (data volumes first, then parity

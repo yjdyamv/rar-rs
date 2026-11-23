@@ -1,6 +1,6 @@
 //! RAR 1.5 (unp_ver 15) adaptive-Huffman + LZ encoder — write-side counterpart of [`super::rar15`].
 //!
-//! Ported from the encode half of the `rars` project (MIT OR Apache-2.0)
+//! Ported from the encode half of the `rars` project (Apache-2.0)
 //! `codec/rar13.rs` `Unpack15Encoder`.
 //!
 //! Produces the RAR15 compressed member stream, not the FILE_HEAD; the

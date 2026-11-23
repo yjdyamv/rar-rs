@@ -1,7 +1,7 @@
 //! RAR 2.x (unp_ver 20/26) LZSS+Huffman encoder — write-side counterpart of
 //! [`super::rar20`].
 //!
-//! Ported from the encode half of the `rars` project (MIT OR Apache-2.0)
+//! Ported from the encode half of the `rars` project (Apache-2.0)
 //! `codec/rar20.rs` `Unpack20Encoder`.  Produces the RAR2-family compressed
 //! block stream (member blocks incl. header words), not the FILE_HEAD; the
 //! write pipeline handles headers, encryption, and multi-volume splitting.

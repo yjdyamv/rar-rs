@@ -39,11 +39,11 @@ job 能证明什么）与 [`docs/testing.md`](docs/testing.md)（测试分层）
   `smoke`），必须与 `scripts/ci/collect-release-assets.sh` 的 `EXPECTED_ADDONS`
   一致：`test-release-scripts.sh` 会断言两者相等，改一个就要改另一个。
 - **每个 crate 目录里的许可证副本**：`LICENSE`、`NOTICE`、
-  `THIRD_PARTY_LICENSES.md`、`LICENSES/{Apache-2.0,MIT}.txt` 在
+  `THIRD_PARTY_LICENSES.md`、`LICENSES/Apache-2.0.txt` 在
   `crates/rar`、`crates/rar-cli`、`crates/rar-napi`
   各存一份，与根目录逐字节相同。 `cargo package` 只收 package
   目录内的文件，根目录那份进不了 tarball——少了副本， 发到 crates.io
-  的就是一份没有正文的 `BSD-2-Clause` 声明加一份没随附的 `MIT OR Apache-2.0`
+  的就是一份没有正文的 `BSD-2-Clause` 声明加一份没随附的 `Apache-2.0`
   移植清单。改根目录的文本必须同步三份副本，
   `scripts/ci/check-crate-licenses.sh` 逐字节比对（本地 `ci-lint.sh` 与 CI 的
   `check` 都跑）。

@@ -2,7 +2,7 @@
 //! function, and the hash-key MAC that protects encrypted members' checksums.
 //!
 //! Ported from the `rars` project (<https://github.com/bitplane/rars>), licensed
-//! MIT OR Apache-2.0, at upstream revision `c08a17b`. See NOTICE for
+//! Apache-2.0, at upstream revision `c08a17b`. See NOTICE for
 //! attribution and the unresolved workspace-metadata/COPYING difference.
 
 use crate::error::{RarError, RarResult};

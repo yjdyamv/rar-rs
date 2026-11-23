@@ -173,7 +173,7 @@ separately identified upstream portions. The `license` field (`Cargo.toml`
 `crates/rar-napi/package.json`) stays `BSD-2-Clause`: it states the project's
 **own** contributions. Portions derived from other projects keep their own terms
 instead of being folded into it — the `rars`-derived files are
-`MIT OR Apache-2.0`, the libarchive-derived ones BSD-2-Clause — so a
+`Apache-2.0`, the libarchive-derived ones BSD-2-Clause — so a
 redistributor has to satisfy both sets. [NOTICE](NOTICE) and
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) record which files came from
 where; [`LICENSES/`](LICENSES/) holds the standard texts. Full text:

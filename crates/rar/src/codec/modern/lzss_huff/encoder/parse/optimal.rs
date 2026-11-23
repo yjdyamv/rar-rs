@@ -976,8 +976,8 @@ pub(crate) fn find_matches_in_range(
 
 // ── Optimal parse (compression levels 2-5) ──────────────────────────────────
 //
-// A forward shortest-path parse ported from the `rars` project (MIT OR
-// Apache-2.0) `codec/rar50.rs` (`optimal_tokens` + `TokenPrices`). The
+// A forward shortest-path parse ported from the `rars` project (Apache-2.0)
+// `codec/rar50.rs` (`optimal_tokens` + `TokenPrices`). The
 // greedy+lazy matcher looks one symbol ahead; this prices every path
 // through a block and keeps the cheapest, which is where WinRAR's m2-m5
 // ratio advantage comes from. Each node carries the whole four-slot

@@ -202,7 +202,7 @@ fn delta_decode_simd_ch1(data: &[u8]) -> Vec<u8> {
 // decoder reverses the transform.
 //
 // The transform formulas follow the WinRAR-interop-verified `rars` project
-// (https://github.com/bitplane/rars, MIT OR Apache-2.0) `codec/filters.rs`:
+// (https://github.com/bitplane/rars, Apache-2.0) `codec/filters.rs`:
 // encode keeps `addr + offset` when it stays below the 16 MB model and
 // otherwise folds negative wraparound targets; decode is the exact inverse.
 // Both normalize the file position modulo the 16 MB virtual size, matching
@@ -359,7 +359,7 @@ fn arm_encode(data: &mut [u8], file_offset: u64) -> Vec<u8> {
 // ── Automatic x86 filter detection ─────────────────────────────────────────
 //
 // Structural scan for x86 code regions (ported from the `rars` project
-// `x86_filter_scan.rs`, MIT OR Apache-2.0). E8 (CALL) / E9 (JMP) opcodes are
+// `x86_filter_scan.rs`, Apache-2.0). E8 (CALL) / E9 (JMP) opcodes are
 // clustered by proximity; clusters that meet a minimum density become filter
 // regions (with padding). Isolated opcodes never form a cluster, so data that
 // merely contains a few 0xE8/0xE9 bytes is not filtered.

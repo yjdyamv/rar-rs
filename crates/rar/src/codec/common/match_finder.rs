@@ -901,7 +901,7 @@ pub(crate) struct MatchQuery<'a> {
 }
 
 /// A binary-tree match finder, after LZMA's BT4 (ported from the `rars`
-/// project `codec/match_finder.rs`, MIT OR Apache-2.0).
+/// project `codec/match_finder.rs`, Apache-2.0).
 ///
 /// Positions sharing a hash of their first four bytes form a binary search
 /// tree ordered by the bytes at them, newest position at the root. One

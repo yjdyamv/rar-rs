@@ -2,7 +2,7 @@
 //! Cauchy parity over the archive prefix.
 //!
 //! Ported from the `rars` project (<https://github.com/bitplane/rars>), licensed
-//! MIT OR Apache-2.0, at upstream revision `c08a17b`. See NOTICE for
+//! Apache-2.0, at upstream revision `c08a17b`. See NOTICE for
 //! attribution and the unresolved workspace-metadata/COPYING difference.
 //!
 //! Role split (the ported core stays a faithful unit in [`gf16`]):

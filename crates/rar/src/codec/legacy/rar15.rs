@@ -1,7 +1,7 @@
 //! RAR 1.5 (unp_ver 15) member decompressor — the legacy `Rar!\x1a\x07\x00`
 //! codec of the RAR 1.5–1.9 era (1994–96 archives).
 //!
-//! Ported from the decode half of bitplane's `rars` (MIT OR Apache-2.0)
+//! Ported from the decode half of bitplane's `rars` (Apache-2.0)
 //! `codec/rar13.rs` (its `Rar15Decoder`, which covers the shared 1.3–1.5
 //! decompression design).
 //! RAR 1.5 packs a flag-driven LZ stream with adaptive Huffman-coded

@@ -1,6 +1,6 @@
 //! GF(2^16) field, Cauchy encoder matrix and the parity encoder.
 //!
-//! Ported from the `rars` project (MIT OR Apache-2.0, upstream `c08a17b`);
+//! Ported from the `rars` project (Apache-2.0, upstream `c08a17b`);
 //! the linear-system solver here is shared with the repair side.
 
 use super::shared_gf16;

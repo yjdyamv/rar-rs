@@ -2,7 +2,7 @@
 //! every RAR 3.0–4.x archive (`Rar!\x1a\x07\x00` container): LZSS+Huffman and
 //! PPMd variant H blocks.
 //!
-//! Ported from the decode half of bitplane's `rars` (MIT OR Apache-2.0)
+//! Ported from the decode half of bitplane's `rars` (Apache-2.0)
 //! `codec/rar29.rs` and `codec/ppmd.rs`, which are validated against genuine
 //! WinRAR archives
 //! in their own fixture suites. The MSB-first bit reader, canonical-Huffman

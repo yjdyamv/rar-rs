@@ -22,7 +22,7 @@ use crate::version::ArchiveVersion;
 /// RARLAB readers (unrar/WinRAR) refuse filter regions larger than 256 KiB
 /// (`0x40000`); the reference writer splits members into filter blocks of at
 /// most `0x3FFFF` bytes. Same value as the `rars` project's
-/// `MAX_FILTER_BLOCK_LENGTH` (MIT OR Apache-2.0).
+/// `MAX_FILTER_BLOCK_LENGTH` (Apache-2.0).
 pub const MAX_FILTER_BLOCK_LENGTH: u32 = 0x3FFFF;
 
 /// Filter types the RAR5 writer intentionally produces: Delta, E8, E8E9 and

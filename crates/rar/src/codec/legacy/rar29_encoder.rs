@@ -1,7 +1,7 @@
 //! RAR 3.x/4.x LZSS+Huffman encoder — the write-side counterpart of
 //! [`super::rar29`].
 //!
-//! Ported from the encode half of the `rars` project (MIT OR Apache-2.0)
+//! Ported from the encode half of the `rars` project (Apache-2.0)
 //! `codec/rar29.rs` `Unpack29Encoder`.  Produces RAR3/4-format compressed
 //! block sequences (不含 FILE_HEAD，只含压缩数据流).  The write pipeline
 //! (`format/rar4/write/`) handles headers, encryption, and multi-volume

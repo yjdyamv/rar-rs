@@ -23,25 +23,17 @@ libarchive RAR5 reader (BSD-2-Clause)
   `archive_read_support_format_rar5.c` by Grzegorz Antoniak (2018). It is not
   copied from proprietary RARLAB source.
 
-rars (MIT OR Apache-2.0)
+rars (Apache-2.0)
   Ported from https://github.com/bitplane/rars at revision `c08a17b`: the RAR5
   recovery-record codec (recovery/rar50/), BLAKE2sp (format/rar5/blake2sp.rs),
   the RAR5 key-derivation and hash-key MAC patterns (crypto/rar50.rs), the x86
   filter scan (codec/common/filters.rs), the BT4 match finder
   (codec/common/match_finder.rs), the optimal parse and block splitter, the
   E8/E8E9 normalization, and the RAR 3.x/4.x, 2.x and 1.5 member decoders.
-  Every in-tree port states MIT OR Apache-2.0 in its own header: the
-  expression revision `c08a17b` declared and crates.io lists for every
-  published release. (An upstream COPYING file read "WTFPL with 1 extra
-  clause" for a few weeks in 2026; it never appeared in that project's
-  workspace metadata or in a release, and was replaced by Apache-2.0. No file
-  here claims WTFPL.)
-
-smart-archive-rar (BSD-2-Clause)
-  The napi-rs binding under crates/rar-napi (Node `.node` addons and
-  wasm32-wasip1-threads) originates from yjdyamv/smart-archive-rar. The
-  napi-rs and emnapi machinery is third-party and carries its own licenses. No
-  npm package is published: CI builds the artifacts for GitHub Releases.
+  Every in-tree port states Apache-2.0 in its own header. (An upstream COPYING
+  file read "WTFPL with 1 extra clause" for a few weeks in 2026; it never
+  appeared in that project's workspace metadata or in a release, and the
+  project is now Apache-2.0. No file here claims WTFPL.)
 
 test archives
   No archive files are committed. The test suites build their inputs on the fly:

@@ -9,13 +9,13 @@ The repository-wide SPDX expression is `BSD-2-Clause`: the `Cargo.toml`
 `[workspace.package] license` (inherited by all three crates and mirrored in
 `crates/rar-napi/package.json`) states the project's **own** contributions.
 Portions derived from other projects keep their own terms — the `rars`-derived
-files below are `MIT OR Apache-2.0` — and are documented here and in `NOTICE`
+files below are `Apache-2.0` — and are documented here and in `NOTICE`
 rather than folded into that field, so a redistributor has to satisfy both.
 
 ## `rars` ports
 
 Ported from [bitplane/rars](https://github.com/bitplane/rars) at revision
-`c08a17b`, which declared `MIT OR Apache-2.0` (as does every published release).
+`c08a17b`, licensed `Apache-2.0`.
 Each file states this in its own header, and the table records which upstream
 file it came from. The upstream files have **not** been diffed against a
 checked-out `rars` repository, so treat a row as the in-tree claim.
@@ -65,7 +65,6 @@ file was deleted; it is still present in source tarballs up to `v0.15.0`.
   reference for the RAR5 bitstream. BSD-2-Clause notices: `codec/mod.rs`,
   `codec/modern/lzss_huff/{mod,encoder,decoder}`, and `codec/common/huffman.rs`
   (stated as a basis rather than a license line).
-- **`smart-archive-rar`**: origin of the binding now under `crates/rar-napi`.
 - **RAR/WinRAR tools**: black-box interoperability references only; no code or
   binaries from them are included.
 

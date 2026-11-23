@@ -8,7 +8,7 @@
 //! sectors of each parity group back into the parity to rebuild the damaged
 //! sector. Ported from the `rars` project
 //! (<https://github.com/bitplane/rars>, `repair_protect_head_bytes`), licensed
-//! MIT OR Apache-2.0, at upstream revision `c08a17b`; validated against
+//! Apache-2.0, at upstream revision `c08a17b`; validated against
 //! genuine RAR 2.5/3.x archives. See NOTICE for attribution and the unresolved
 //! workspace-metadata/COPYING difference.
 //!

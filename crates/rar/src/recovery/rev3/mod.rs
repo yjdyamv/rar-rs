@@ -24,8 +24,8 @@
 //! damaged volumes), renames damaged data volumes to `*.bad` and writes the
 //! rebuilt volumes in their place, mirroring WinRAR.
 //!
-//! The RS codec is ported from `rars`' `recovery/rar3.rs` (MIT OR
-//! Apache-2.0 per the rars workspace metadata — see NOTICE); the on-disk
+//! The RS codec is ported from `rars`' `recovery/rar3.rs` (Apache-2.0 per
+//! the rars workspace metadata — see NOTICE); the on-disk
 //! layouts were reverse-engineered from WinRAR output.
 
 pub(crate) mod rs8;

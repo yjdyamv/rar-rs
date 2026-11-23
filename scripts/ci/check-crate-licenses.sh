@@ -4,7 +4,7 @@
 # `cargo package` only ships files under the package directory, so a crate that
 # relied on the root copies would publish a tarball with no `LICENSE`, no
 # `NOTICE` and no third-party inventory — while `license = "BSD-2-Clause"` and
-# the `rars` ports (MIT OR Apache-2.0) both assume the texts travel with the
+# the `rars` ports (Apache-2.0) both assume the texts travel with the
 # source. The first `cargo publish` would have shipped exactly that, so the
 # files are copied into each crate and this guard keeps the copies honest.
 #
@@ -19,13 +19,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
 
 # The texts a redistributor of any of the three crates must receive: the
 # project's own license, the attribution notice, the inventory of third-party
-# portions, and the two upstream license texts `NOTICE` points at.
+# portions, and the upstream license text `NOTICE` points at.
 files=(
   LICENSE
   NOTICE
   THIRD_PARTY_LICENSES.md
   LICENSES/Apache-2.0.txt
-  LICENSES/MIT.txt
 )
 
 fail() {

@@ -53,7 +53,7 @@ allow = [
 # The workspace's own crates declare `license = "BSD-2-Clause"` through
 # `license.workspace = true` (see the root Cargo.toml), so cargo-deny reads the
 # expression from their manifests and no clarification block is needed. The
-# `rars`-derived portions are MIT OR Apache-2.0 but are documented in NOTICE
+# `rars`-derived portions are Apache-2.0 but are documented in NOTICE
 # rather than declared in the field, which is the crate-license convention:
 # this check judges what the manifests declare, i.e. the project's own grant.
 
