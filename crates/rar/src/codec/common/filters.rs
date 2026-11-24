@@ -826,9 +826,9 @@ mod tests {
 
     #[test]
     fn unknown_filter_type_is_rejected_not_silently_skipped() {
-        // Types 4-7 (ARMT/IA64/PPC/SPARC) are never produced by WinRAR 7.23
-        // or any other implementation; they must fail loudly, not return
-        // the raw data (which would corrupt output without a clear error).
+        // Types 4-7 are reserved and never produced by WinRAR 7.23 or any
+        // other implementation; they must fail loudly, not return the raw
+        // data (which would corrupt output without a clear error).
         let mut data = vec![0xAB; 64];
         let err = apply_filter_decode(4, &mut data, 1, 0).unwrap_err();
         assert!(

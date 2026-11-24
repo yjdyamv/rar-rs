@@ -185,6 +185,12 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   的**纯函数**，所以**区域可任意重切**：流式窗口切出的 80/128
   字节碎片仍字节精确。锚点与取证见
   [`issues/rar5-decode/`](issues/rar5-decode/official-decode-path.md)。
+- **过滤器类型 4–7 是保留值，必须显式报错而不是静默跳过**：盘面字段 3 位（0–7），
+  但只有 0 Delta / 1 E8 / 2 E8E9 / 3 ARM 会被任何写入器产出（WinRAR 7.30/5.50/5.00、
+  7-Zip 实测止于 3；ARM 自 5.80 起停用）。unrar 给 4–7 的那些名字是**编码器选型
+  id、不是盘面语义**，也没有任何工具能产出带 4–7 的档供对拍。解码遇到 4–7 必须
+  `Err`（`apply_filter_decode_in_place`）——当"无过滤"返回只会解出坏字节，以 CRC
+  不匹配这种难查的方式炸。写入端同样拒写（`is_supported_filter_type`）。
 
 ## 有意不追平官方
 

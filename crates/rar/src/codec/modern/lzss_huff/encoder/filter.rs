@@ -26,11 +26,12 @@ use crate::version::ArchiveVersion;
 pub const MAX_FILTER_BLOCK_LENGTH: u32 = 0x3FFFF;
 
 /// Filter types the RAR5 writer intentionally produces: Delta, E8, E8E9 and
-/// ARM. Types 4-7 (ARMT/IA64/PPC/SPARC) are defined in the format notes but
-/// never produced by any implementation; the decoder refuses them explicitly
-/// (`apply_filter_decode`) while the encoder's forward transform would no-op
-/// them, so without this check a caller could write a filter record the
-/// reader rejects over raw, untransformed bytes.
+/// ARM. Types 4-7 are reserved and never produced by any implementation (the
+/// names unrar uses for them are encoder-selection ids, not on-disk values);
+/// the decoder refuses them explicitly (`apply_filter_decode`) while the
+/// encoder's forward transform would no-op them, so without this check a
+/// caller could write a filter record the reader rejects over raw,
+/// untransformed bytes.
 fn is_supported_filter_type(filter_type: u8) -> bool {
     matches!(
         filter_type,
