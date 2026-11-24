@@ -373,12 +373,15 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `discover_volumes`（旧首卷路径已不存在）； `discover_volumes`
   对不存在的输入会回退成单元素，不能拿它判断“有没有卷集”。
   追加成员另起非固实链（合法，且不需要旧链窗口）；多卷 SFX 的编辑/append
-  与已有卷集的 `-v` 仍拒绝。**`-sfx` 创建的卷集首卷命名对齐 WinRAR**：单卷为
+  仍拒绝。**对已有档显式 `-v<size>` 会改卷大小**：覆盖上面的「原卷大小」推导，
+  单文件源则按该大小切成卷集（官方一律 `Cannot modify volume`，我们故意支持）。
+  无 `-v` 时 RAR4 取**最大**卷长作上限（RAR5 取除末卷外最小），单文件源 `-v`
+  默认新式编号。**`-sfx` 创建的卷集首卷命名对齐 WinRAR**：单卷为
   `{base}.exe`，卷集为 `{base}.part1.exe`，其余卷保持
   `{base}.partN.rar`；`discover_volumes` 把 `.part1.exe` 当作第 1
   卷（从任意后续卷或 base 名都能解析整套）。
 - **删光成员后的重建保留档级元数据**：`a` 替换全部成员时 staging 档会被抹掉，
-  `create` 必须把原档的格式（RAR4/RAR5）、卷大小、固实标志、注释、`-hp` 和 RR
+  `create` 必须把原档的格式（RAR4/RAR5）、卷大小（有 `-v` 时用请求值）、固实标志、注释、`-hp` 和 RR
   重新写回，否则会塌缩成单卷或静默丢注释/加密。`-hp` 重建还要关掉 quick-open
   （二者互斥）；`headers_encrypted()` 不能只读缓存状态（目录扫描会清掉缓存），
   需要探测首块 `ENCR`。RAR5 卷集注释自此也可编辑（`rewrite_multivolume`

@@ -129,10 +129,6 @@ Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Limitations
 
-- An explicit volume-size change (`-v` on an existing archive) is still refused;
-  the supported set operations (append, delete, rename, recovery-strength change)
-  repack the whole set at its original shape instead (see
-  [PLAN.md](PLAN.md)「一致拒绝」).
 - **RAR4 solid chains** stay sequential; only RAR5 gets chunk-level MT.
 - Filter types 4–7 are rejected; KDF strength is capped at 2²⁴ iterations
   (default 2¹⁵).

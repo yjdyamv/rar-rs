@@ -458,12 +458,26 @@ impl RarArchive {
     /// Open an existing archive for appending, with a password for
     /// encrypted content.
     pub fn open_append_with_password(path: impl AsRef<Path>, password: &str) -> RarResult<Self> {
+        Self::open_append_rewrite(path, password, None)
+    }
+
+    /// Open an existing archive for appending and ask the append to reshape it
+    /// into a multi-volume set of `volume_size` bytes (WinRAR `-v` on an
+    /// existing archive, which the official tools refuse). `None` keeps the
+    /// archive's own shape: a single file appends in place, a set is rebuilt at
+    /// its existing volume size.
+    pub(crate) fn open_append_rewrite(
+        path: impl AsRef<Path>,
+        password: &str,
+        volume_size: Option<u64>,
+    ) -> RarResult<Self> {
         let pw = if password.is_empty() {
             None
         } else {
             Some(password.to_string())
         };
         let mut archive = Self::new_for_mode(path.as_ref().to_path_buf(), Mode::Append, pw);
+        archive.write_ctx_mut().append_volume_size = volume_size;
         if let Err(error) = crate::format::shared::extract::open::open_read(&mut archive)
             .and_then(|()| archive.prepare_append())
         {
@@ -580,7 +594,7 @@ impl RarArchive {
             self.stream = Some(Box::new(dst));
             return Ok(());
         }
-        if self.volume_paths.len() > 1 {
+        if self.volume_paths.len() > 1 || self.write_ctx().append_volume_size.is_some() {
             // A volume set cannot be appended to in place: the new members
             // would need a fresh volume plus a rebuilt quick-open record and
             // recovery record per volume. Rebuild the whole set instead, the
@@ -957,6 +971,7 @@ impl RarArchive {
                     bytes_written: 0,
                     rar13_header_pending: false,
                 },
+                append_volume_size: None,
             }),
         };
         Ok(archive)

@@ -178,6 +178,11 @@ pub(crate) struct WriteState {
     pub meta: MetadataSettings,
     pub locator: LocatorState,
     pub output: OutputState,
+    /// Requested target volume size for an append that reshapes the archive
+    /// into a multi-volume set (WinRAR `-v` on an existing archive). `None`
+    /// keeps the archive's own shape: a single file appends in place, a set
+    /// is rebuilt at its existing volume size.
+    pub append_volume_size: Option<u64>,
 }
 
 /// Shared solid-chain state for one run (RAR5 and the legacy codecs).

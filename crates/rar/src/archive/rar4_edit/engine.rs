@@ -290,9 +290,15 @@ pub(crate) fn append_prelude(archive: &RarArchive) -> RarResult<AppendPrelude> {
     }
     let header_encrypted = layout.header_encrypted;
     let rr_sectors = layout.protect.as_ref().map(|protect| protect.rec_sectors);
-    if archive.volume_paths.len() > 1 || layout.main_flags & MHD_VOLUME != 0 {
-        // A volume set: append repacks the whole set at close, keeping its
-        // shape (volume size, numbering, solid flag, recovery records).
+    if archive.volume_paths.len() > 1
+        || layout.main_flags & MHD_VOLUME != 0
+        || archive.write_ctx().append_volume_size.is_some()
+    {
+        // A volume set — or a requested `-v` reshape — repacks the whole set
+        // at close. With a requested size the surviving members (and a
+        // single-file source) become volumes of that size; otherwise the set
+        // keeps its shape (volume size, numbering, solid flag, recovery
+        // records).
         return Ok(AppendPrelude {
             whole_set: true,
             solid: false,
@@ -505,6 +511,7 @@ pub(crate) fn edit_rar4(
                 member_comments,
                 layout.main_flags & MHD_SOLID != 0,
                 layout.main_flags & MHD_NEWNUMBERING == 0,
+                None,
             );
         }
         let (rename_map, _) = crate::archive::rename::build_rename_map(&archive.entries, renames)?;

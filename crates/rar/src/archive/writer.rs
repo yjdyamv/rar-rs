@@ -544,6 +544,7 @@ pub struct AppendOptions {
     password: Option<String>,
     dictionary_size: Option<DictionarySize>,
     thread_count: Option<ThreadCount>,
+    volume_size: Option<u64>,
 }
 
 impl AppendOptions {
@@ -580,6 +581,16 @@ impl AppendOptions {
         self.thread_count = Some(count);
         self
     }
+
+    /// Reshape the archive into a multi-volume set of `bytes` bytes (WinRAR
+    /// `-v` on an existing archive, which the official tools refuse). A
+    /// single-volume archive becomes a set; an existing set is rebuilt at the
+    /// new size. `None` (the default) keeps the archive's own shape.
+    #[must_use]
+    pub fn volume_size(mut self, bytes: u64) -> Self {
+        self.volume_size = Some(bytes);
+        self
+    }
 }
 
 impl fmt::Debug for AppendOptions {
@@ -588,6 +599,7 @@ impl fmt::Debug for AppendOptions {
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("dictionary_size", &self.dictionary_size)
             .field("thread_count", &self.thread_count)
+            .field("volume_size", &self.volume_size)
             .finish()
     }
 }
@@ -717,18 +729,28 @@ impl ArchiveWriter {
 
     /// Begin appending to an existing single-volume archive (RAR5, or the
     /// legacy RAR 1.5–4.x container through its append path) with default
-    /// [`AppendOptions`]. Multi-volume archives are rejected.
+    /// [`AppendOptions`]. A multi-volume set is rebuilt whole; see
+    /// [`Self::append_with`].
     pub fn append(path: impl AsRef<Path>) -> RarResult<Self> {
         Self::append_with(path, AppendOptions::default())
     }
 
     /// Validate options and begin appending to an existing archive. Works for
-    /// single-volume RAR5 and legacy RAR4 containers; multi-volume archives
-    /// are rejected.
+    /// single-volume RAR5 and legacy RAR4 containers; a multi-volume set is
+    /// rebuilt as a whole set (every member copied verbatim into fresh
+    /// volumes). [`AppendOptions::volume_size`] reshapes the archive into a set
+    /// of the requested size.
     pub fn append_with(path: impl AsRef<Path>, options: AppendOptions) -> RarResult<Self> {
-        let mut archive = match options.password.as_deref() {
-            Some(password) => RarArchive::open_append_with_password(path, password)?,
-            None => RarArchive::open_append(path)?,
+        let mut archive = match options.volume_size {
+            Some(size) => RarArchive::open_append_rewrite(
+                path,
+                options.password.as_deref().unwrap_or(""),
+                Some(size),
+            )?,
+            None => match options.password.as_deref() {
+                Some(password) => RarArchive::open_append_with_password(path, password)?,
+                None => RarArchive::open_append(path)?,
+            },
         };
         let configure = (|| {
             if let Some(size) = options.dictionary_size {

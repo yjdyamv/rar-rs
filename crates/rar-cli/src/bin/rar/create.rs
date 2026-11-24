@@ -675,11 +675,9 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // old member.
     let write_report = if existing {
         use std::collections::HashSet;
-        // The append repack keeps the original set shape (volume size and
-        // numbering); changing it would be a different, explicit operation.
-        if args.volume_size.is_some() {
-            return Err("changing the volume size of an existing archive is not supported".into());
-        }
+        // With no explicit `-v` the append repack keeps the original set shape
+        // (volume size and numbering); an explicit `-v` reshapes it instead.
+        let requested_volume_size = args.volume_size;
         let incoming: HashSet<String> = collected
             .iter()
             .map(|c| c.name.clone())
@@ -779,6 +777,9 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 if let Some(size) = dictionary {
                     append_opts = append_opts.dictionary_size(size);
                 }
+                if let Some(size) = requested_volume_size {
+                    append_opts = append_opts.volume_size(size);
+                }
                 let writer = crate::ops::append_writer(staged_path, append_opts)
                     .map_err(|e| CliError::from(e).context("open"))?;
                 (write_members(writer)?, false)
@@ -801,7 +802,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                     Some(version) => opts.clone().compression(version),
                     None => opts.clone(),
                 };
-                if let Some(size) = set_volume_size {
+                if let Some(size) = requested_volume_size.or(set_volume_size) {
                     recreate = recreate.volume_size(size);
                 }
                 if old_numbering && original_version.is_some_and(|version| version.is_legacy()) {
@@ -853,7 +854,10 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             }
             Ok(report)
         };
-        let volume_set = rar_rs::discover_volumes(std::path::Path::new(archive_path)).len() > 1;
+        // A requested `-v` can turn a single file into a set, so stage through
+        // the volume-set transaction then (it installs a changed volume count).
+        let volume_set = rar_rs::discover_volumes(std::path::Path::new(archive_path)).len() > 1
+            || requested_volume_size.is_some();
         if volume_set {
             crate::transaction::update_volume_set_transactionally_with(
                 std::path::Path::new(archive_path),
@@ -870,9 +874,15 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     };
     let was_existing = existing;
     // The replace path's report still names the staged copy the commit
-    // consumed; the original archive path is the only final volume there.
+    // consumed; re-discover the final volumes from the archive path (a `-v`
+    // reshape can rename the first volume, e.g. `x.rar` → `x.part1.rar`).
     let mut report_volumes: Vec<std::path::PathBuf> = if was_existing {
-        vec![std::path::PathBuf::from(archive_path)]
+        let discovered = rar_rs::discover_volumes(std::path::Path::new(archive_path));
+        if discovered.is_empty() {
+            vec![std::path::PathBuf::from(archive_path)]
+        } else {
+            discovered
+        }
     } else {
         write_report.volume_paths().to_vec()
     };

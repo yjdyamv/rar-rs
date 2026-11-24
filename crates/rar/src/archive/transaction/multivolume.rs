@@ -240,15 +240,22 @@ impl RarArchive {
     pub(crate) fn stage_multivolume_append(&mut self) -> RarResult<()> {
         let comment = self.get_comment()?;
         let orig_volumes = self.volume_paths.clone();
-        let mut vol_sizes = Vec::with_capacity(orig_volumes.len());
-        for vol in &orig_volumes {
-            vol_sizes.push(fs::metadata(vol)?.len());
-        }
-        // Every volume except the last is exactly the size limit.
-        let volume_size = *vol_sizes[..vol_sizes.len() - 1]
-            .iter()
-            .min()
-            .unwrap_or(&vol_sizes[0]);
+        // A requested size (WinRAR `-v` on an existing archive) reshapes the
+        // set into volumes of that size; otherwise reuse the set's own size,
+        // where every volume except the last is exactly the size limit.
+        let volume_size = match self.write_ctx().append_volume_size {
+            Some(requested) => requested,
+            None => {
+                let mut vol_sizes = Vec::with_capacity(orig_volumes.len());
+                for vol in &orig_volumes {
+                    vol_sizes.push(fs::metadata(vol)?.len());
+                }
+                *vol_sizes[..vol_sizes.len() - 1]
+                    .iter()
+                    .min()
+                    .unwrap_or(&vol_sizes[0])
+            }
+        };
         if volume_size == 0 {
             return Err(RarError::format("cannot append: volume size is zero"));
         }

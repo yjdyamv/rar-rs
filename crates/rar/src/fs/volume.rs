@@ -150,6 +150,20 @@ fn part_recovery_base(name: &str) -> Option<&str> {
     split_part_stem(stem).map(|(base, _)| base)
 }
 
+/// Base name of a plain `{base}.rar` single-volume archive, if the name is
+/// one. A set being written over a previous single-volume archive of the same
+/// base must retire that file (its `{base}.partN.rar` names do not match it).
+/// A `.partN` stem is a volume, handled by [`part_volume_base`], not here.
+fn plain_volume_base(name: &str) -> Option<&str> {
+    let stem = name
+        .strip_suffix(".rar")
+        .or_else(|| name.strip_suffix(".RAR"))?;
+    if split_part_stem(stem).is_some() {
+        return None;
+    }
+    Some(stem)
+}
+
 /// Existing volume files of the set based at `base` that `keep` does not
 /// cover, in the naming family selected by `rar4`.
 ///
@@ -214,8 +228,12 @@ pub(crate) fn stale_volume_paths(
                 || legacy_rev_owned(dir, base, name)
         } else {
             // The old set's `.rev` recovery volumes go with it: they are
-            // regenerated after the new data volumes commit.
-            part_volume_base(name) == Some(base) || part_recovery_base(name) == Some(base)
+            // regenerated after the new data volumes commit. A previous
+            // single-volume `{base}.rar` is retired too — reshaping a single
+            // file into a set (`-v` on an existing archive) replaces it.
+            part_volume_base(name) == Some(base)
+                || part_recovery_base(name) == Some(base)
+                || plain_volume_base(name) == Some(base)
         };
         if matches {
             stale.push(path);

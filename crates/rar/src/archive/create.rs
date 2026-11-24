@@ -1090,26 +1090,30 @@ impl RarArchive {
         {
             // Deferred multi-volume append: close repacks the whole set
             // (surviving members + buffered additions) at the set's original
-            // volume size, numbering, solid flag, comment and per-volume
-            // recovery strength, then replaces the volumes atomically.
+            // volume size — or a requested one (`-v` on an existing archive) —
+            // numbering, solid flag, comment and per-volume recovery strength,
+            // then replaces the volumes atomically.
             let additions = std::mem::take(&mut self.write_ctx_mut().rar4.solid_append_entries);
             let comment = self.write_ctx_mut().rar4.writer_comment.take();
             self.write_ctx_mut().rar4.solid_append = false;
             self.write_ctx_mut().rar4.multivolume_append = false;
             let none_deleted = vec![false; self.entries.len()];
             // New numbering names volumes `.partNN.rar`; old numbering uses
-            // `.rar`/`.r00`. Derive it from the set we are replacing.
-            let old_numbering = self.volume_paths.iter().skip(1).all(|path| {
-                path.file_name()
-                    .map(|name| {
-                        !name
-                            .to_string_lossy()
-                            .to_ascii_lowercase()
-                            .contains(".part")
-                    })
-                    .unwrap_or(false)
-            });
+            // `.rar`/`.r00`. It is a property of an existing set's names, so a
+            // single-file source (a `-v` reshape) defaults to the modern names.
+            let old_numbering = self.volume_paths.len() > 1
+                && self.volume_paths.iter().skip(1).all(|path| {
+                    path.file_name()
+                        .map(|name| {
+                            !name
+                                .to_string_lossy()
+                                .to_ascii_lowercase()
+                                .contains(".part")
+                        })
+                        .unwrap_or(false)
+                });
             let solid = self.archive_solid;
+            let volume_size_override = self.write_ctx().append_volume_size;
             crate::archive::rar4_edit::repack_multivolume_archive(
                 self,
                 &none_deleted,
@@ -1122,6 +1126,7 @@ impl RarArchive {
                 &[],
                 solid,
                 old_numbering,
+                volume_size_override,
             )?;
             self.mode = Mode::Read;
             return Ok(());

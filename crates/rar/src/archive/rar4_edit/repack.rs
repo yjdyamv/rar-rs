@@ -389,6 +389,7 @@ pub(crate) fn repack_multivolume_archive(
     member_comments: &[(usize, Option<Vec<u8>>)],
     solid: bool,
     old_numbering: bool,
+    volume_size_override: Option<u64>,
 ) -> RarResult<EditSummary> {
     for idx in rename_map.keys() {
         if deleted[*idx] {
@@ -433,16 +434,19 @@ pub(crate) fn repack_multivolume_archive(
     let parent = crate::fs::atomic::parent_dir(&first);
     let base = crate::fs::volume::volume_base_of(&first);
 
-    // Same volume ceiling as the original set (the largest existing volume):
-    // a smaller one would split members the old set kept whole, a larger one
-    // would silently change the set's shape.
-    let volume_size = archive
-        .volume_paths
-        .iter()
-        .filter_map(|path| fs::metadata(path).ok())
-        .map(|metadata| metadata.len())
-        .max()
-        .ok_or_else(|| RarError::format("repacking: cannot stat the set's volumes"))?;
+    // Same volume ceiling as the original set (the largest existing volume),
+    // unless a size was requested (WinRAR `-v` on an existing archive, which
+    // deliberately changes the set's shape then).
+    let volume_size = match volume_size_override {
+        Some(requested) => requested,
+        None => archive
+            .volume_paths
+            .iter()
+            .filter_map(|path| fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .max()
+            .ok_or_else(|| RarError::format("repacking: cannot stat the set's volumes"))?,
+    };
 
     // Recovery shape: an explicit request wins, otherwise each volume keeps a
     // record of the first volume's strength (WinRAR writes one per volume).
