@@ -256,18 +256,23 @@ mod tests {
         assert_eq!(resolve_extraction_threads(None, None, 7), 7);
     }
 
+    /// The default pool must size itself to every available host core (like
+    /// `rar -mt0`), never the old hard-capped 4.
+    ///
+    /// A single-core host is skipped rather than failed: there
+    /// `default_compression_threads()` is 1 whether or not the cap is gone,
+    /// so the assertion cannot tell the two apart — and package/repro builds
+    /// routinely run on one CPU (`nr_cpus=1`).
     #[test]
     fn default_compression_uses_all_host_cores() {
-        // No per-process override set: the default pool must size itself to
-        // every available host core (maximum parallelism), never the old
-        // hard-capped 4.
+        // No per-process override set.
         let want = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        assert!(
-            want >= 2,
-            "test host unexpectedly reports < 2 cores: {want}"
-        );
+        if want < 2 {
+            eprintln!("SKIP: single-core host cannot distinguish all-cores from the old cap");
+            return;
+        }
         assert_eq!(
             default_compression_threads(),
             want,
