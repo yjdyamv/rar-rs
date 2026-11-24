@@ -143,6 +143,16 @@ impl Unpack20Encoder {
                 table
             }
         };
+        #[cfg(feature = "parallel")]
+        if input.len() >= RAR20_PARALLEL_MEMBER_THRESHOLD {
+            // Large members are encoded as independent LZ blocks so the block
+            // analyses can run on the compression pool; the output is identical
+            // to the serial block loop.
+            let threads = crate::parallel::compression_pool().current_num_threads();
+            let packed = encode_member_blocks(input, &self.history, self.options, table, threads)?;
+            self.remember(input);
+            return Ok(packed);
+        }
         let packed = encode_member(input, &self.history, Some(table), self.options, progress)?;
         self.remember(input);
         Ok(packed)
@@ -256,6 +266,103 @@ fn encode_member(
         best_packed = next_packed;
     }
     Ok(best_packed)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Blocked member encoding (multi-threaded)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Least member size encoded as independent LZ blocks so the block analyses can
+/// run on the compression pool. Below it the whole member is one block.
+#[cfg(feature = "parallel")]
+const RAR20_PARALLEL_MEMBER_THRESHOLD: usize = 4 * 1024 * 1024;
+
+/// Bytes per block in the blocked encoder. Each block repeats the flat table
+/// header, so it is larger than the 64 KiB streaming window.
+#[cfg(feature = "parallel")]
+const RAR20_MT_BLOCK_SIZE: usize = 2 * 1024 * 1024;
+
+/// One block's tokens and flat table, produced independently of every other
+/// block: the repeat-offset state starts fresh per block, so the block only
+/// references offsets it pushes itself. (The decoder's `old_offsets` ring
+/// carries across the block boundary, but a slot the block did not fill holds
+/// a stale value it never reads — the same reasoning the RAR29 block MT relies
+/// on.)
+#[cfg(feature = "parallel")]
+struct BlockAnalysis {
+    tokens: Vec<EncodeToken>,
+}
+
+/// Tokenize one block against `history` with a fresh repeat-offset state. The
+/// table is built and the block written later, in order (see
+/// [`serialize_block`]), so this is the independent unit the pool runs.
+#[cfg(feature = "parallel")]
+fn analyze_block(block: &[u8], history: &[u8], options: EncodeOptions) -> RarResult<BlockAnalysis> {
+    let mut state = ParseState::default();
+    let tokens = encode_tokens_with_state(block, history, options, None, None, &mut state)?;
+    Ok(BlockAnalysis { tokens })
+}
+
+/// Build one block's table over the tokens (plus the `EndOfBlock` 269 between
+/// blocks) and append a fresh header + that table + the tokens. The table must
+/// cover 269, so it is computed here where `is_last` is known.
+#[cfg(feature = "parallel")]
+fn serialize_block(
+    bits: &mut BitWriter,
+    analysis: &BlockAnalysis,
+    is_last: bool,
+    table: FixedEncodeTable,
+) -> RarResult<()> {
+    let mut tokens = Vec::with_capacity(analysis.tokens.len() + 1);
+    tokens.extend_from_slice(&analysis.tokens);
+    if !is_last {
+        tokens.push(EncodeToken::EndOfBlock);
+    }
+    let table_lengths = table_lengths_for_tokens(&tokens, Some(table))?;
+    write_lz_block(bits, &tokens, &table_lengths, true)
+}
+
+/// Encode `input` as independent blocks (`threads > 1` analyses them on the
+/// compression pool, `threads <= 1` runs them one at a time), then write every
+/// block in order into one bit stream. Both paths produce identical bytes: a
+/// block only reads `history ++ input[..start]` and its own fresh repeat state.
+#[cfg(feature = "parallel")]
+fn encode_member_blocks(
+    input: &[u8],
+    history: &[u8],
+    options: EncodeOptions,
+    table: FixedEncodeTable,
+    threads: usize,
+) -> RarResult<Vec<u8>> {
+    let mut combined = Vec::with_capacity(history.len() + input.len());
+    combined.extend_from_slice(history);
+    combined.extend_from_slice(input);
+    let hist_len = history.len();
+    let block_size = RAR20_MT_BLOCK_SIZE.max(1);
+    let block_count = input.len().div_ceil(block_size).max(1);
+    let analyze_at = |k: usize| {
+        let start = hist_len + k * block_size;
+        let end = (hist_len + (k + 1) * block_size).min(combined.len());
+        analyze_block(&combined[start..end], &combined[..start], options)
+    };
+    let analyses: Vec<BlockAnalysis> = if threads <= 1 {
+        (0..block_count)
+            .map(analyze_at)
+            .collect::<RarResult<Vec<_>>>()?
+    } else {
+        crate::parallel::compression_pool().install(|| {
+            use rayon::prelude::*;
+            (0..block_count)
+                .into_par_iter()
+                .map(analyze_at)
+                .collect::<RarResult<Vec<_>>>()
+        })?
+    };
+    let mut bits = BitWriter::default();
+    for (k, analysis) in analyses.iter().enumerate() {
+        serialize_block(&mut bits, analysis, k + 1 == block_count, table)?;
+    }
+    Ok(bits.into_bytes())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1939,6 +2046,35 @@ mod tests {
             hash = hash.wrapping_mul(0x100_0000_01b3);
         }
         hash
+    }
+
+    /// The blocked encoder is byte-identical whether its blocks are analysed one
+    /// at a time or on the pool, and its output decodes back to the input. The
+    /// carried solid-chain window does not change the bytes either.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn block_mt_matches_sequential() {
+        let corpus = golden_corpus();
+        // Larger than one 2 MiB block so there is more than one to fan out.
+        let data: Vec<u8> = corpus.iter().copied().cycle().take(5_000_000).collect();
+        let table = FixedEncodeTable::new().expect("table");
+        let options = golden_options(3);
+
+        // No carried history: serial and MT match, and decode back.
+        let serial = encode_member_blocks(&data, &[], options, table, 1).expect("serial");
+        let mt = encode_member_blocks(&data, &[], options, table, 4).expect("mt");
+        assert_eq!(serial, mt, "block analyses must be scheduling-independent");
+        let mut decoder = Rar20Decoder::new();
+        let out = decoder
+            .decode_member(&mt, data.len() as u64)
+            .expect("decode");
+        assert_eq!(out, data, "blocked output round-trips");
+
+        // A carried (solid-chain) window must not change the bytes either.
+        let history = &data[..64 * 1024];
+        let serial_h = encode_member_blocks(&data, history, options, table, 1).expect("serial");
+        let mt_h = encode_member_blocks(&data, history, options, table, 4).expect("mt");
+        assert_eq!(serial_h, mt_h, "the chain window must not change the bytes");
     }
 
     /// Mirrors the writer's `legacy_rar20_options` ladder.

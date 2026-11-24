@@ -1683,6 +1683,52 @@ fn create_rar4_solid_chain() {
     );
 }
 
+/// A v20 solid member past the block-MT threshold is encoded as LZ blocks; it
+/// must still read back through the RAR4 reader (the blocked encoder is the
+/// integration guard for the parallel v20 solid path).
+#[test]
+fn create_rar4_v20_solid_large_member_roundtrips() {
+    let dir = make_temp_dir();
+    let path = dir.path().join("v20-solid-big.rar");
+    let payload: Vec<u8> = b"the quick brown fox jumps over the lazy dog 0123456789\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(5_000_000)
+        .collect();
+    let mut archive = ArchiveWriter::create_with(
+        &path,
+        WriterOptions::default()
+            .compression(ArchiveVersion::V20)
+            .solid_mode(SolidMode::Continuous),
+    )
+    .expect("create");
+    archive
+        .add_bytes("big.txt", &payload, ewo(3))
+        .expect("add big");
+    archive
+        .add_bytes("tail.txt", b"trailing member continues the chain", ewo(3))
+        .expect("add tail");
+    archive.finish().expect("close");
+
+    let mut archive = ArchiveReader::open(&path).expect("reopen");
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("big.txt").unwrap())
+            .unwrap()
+            .as_slice(),
+        &payload[..],
+        "the large solid member must decode back"
+    );
+    assert_eq!(
+        archive
+            .read_entry(archive.unique_entry("tail.txt").unwrap())
+            .unwrap()
+            .as_slice(),
+        b"trailing member continues the chain"
+    );
+}
+
 /// RAR4 solid with `-se` (SolidReset::PerExtension): the chain restarts when
 /// the file extension changes, so each distinct extension begins a fresh run
 /// (no FHD_SOLID) instead of continuing the previous run's dictionary.

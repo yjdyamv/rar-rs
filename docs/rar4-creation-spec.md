@@ -142,6 +142,12 @@ RAR2 成员是**LZ 块序列**：块以主表符号 269（end-of-block）结束�
 这两个寄存器本来就不随块边界重置，所以与单块路径压缩率一致。因此**大成员产物
 与单块路径不同**（多块/多表），两者都被官方 UnRAR 7.23 接受。
 
+`parallel` 下 ≥4 MiB 的成员（含 solid，每块 2 MiB）改走 `codec/legacy/rar20_encoder.rs::encode_member_blocks`：
+每块独立分析（每块 fresh `ParseState`，块窗口取 `history ++ input[..块首]` 的末尾）、
+建表与写块按块序串行，块分析在压缩池上并行；产物与串行块循环逐字节相同
+（契约 `block_mt_matches_sequential`）。v15 是单连续自适应流、无块边界，保持
+单线程。
+
 ≥ 64 MiB 的成员统一走 spill 流式：v29 = LZ 流式引擎、v20 = 上面的窗口多块、 v15
 与 RAR13 = `Unpack15Encoder::encode_member_streaming`（v15 本来是整成员单遍
 自适应流，现改为增量：滚动窗口 ≤ 32 KiB + 一个读取块 + ≤ 259 B 前视，自适应表与

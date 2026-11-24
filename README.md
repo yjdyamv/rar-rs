@@ -129,7 +129,9 @@ Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Limitations
 
-- **RAR4 solid chains** stay sequential; only RAR5 gets chunk-level MT.
+- **RAR 1.5 (`-ma15`) members** stay single-threaded: a RAR 1.5 member is one
+  continuous adaptive stream with no block boundary to split on (RAR 2.x and
+  RAR 3/4 large members do get block-level MT).
 - Filter types 4–7 are rejected; KDF strength is capped at 2²⁴ iterations
   (default 2¹⁵).
 

@@ -778,6 +778,14 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `RAR29_PARALLEL_MEMBER_THRESHOLD` 时根本不进这条路（它自己的块级并行会把切片
   排到彼此后面）。契约：`solid_search_parallel_matches_serial`（同一链两种跑法逐
   字节相等，并覆盖 PPMd 胜、LZ 过滤胜、STORE 三条分支）。
+- **v20 块级 MT：每块 fresh `ParseState`，按块序写位流**：RAR2.x 成员本就是 LZ 块
+  序列（块间主符号 269 `EndOfBlock`、各自读表），块间唯一依赖是 `ParseState`
+  （`old_offsets`/last-match）。编码时每块用**全新**状态、块窗口取
+  `history ++ input[..块首]` 的末尾 `max_match_distance`，所以块间独立、分析可在
+  压缩池上并行；解码端 `old_offsets` 虽跨块保留，但块只引用自己推入的偏移（陈旧
+  槽位在编码器里是 0/无效、永不引用），因此字节一致。建表与写块（`write_lz_block`）
+  必须**按块序**串行。契约 `block_mt_matches_sequential`（串行 vs 池化逐字节相等 +
+  解码回环）。**v15 不能这样**：单连续自适应流，没有可分块边界。
 - **DP 解析的两笔账：价格表只算一次，收敛了就停**：`optimal_parse_tokens` 的每个
   位置、每个长度槽都要问「这个长度的价格区间到哪结束」（`same_price_run_end`），
   早先它每次都回头去扫 `state.reps` 找「该距离是否在缓存里」并重算
