@@ -101,8 +101,12 @@ step "markdown (dprint, optional)"
 # package and `plugins.dprint.dev` at check time, and its markdown plugin wraps
 # on whitespace, so Chinese prose (no spaces) yields nothing to wrap and English
 # prose reflows on every edit. Run it when you want a diff to stay narrow.
+# It must not stop the gate: an unformatted paragraph is not a failure, and
+# aborting here would skip fmt, clippy, deny and the tests below.
 if command -v dprint >/dev/null 2>&1; then
-  run dprint check
+  if ! dprint check; then
+    echo "WARN: dprint check found unformatted markdown (not a gate; 'dprint fmt' to fix)" >&2
+  fi
 else
   echo "SKIP: dprint not on PATH (npx dprint@0.50.2 check)"
 fi

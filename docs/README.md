@@ -71,7 +71,8 @@ CI 的 job 图、每个 job 的职责与成本见 [`ci.md`](ci.md)（`.github/wo
   CJK 断行（见下），对中文段落基本只制造噪声。配置仍在
   [`dprint.json`](../dprint.json)（markdown 插件
   0.19.0、`lineWidth: 80`、`textWrap: always`、`newLineKind: lf`），`npx dprint@0.50.2 fmt`
-  想跑就跑；`scripts/ci-lint.sh` 只在 PATH 上有 `dprint` 时顺手 `check`。
+  想跑就跑；`scripts/ci-lint.sh` 只在 PATH 上有 `dprint` 时顺手 `check`，
+  失败只打 `WARN`、不中断后续的 fmt / clippy / deny / 测试（它不是门禁）。
 - **中文段落不要手工折行**：折行处的换行在渲染时是空格，会造成中文之间的假空格。需要窄
   diff 时用 `dprint` 自己折。
 - **已知限制**：dprint 的 markdown 插件按空白折行，不实现 CJK/UAX #14 断行（见
