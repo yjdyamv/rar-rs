@@ -93,9 +93,9 @@ for addon in "${EXPECTED_ADDONS[@]}"; do
   cp "${matches[0]}" "$out/"
 done
 
-# The rar/unrar executables ride in per-platform tarballs, present only on a
-# `--cli` run. One copy each: a missing archive is a build that never ran, and a
-# duplicate means two jobs wrote the same name.
+# The rar/unrar/rar-sfx executables ride in per-platform tarballs, present only
+# on a `--cli` run. One copy each: a missing archive is a build that never ran,
+# and a duplicate means two jobs wrote the same name.
 if (( with_cli )); then
   for archive in "${EXPECTED_CLI[@]}"; do
     mapfile -d '' -t matches < <(find "$bindings" -type f -name "$archive" -print0 2>/dev/null | sort -z)

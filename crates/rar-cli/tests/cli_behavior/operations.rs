@@ -1,4 +1,6 @@
-use crate::support::{RAR_CLI, UNRAR_CLI, make_temp_dir, pseudo_random_bytes};
+use crate::support::{
+    RAR_CLI, UNRAR_CLI, make_temp_dir, pseudo_random_bytes, sfx_stub, status_retrying_busy,
+};
 // ── -ms / -df / -t / -ep4 / -as / -or and `rar a` replace (WinRAR 7.23) ──
 
 /// `-ms<list>` stores matching files without compression (WinRAR: level 0
@@ -574,6 +576,104 @@ fn cli_sfx_roundtrip_rar4() {
     let mut rar = rar_rs::ArchiveReader::open(dir.path().join("base.rar")).unwrap();
     let f_id = rar.unique_entry("f.txt").unwrap();
     assert_eq!(rar.read_entry(f_id).unwrap(), b"rar4 sfx");
+}
+
+/// Our bundled console stub is a real self-extractor: an SFX built with it runs
+/// headlessly and writes the members byte-identically (no WinRAR required).
+#[test]
+fn cli_sfx_stub_self_extracts() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"hello sfx").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg("base.rar")
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s", "--sfx-module"])
+        .arg(sfx_stub())
+        .arg("base.rar")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "s must convert with our stub");
+    let sfx = dir.path().join(format!("base.{}", sfx_ext()));
+    assert!(sfx.exists(), "the SFX archive must exist");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&sfx).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&sfx, perms).unwrap();
+    }
+
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let mut command = std::process::Command::new(&sfx);
+    command.current_dir(&out);
+    let status = status_retrying_busy(&mut command);
+    assert!(status.success(), "the SFX stub must self-extract");
+    assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"hello sfx");
+}
+
+/// `-sfx` renames the first volume to the stub name. A queued `-z` comment must
+/// land on that final `.exe`, not the `.rar` that no longer exists.
+#[test]
+fn cli_create_sfx_keeps_archive_comment() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"payload").unwrap();
+    std::fs::write(dir.path().join("c.txt"), b"hello-comment").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sfx", "-zc.txt", "-idq"])
+        .env("RAR_SFX_STUB", sfx_stub())
+        .arg("cm.rar")
+        .arg("f.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "-sfx with a comment must succeed");
+    let sfx = dir.path().join(format!("cm.{}", sfx_ext()));
+    assert!(sfx.exists(), "the SFX archive must exist");
+    let mut reader = rar_rs::ArchiveReader::open(&sfx).unwrap();
+    assert_eq!(
+        reader.comment().unwrap().as_deref(),
+        Some(&b"hello-comment"[..])
+    );
+}
+
+/// `s` converts one standalone archive; a volume set would be half-converted
+/// (only volume 1 wrapped), so it is refused in favour of `a -sfx`.
+#[test]
+fn cli_sfx_convert_rejects_a_volume_set() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("big.bin"), pseudo_random_bytes(80_000, 7)).unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-v16k", "-idq", "set.rar", "big.bin"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        dir.path().join("set.part2.rar").exists(),
+        "precondition: a set"
+    );
+
+    let out = std::process::Command::new(RAR_CLI)
+        .args(["s", "-idq", "set.part1.rar"])
+        .env("RAR_SFX_STUB", sfx_stub())
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "s must refuse a volume set");
+    assert!(
+        !dir.path().join(format!("set.part1.{}", sfx_ext())).exists(),
+        "no SFX may be written for a set"
+    );
 }
 
 /// `unrar x -ep` (and the `--flat` spelling) extracts basenames without the

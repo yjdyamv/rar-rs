@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "WinRAR-compatible command-line tools (rar, unrar)"
+description = "WinRAR-compatible command-line tools (rar, unrar, and the rar-sfx self-extractor)"
 readme = "../../README.md"
 documentation = "https://docs.rs/rar-cli"
 keywords = ["rar", "unrar", "archive", "cli", "extract"]
@@ -18,6 +18,13 @@ path = "src/bin/rar/main.rs"
 [[bin]]
 name = "unrar"
 path = "src/bin/unrar.rs"
+
+# The console self-extractor prepended to SFX archives. Kept in this package so
+# `cargo build/install -p rar-cli` builds it next to `rar`, where
+# `find_sfx_module` looks for it.
+[[bin]]
+name = "rar-sfx"
+path = "src/bin/rar_sfx.rs"
 
 [dependencies]
 rar-rs = { workspace = true, features = ["parallel"] }

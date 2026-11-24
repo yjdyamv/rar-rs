@@ -779,12 +779,13 @@ jobs:
           else
             cargo build --release -p rar-cli --target "$target"
           fi
-      - name: Package the rar/unrar CLI
+      - name: Package the rar/unrar/rar-sfx CLI
         if: matrix.settings.cli != ''
-        # A tarball, not two loose assets, so `rar` and `unrar` from the same
-        # build stay together and the payload has one entry per platform. The
-        # bytes are repacked on every run (tar records mtimes), so a consumer
-        # that wants a stable digest hashes the executables inside.
+        # A tarball, not loose assets, so the CLI binaries (`rar`, `unrar`,
+        # `rar-sfx`) from the same build stay together and the payload has one
+        # entry per platform. The bytes are repacked on every run (tar records
+        # mtimes), so a consumer that wants a stable digest hashes the
+        # executables inside.
         shell: bash
         run: |
           set -euo pipefail
@@ -793,8 +794,8 @@ jobs:
           case "$target" in *windows*) ext='.exe';; esac
           src="target/$target/release"
           staging=$(mktemp -d)
-          cp "$src/rar$ext" "$src/unrar$ext" "$staging/"
-          tar -czf "crates/rar-napi/${{ matrix.settings.cli }}" -C "$staging" "rar$ext" "unrar$ext"
+          cp "$src/rar$ext" "$src/unrar$ext" "$src/rar-sfx$ext" "$staging/"
+          tar -czf "crates/rar-napi/${{ matrix.settings.cli }}" -C "$staging" "rar$ext" "unrar$ext" "rar-sfx$ext"
       - name: Typecheck the binding's public types
         if: matrix.settings.target == 'x86_64-unknown-linux-gnu'
         working-directory: crates/rar-napi

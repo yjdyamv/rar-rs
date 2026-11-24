@@ -32,6 +32,43 @@ pub(crate) fn status_retrying_busy(
 }
 pub(crate) const RAR_CLI: &str = env!("CARGO_BIN_EXE_rar");
 
+/// A **release** `rar-sfx` stub, built once per test process.
+///
+/// The debug ELF carries ~40 MiB of DWARF, which does not fit the reader's
+/// 8 MiB SFX scan window (the archive sits right after the stub), while the
+/// stripped release build is a few MiB. LTO is disabled for this one build so
+/// the stub appears quickly; `strip` still keeps it small.
+pub(crate) fn sfx_stub() -> &'static str {
+    static STUB: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    STUB.get_or_init(|| {
+        let status = std::process::Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "--release",
+                "--locked",
+                "--config",
+                "profile.release.lto=false",
+                "-p",
+                "rar-cli",
+                "--bin",
+                "rar-sfx",
+            ])
+            .status()
+            .expect("run cargo build for the rar-sfx stub");
+        assert!(status.success(), "building the release rar-sfx stub failed");
+        let debug_bin = std::path::Path::new(env!("CARGO_BIN_EXE_rar"));
+        let target = debug_bin
+            .parent()
+            .and_then(|dir| dir.parent())
+            .expect("target directory above the debug binaries");
+        target
+            .join("release")
+            .join(format!("rar-sfx{}", std::env::consts::EXE_SUFFIX))
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
 pub(crate) fn make_tree(dir: &std::path::Path) {
     std::fs::create_dir_all(dir.join("sub")).unwrap();
     std::fs::write(dir.join("f1.txt"), b"one").unwrap();

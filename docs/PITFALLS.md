@@ -392,8 +392,11 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `{base}.exe`（Linux 为 `{base}.sfx`，官方 `rar s` 的拼法），卷集首卷为
   `{base}.part1.exe`（Linux `{base}.part1.sfx`），其余卷保持
   `{base}.partN.rar`；`discover_volumes` 把 `.part1.exe`/`.part1.sfx` 当作第 1
-  卷（从任意后续卷或 base 名都能解析整套）。默认模块是控制台存根
-  （Windows `WinCon.SFX`、Linux `default.sfx`），无需桌面即可自解压。
+  卷（从任意后续卷或 base 名都能解析整套）。默认模块是**我们自带的控制台
+  自解压器 `rar-sfx`**（与 `rar` 同目录构建，`RAR_SFX_STUB` 可覆盖），回退到
+  官方控制台存根（`WinCon.SFX`/`default.sfx`），无需桌面即可自解压。自带存根
+  链接 rar-rs，rodata 里含 RAR 签名常量——`detect` 因此按「签名后能解析出合法
+  主头」挑选起点（`detect.rs`），否则会把存根里的假签名当归档开头。
 - **删光成员后的重建保留档级元数据**：`a` 替换全部成员时 staging 档会被抹掉，
   `create` 必须把原档的格式（RAR4/RAR5）、卷大小（有 `-v` 时用请求值）、固实标志、注释、`-hp` 和 RR
   重新写回，否则会塌缩成单卷或静默丢注释/加密。`-hp` 重建还要关掉 quick-open

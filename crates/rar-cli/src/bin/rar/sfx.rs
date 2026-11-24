@@ -41,6 +41,15 @@ pub(crate) fn cmd_sfx(args: &SfxArgs, assume_yes: bool) -> CliResult<()> {
                 .into(),
         );
     }
+    // `s` converts one standalone archive. A volume set needs `a -sfx`, which
+    // puts the module on the first volume and keeps the `.partN.rar` chain;
+    // wrapping only volume 1 here would leave a half-converted set on disk.
+    if rar_rs::discover_volumes(std::path::Path::new(archive_path)).len() > 1 {
+        return Err(format!(
+            "{archive_path} is part of a volume set; create a self-extracting set with `a -sfx` instead of `s`"
+        )
+        .into());
+    }
 
     // Creation: prepend the SFX module.
     let module_path = match &args.module {
@@ -139,28 +148,35 @@ pub(crate) fn sfx_extension() -> &'static str {
     if cfg!(windows) { "exe" } else { "sfx" }
 }
 
-/// Locate an SFX module: `$HOME`, `/usr/lib`, `/usr/local/lib`, or the
-/// installed WinRAR directory (Windows: `%ProgramFiles%\WinRAR`,
-/// `%ProgramFiles(x86)%\WinRAR`, or the registry-installed path).
-///
-/// Windows prefers the **console** stub (`WinCon.SFX`) so the result is a
-/// CLI self-extractor that works without a desktop, then falls back to the GUI
-/// `Default.SFX`. Linux ships only the console `default.sfx`.
+/// Locate an SFX module. Our own console stub (`rar-sfx[.exe]` next to the
+/// running `rar`, or `$RAR_SFX_STUB`) is preferred so SFX creation needs no
+/// WinRAR install; the official modules are a fallback (Windows console
+/// `WinCon.SFX` before the GUI `Default.SFX`; Linux `default.sfx`).
 pub(crate) fn find_sfx_module() -> Option<String> {
-    #[cfg_attr(not(windows), allow(unused_mut))] // mut only for the Windows registry candidates
-    let mut candidates: Vec<Option<String>> = vec![
-        std::env::var("HOME")
-            .ok()
-            .map(|h| format!("{h}/default.sfx")),
-        Some("/usr/lib/default.sfx".to_string()),
-        Some("/usr/local/lib/default.sfx".to_string()),
-    ];
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(explicit) = std::env::var("RAR_SFX_STUB") {
+        candidates.push(explicit);
+    }
+    if let Ok(current) = std::env::current_exe()
+        && let Some(dir) = current.parent()
+    {
+        let name = if cfg!(windows) {
+            "rar-sfx.exe"
+        } else {
+            "rar-sfx"
+        };
+        candidates.push(dir.join(name).to_string_lossy().into_owned());
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(format!("{home}/default.sfx"));
+    }
+    candidates.push("/usr/lib/default.sfx".to_string());
+    candidates.push("/usr/local/lib/default.sfx".to_string());
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Registry::{
             HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegCloseKey, RegOpenKeyW, RegQueryValueExW,
         };
-        let mut reg_paths: Vec<String> = Vec::new();
         for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
             let mut hkey = std::ptr::null_mut();
             let key: Vec<u16> = "Software\\WinRAR"
@@ -185,8 +201,8 @@ pub(crate) fn find_sfx_module() -> Option<String> {
                 if status == 0 {
                     let len = (size / 2) as usize;
                     let dir = String::from_utf16_lossy(&buf[..len.min(buf.len())]);
-                    reg_paths.push(format!("{dir}\\WinCon.SFX"));
-                    reg_paths.push(format!("{dir}\\Default.SFX"));
+                    candidates.push(format!("{dir}\\WinCon.SFX"));
+                    candidates.push(format!("{dir}\\Default.SFX"));
                 }
                 unsafe { RegCloseKey(hkey) };
             }
@@ -198,13 +214,11 @@ pub(crate) fn find_sfx_module() -> Option<String> {
         .into_iter()
         .flatten()
         {
-            reg_paths.push(format!("{pf}\\WinRAR\\WinCon.SFX"));
-            reg_paths.push(format!("{pf}\\WinRAR\\Default.SFX"));
+            candidates.push(format!("{pf}\\WinRAR\\WinCon.SFX"));
+            candidates.push(format!("{pf}\\WinRAR\\Default.SFX"));
         }
-        candidates.extend(reg_paths.into_iter().map(Some));
     }
     candidates
         .into_iter()
-        .flatten()
-        .find(|p| std::path::Path::new(p).exists())
+        .find(|path| std::path::Path::new(path).exists())
 }

@@ -1,4 +1,4 @@
-use crate::support::{RAR_CLI, UNRAR_CLI, make_temp_dir};
+use crate::support::{RAR_CLI, UNRAR_CLI, make_temp_dir, sfx_stub};
 // ── WinRAR CLI parity batch 2: -x@/-n@, -ta/-tb, -ag, -ep2/-ep3, -r0 ──────
 
 #[test]
@@ -633,21 +633,24 @@ fn cli_create_sfx_prepends_module() {
     let exe = dir.path().join(format!("out.{}", sfx_ext()));
     let output = std::process::Command::new(RAR_CLI)
         .args(["a", "-sfx", "-idq"])
+        .env("RAR_SFX_STUB", sfx_stub())
         .arg(&exe)
         .arg("f.txt")
         .current_dir(dir.path())
         .output()
         .unwrap();
-    let text = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        if text.contains("default.sfx not found") {
-            eprintln!("skipped: no SFX module installed");
-            return;
-        }
-        panic!("a -sfx failed: {text}");
-    }
+    assert!(
+        output.status.success(),
+        "a -sfx failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The default module is our own console stub.
+    let stub = std::fs::read(sfx_stub()).unwrap();
     let head = std::fs::read(&exe).unwrap();
-    assert_eq!(&head[..2], b"MZ", "SFX output must carry the module");
+    assert!(
+        head.starts_with(&stub),
+        "SFX output must start with our stub"
+    );
 
     // Our own extractor reads the SFX archive.
     let status = std::process::Command::new(UNRAR_CLI)
@@ -678,19 +681,17 @@ fn cli_create_sfx_names_first_volume_exe() {
 
     let output = std::process::Command::new(RAR_CLI)
         .args(["a", "-sfx", "-v16k", "-idq"])
+        .env("RAR_SFX_STUB", sfx_stub())
         .arg("set.rar")
         .arg("payload.bin")
         .current_dir(dir.path())
         .output()
         .unwrap();
-    if !output.status.success() {
-        let text = String::from_utf8_lossy(&output.stderr);
-        if text.contains("default.sfx not found") {
-            eprintln!("skipped: no SFX module installed");
-            return;
-        }
-        panic!("a -sfx -v failed: {text}");
-    }
+    assert!(
+        output.status.success(),
+        "a -sfx -v failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let part1 = format!("set.part1.{}", sfx_ext());
     assert!(
         dir.path().join(&part1).exists(),

@@ -297,7 +297,8 @@ CLI crate `crates/rar-cli` 产出 `rar` 与 `unrar`：
   （两二进制共享的打开/提取/列表/打印编排，`l` / `v` / `lt` 按 WinRAR 表形态）。
 - `bin/rar/` — 按角色拆分（`main` / `args` / `create` / `edit` / `update` /
   `list` / `extract` / `comment` / `recovery` / `sfx` / `filters` / `links` /
-  `log` / `transaction`）；`bin/unrar.rs` 是 `unrar` 入口。
+  `log` / `transaction`）；`bin/unrar.rs` 是 `unrar` 入口，`bin/rar_sfx.rs` 是
+  自带的控制台 SFX 自解压存根。
 
 测试：`crates/rar/tests/`（`rar50_roundtrip`、`format_assertions`、`rewrite_tests`、
 `official_interop`、`rar4_*`、`rar13_*`、`cancel_flag`、`quick_open_listing`

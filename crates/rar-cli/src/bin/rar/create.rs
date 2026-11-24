@@ -1091,6 +1091,13 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             args.level
         );
     }
+    // A created SFX archive is the renamed first volume (`{base}.exe` /
+    // `.part1.exe`), so the comment and lock steps must target the final path,
+    // not the pre-rename `.rar` that no longer exists.
+    let final_first: String = report_volumes
+        .first()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| archive_path.clone());
     // -z<file>: attach an archive comment through the editor role (the RAR
     // 1.3/1.4 and RAR 1.5/2.x comments were already queued before the first
     // member above).
@@ -1102,7 +1109,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                 password: crate::password::PasswordArgs {
                     password: password.clone(),
                 },
-                archive: archive_path.clone(),
+                archive: final_first.clone(),
             },
             misc,
         )?;
@@ -1113,7 +1120,7 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             password: crate::password::PasswordArgs {
                 password: password.clone(),
             },
-            archive: archive_path.clone(),
+            archive: final_first,
         })?;
     }
     Ok(())

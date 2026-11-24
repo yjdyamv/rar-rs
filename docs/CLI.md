@@ -187,9 +187,11 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
   first volume only, named like WinRAR names it: `{base}.exe` for a
   single-volume archive and `{base}.part1.exe` for a set (later volumes stay
   `{base}.partN.rar`); on Linux the first volume takes `.sfx` instead of `.exe`
-  (official `rar s` spelling). Both `-sfx` and `s` default to the **console**
-  stub (`WinCon.SFX` on Windows, `default.sfx` on Linux) so the archive
-  self-extracts headlessly; readers accept either spelling of part 1.
+  (official `rar s` spelling). Both `-sfx` and `s` default to the bundled
+  **console** self-extractor built next to `rar` (`rar-sfx`, so no WinRAR
+  install is needed; `RAR_SFX_STUB` overrides it), falling back to an official
+  console stub (`WinCon.SFX` / `default.sfx`); readers accept either spelling
+  of part 1.
 - `-z<file>` / `-c-` — comment file / no comment (`-z` is accepted and ignored
   outside the create and comment commands)
 
