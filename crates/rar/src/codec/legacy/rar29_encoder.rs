@@ -174,12 +174,6 @@ impl EncodeOptions {
         self
     }
 
-    #[allow(dead_code)] // kept: builder knob for the (unused) tuning surface
-    const fn with_max_match_distance(mut self, distance: usize) -> Self {
-        self.max_match_distance = distance;
-        self
-    }
-
     const fn with_block_size(mut self, bytes: usize) -> Self {
         self.block_size = Some(bytes);
         self

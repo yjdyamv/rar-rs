@@ -90,44 +90,6 @@ pub struct Rar15Decoder {
     old_dist_ptr: usize,
     last_dist: u32,
     last_length: u32,
-    #[cfg(test)]
-    token_stats: DecodeTokenStats,
-    #[cfg(test)]
-    old_distance_events: Vec<OldDistanceEvent>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default)]
-#[allow(dead_code)] // rars test-hook stats kept only for code parity
-struct DecodeTokenStats {
-    literals: u64,
-    st_literals: u64,
-    st_matches: u64,
-    st_match_bytes: u64,
-    short_matches: u64,
-    short_match_bytes: u64,
-    repeat_matches: u64,
-    repeat_match_bytes: u64,
-    old_distance_matches: u64,
-    old_distance_match_bytes: u64,
-    old_distance_codes: [u64; 4],
-    old_distance_near: u64,
-    old_distance_far: u64,
-    long_near_matches: u64,
-    long_near_match_bytes: u64,
-    long_far_matches: u64,
-    long_far_match_bytes: u64,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // rars test-hook event kept only for code parity
-struct OldDistanceEvent {
-    output_position: usize,
-    short_code: u32,
-    distance: u32,
-    length: u32,
-    max_dist3: u32,
 }
 
 impl Rar15Decoder {
@@ -173,10 +135,6 @@ impl Rar15Decoder {
             old_dist_ptr: 0,
             last_dist: 0,
             last_length: 0,
-            #[cfg(test)]
-            token_stats: DecodeTokenStats::default(),
-            #[cfg(test)]
-            old_distance_events: Vec::new(),
         };
         decoder.reset_non_solid();
         decoder
@@ -299,11 +257,6 @@ impl Rar15Decoder {
         if self.l_count == 2 {
             self.bits.add_bits(1);
             if bit_field >= 0x8000 {
-                #[cfg(test)]
-                {
-                    self.token_stats.repeat_matches += 1;
-                    self.token_stats.repeat_match_bytes += u64::from(self.last_length);
-                }
                 self.copy_string(self.last_dist, self.last_length, out)?;
                 return Ok(());
             }
@@ -339,11 +292,6 @@ impl Rar15Decoder {
         if length >= 9 {
             if length == 9 {
                 self.l_count += 1;
-                #[cfg(test)]
-                {
-                    self.token_stats.repeat_matches += 1;
-                    self.token_stats.repeat_match_bytes += u64::from(self.last_length);
-                }
                 self.copy_string(self.last_dist, self.last_length, out)?;
                 return Ok(());
             }
@@ -354,11 +302,6 @@ impl Rar15Decoder {
                 self.bits.add_bits(15);
                 self.last_length = length;
                 self.last_dist = distance;
-                #[cfg(test)]
-                {
-                    self.token_stats.short_matches += 1;
-                    self.token_stats.short_match_bytes += u64::from(length);
-                }
                 self.copy_string(distance, length, out)?;
                 return Ok(());
             }
@@ -380,24 +323,6 @@ impl Rar15Decoder {
             }
 
             self.remember_match(distance, length);
-            #[cfg(test)]
-            {
-                self.old_distance_events.push(OldDistanceEvent {
-                    output_position: self.output_written,
-                    short_code: save_length,
-                    distance,
-                    length,
-                    max_dist3: self.max_dist3,
-                });
-                self.token_stats.old_distance_matches += 1;
-                self.token_stats.old_distance_match_bytes += u64::from(length);
-                self.token_stats.old_distance_codes[(save_length - 10) as usize] += 1;
-                if distance <= 256 {
-                    self.token_stats.old_distance_near += 1;
-                } else {
-                    self.token_stats.old_distance_far += 1;
-                }
-            }
             self.copy_string(distance, length, out)?;
             return Ok(());
         }
@@ -417,11 +342,6 @@ impl Rar15Decoder {
         length += 2;
         distance += 1;
         self.remember_match(distance, length);
-        #[cfg(test)]
-        {
-            self.token_stats.short_matches += 1;
-            self.token_stats.short_match_bytes += u64::from(length);
-        }
         self.copy_string(distance, length, out)
     }
 
@@ -511,14 +431,6 @@ impl Rar15Decoder {
         }
 
         self.remember_match(distance, length);
-        #[cfg(test)]
-        if distance <= 256 {
-            self.token_stats.long_near_matches += 1;
-            self.token_stats.long_near_match_bytes += u64::from(length);
-        } else {
-            self.token_stats.long_far_matches += 1;
-            self.token_stats.long_far_match_bytes += u64::from(length);
-        }
         self.copy_string(distance, length, out)
     }
 
@@ -555,11 +467,6 @@ impl Rar15Decoder {
                 let mut distance = self.decode_num(self.bits.get_bits()?, 5, DEC_HF2, POS_HF2);
                 distance = (distance << 5) | (self.bits.get_bits()? >> 11);
                 self.bits.add_bits(5);
-                #[cfg(test)]
-                {
-                    self.token_stats.st_matches += 1;
-                    self.token_stats.st_match_bytes += u64::from(length);
-                }
                 self.copy_string(distance, length, out)?;
                 return Ok(());
             }
@@ -580,12 +487,6 @@ impl Rar15Decoder {
         }
 
         let byte = (self.ch_set[byte_place as usize] >> 8) as u8;
-        #[cfg(test)]
-        if self.st_mode {
-            self.token_stats.st_literals += 1;
-        } else {
-            self.token_stats.literals += 1;
-        }
         self.put_byte(byte, out)?;
 
         let idx = byte_place as usize;

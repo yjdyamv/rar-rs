@@ -237,7 +237,8 @@ impl LongRange {
         self.table.clear();
     }
 
-    /// Current history length in bytes (≤ [`LONG_RANGE_MAX`]).
+    /// Current history length in bytes (≤ [`LONG_RANGE_MAX`]). Assertions in
+    /// this module's tests read it; nothing on the encode path does.
     #[allow(dead_code)]
     pub fn hist_len(&self) -> usize {
         self.hist.len()
@@ -252,6 +253,9 @@ impl LongRange {
     /// `min_dist` skips candidates the near match finder already covers
     /// (distances up to tail + chunk); candidates beyond `self.window`
     /// are rejected (the decoder window could not reach them).
+    ///
+    /// Only this module's tests probe the long-range finder directly; the
+    /// chunked encoder reaches history through [`Self::extend`].
     #[allow(dead_code)]
     pub fn find(
         &self,

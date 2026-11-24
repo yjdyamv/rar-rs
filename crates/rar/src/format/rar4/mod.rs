@@ -89,7 +89,6 @@ pub(crate) const FHD_SPLIT_AFTER: u16 = 0x0002;
 pub(crate) const MHD_PASSWORD: u16 = 0x0080;
 
 /// Main header flag: this is a multi-volume archive.
-#[allow(dead_code)]
 pub(crate) const MHD_VOLUME: u16 = 0x0001;
 
 /// Main header flag: the main header carries an embedded comment block.
@@ -98,11 +97,9 @@ pub(crate) const MHD_VOLUME: u16 = 0x0001;
 pub(crate) const MHD_COMMENT: u16 = 0x0002;
 
 /// Main header flag: this is the first volume of a multi-volume set.
-#[allow(dead_code)]
 pub(crate) const MHD_FIRSTVOLUME: u16 = 0x0100;
 
 /// Main header flag: archive is solid (all members share one LZ window).
-#[allow(dead_code)]
 pub(crate) const MHD_SOLID: u16 = 0x0008;
 
 /// Main header flag: the archive is locked (read-only); any edit is

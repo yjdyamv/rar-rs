@@ -55,7 +55,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Second P1 gate: after the stream is written, what does a descent-cost
 /// *read* pattern cost — inside one 64 KiB block's slice (512 KiB of tables,
 /// L2/L3 resident) versus against the whole-member table (108 MB, cold)?
-#[allow(dead_code)]
 fn probe_reads(data: &[u8], block: usize, lookups: usize) -> (f64, f64) {
     let n = data.len().saturating_sub(8);
     let mut hashes = vec![0u32; n];

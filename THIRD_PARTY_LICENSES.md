@@ -17,8 +17,9 @@ rather than folded into that field, so a redistributor has to satisfy both.
 Ported from [bitplane/rars](https://github.com/bitplane/rars) at revision
 `c08a17b`, licensed `Apache-2.0`.
 Each file states this in its own header, and the table records which upstream
-file it came from. The upstream files have **not** been diffed against a
-checked-out `rars` repository, so treat a row as the in-tree claim.
+file it came from. A row is the in-tree claim: the port is checked
+behaviourally against official WinRAR, not line-by-line against a checked-out
+`rars` tree.
 
 | Our file                                                 | Upstream (`rars` @ `c08a17b`)                                             |
 | -------------------------------------------------------- | ------------------------------------------------------------------------- |

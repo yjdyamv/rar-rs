@@ -1785,16 +1785,6 @@ impl PpmdEncoder {
         Ok(())
     }
 
-    #[allow(dead_code)] // VM-filter records arrive with auto-filter support
-    pub(crate) fn encode_vm_filter_record(&mut self, record: &[u8]) -> Result<()> {
-        self.model.encode_symbol(self.esc_char, &mut self.range)?;
-        self.model.encode_symbol(3, &mut self.range)?;
-        for &byte in record {
-            self.model.encode_symbol(byte, &mut self.range)?;
-        }
-        Ok(())
-    }
-
     /// Bits spent so far, to fractional precision. log2 of the range register
     /// falls as symbols narrow the interval and rises by eight for every byte
     /// normalisation flushes, so the difference between two readings is the

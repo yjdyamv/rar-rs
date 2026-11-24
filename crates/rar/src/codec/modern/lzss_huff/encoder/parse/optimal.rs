@@ -306,7 +306,6 @@ where
 pub(super) static PRICE_CARRY_DISABLED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(all(test, feature = "parallel"))]
-#[allow(dead_code)]
 pub(crate) fn set_price_carry_enabled(enabled: bool) {
     PRICE_CARRY_DISABLED.store(!enabled, Ordering::Relaxed);
 }

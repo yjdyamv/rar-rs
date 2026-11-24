@@ -8,12 +8,6 @@
 //!
 //! Audio blocks are emitted verbatim like rars.
 
-// Reference-implementation parity surface: the rars-port entry points
-// (literals-only encoders, progress hooks, tuning knobs) are kept verbatim
-// even where this pipeline does not call them yet.
-// The unused rars-parity entry points carry individual `allow(dead_code)`
-// annotations so *new* dead code in this module is still reported.
-
 use std::io::{Read, Write};
 
 use crate::codec::common::bitstream::BitWriter;
@@ -32,8 +26,6 @@ const LEVEL_COUNT: usize = 19;
 const TABLE_COUNT: usize = MAIN_COUNT + OFFSET_COUNT + LENGTH_COUNT;
 const AUDIO_COUNT: usize = 257;
 const MAX_CHANNELS: usize = 4;
-#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-const OLD_LEVEL_COUNT: usize = AUDIO_COUNT * MAX_CHANNELS;
 const MAX_HISTORY: usize = 1024 * 1024;
 
 const OFFSET_BASES: [usize; OFFSET_COUNT] = [
@@ -84,16 +76,6 @@ impl EncodeOptions {
         }
     }
 
-    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-    pub const fn with_max_match_distance(mut self, distance: usize) -> Self {
-        self.max_match_distance = if distance > MAX_ENCODER_MATCH_OFFSET {
-            MAX_ENCODER_MATCH_OFFSET
-        } else {
-            distance
-        };
-        self
-    }
-
     pub const fn with_lazy_matching(mut self, enabled: bool) -> Self {
         self.lazy_matching = enabled;
         self
@@ -133,11 +115,6 @@ pub struct Unpack20Encoder {
 }
 
 impl Unpack20Encoder {
-    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn with_options(options: EncodeOptions) -> Self {
         Self {
             history: Vec::new(),
@@ -148,15 +125,6 @@ impl Unpack20Encoder {
 
     pub fn encode_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
         self.encode_member_inner(input, None)
-    }
-
-    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-    pub(crate) fn encode_member_with_progress(
-        &mut self,
-        input: &[u8],
-        progress: &mut dyn FnMut(usize) -> bool,
-    ) -> RarResult<Vec<u8>> {
-        self.encode_member_inner(input, Some(progress))
     }
 
     fn encode_member_inner(
@@ -193,13 +161,8 @@ impl Unpack20Encoder {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Free functions (public entry points kept from rars)
+//  Free functions
 // ═══════════════════════════════════════════════════════════════════════════
-
-#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-pub fn unpack20_encode_literals(input: &[u8]) -> RarResult<Vec<u8>> {
-    unpack20_encode_literals_with_options(input, EncodeOptions::default())
-}
 
 pub fn unpack20_encode_literals_with_options(
     input: &[u8],
@@ -208,7 +171,6 @@ pub fn unpack20_encode_literals_with_options(
     encode_member(input, &[], None, options, None)
 }
 
-#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
 pub fn unpack20_encode_auto(input: &[u8]) -> RarResult<Vec<u8>> {
     unpack20_encode_auto_with_options(input, EncodeOptions::default())
 }
@@ -219,27 +181,6 @@ pub fn unpack20_encode_auto_with_options(
 ) -> RarResult<Vec<u8>> {
     let lz = unpack20_encode_literals_with_options(input, options)?;
     let mut best = lz;
-    if options.try_audio {
-        for channels in 1..=MAX_CHANNELS {
-            if input.len() < channels * 64 {
-                continue;
-            }
-            let audio = encode_audio_member(input, channels)?;
-            if audio.len() < best.len() {
-                best = audio;
-            }
-        }
-    }
-    Ok(best)
-}
-
-#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-pub(crate) fn unpack20_encode_auto_with_options_and_progress(
-    input: &[u8],
-    options: EncodeOptions,
-    progress: &mut dyn FnMut(usize) -> bool,
-) -> RarResult<Vec<u8>> {
-    let mut best = encode_member(input, &[], None, options, Some(progress))?;
     if options.try_audio {
         for channels in 1..=MAX_CHANNELS {
             if input.len() < channels * 64 {

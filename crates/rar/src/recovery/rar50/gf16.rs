@@ -122,11 +122,6 @@ impl Gf16 {
         }
     }
 
-    #[allow(dead_code)] // rars GF(2^16) parity: add is implied by xor in our callers
-    pub fn add(&self, left: u16, right: u16) -> u16 {
-        left ^ right
-    }
-
     pub fn mul(&self, left: u16, right: u16) -> u16 {
         if left == 0 || right == 0 {
             return 0;
@@ -142,8 +137,9 @@ impl Gf16 {
         let index = FIELD_SIZE as u32 - self.log[value as usize];
         Ok(self.exp[index as usize])
     }
-
-    #[allow(dead_code)] // rars GF(2^16) parity: our callers multiply by inverses
+    /// Only `crates/rar/src/archive/tests.rs` divides (it re-inverts the Cauchy
+    /// matrix to check the encoder's cached inverses); the encoder multiplies.
+    #[allow(dead_code)]
     pub fn div(&self, numerator: u16, denominator: u16) -> Result<u16> {
         Ok(self.mul(numerator, self.inv(denominator)?))
     }

@@ -41,6 +41,14 @@ the three trees, and an entirely undocumented public surface (the items were
    but low-level — the typed role facades remain the recommended path.
 4. Code that only existed for the retired surface is deleted; the remaining
    rars-parity helpers carry targeted `#[allow(dead_code)]` comments.
+   *Revised 2026-11-24*: the second clause no longer holds. Upstream diffing was
+   dropped — the oracle is official WinRAR, not a checked-out `rars` tree — so
+   an entry point with no in-tree caller has no reason to survive, and those
+   helpers were deleted. The blanket annotations had also outlived their
+   subject: `unpack20_encode_auto` was annotated dead while
+   `crates/rar/src/format/rar4/comment.rs` calls it, which is why a caller-less
+   `allow(dead_code)` in this tree is now treated as a signal to check the
+   callers, not to trust the label.
 
 ## Consequences
 

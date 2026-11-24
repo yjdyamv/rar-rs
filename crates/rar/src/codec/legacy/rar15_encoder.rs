@@ -8,12 +8,6 @@
 //! decoder keeps them. The write pipeline (headers, encryption, multi-volume
 //! splitting) is the caller's job.
 
-// Reference-implementation parity surface: the rars-port entry points
-// (literals-only encoders, progress hooks, tuning knobs) are kept verbatim
-// even where this pipeline does not call them yet.
-// The unused rars-parity entry points carry individual `allow(dead_code)`
-// annotations so *new* dead code in this module is still reported.
-
 use crate::codec::common::bitstream::BitWriter;
 use crate::error::{RarError, RarResult};
 
@@ -142,18 +136,6 @@ pub fn unpack15_encode_with_options(input: &[u8], options: EncodeOptions) -> Rar
     encoder.encode_member(input)
 }
 
-#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-pub(crate) fn unpack15_encode_with_options_and_progress(
-    input: &[u8],
-    options: EncodeOptions,
-    progress: &mut dyn FnMut(usize) -> bool,
-) -> RarResult<Vec<u8>> {
-    if input.is_empty() {
-        return Ok(Vec::new());
-    }
-    Unpack15Encoder::with_options(options).encode_member_with_progress(input, progress)
-}
-
 pub struct Unpack15Encoder {
     bits: BitWriter,
     options: EncodeOptions,
@@ -219,11 +201,6 @@ impl EncodeOptions {
         self.max_long_match_distance = distance;
         self
     }
-
-    #[allow(dead_code)] // kept: public surface of the write options
-    pub const fn old_distance_tokens_enabled(self) -> bool {
-        self.old_distance_tokens
-    }
 }
 
 impl Default for EncodeOptions {
@@ -267,82 +244,8 @@ impl Unpack15Encoder {
         encoder
     }
 
-    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-    pub fn encode_literals_only(mut self, input: &[u8]) -> RarResult<Vec<u8>> {
-        self.encode_literals_only_member(input)
-    }
-
-    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-    fn encode_literals_only_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
-        if input.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.bits = BitWriter::new();
-        let mut pos = 0usize;
-        let mut straddle: Option<Straddle> = None;
-        while pos < input.len() || straddle.is_some() {
-            let mut flags = 0u8;
-            let mut flag_bits = 0usize;
-            let mut payloads = Vec::new();
-            let mut plan_nhfb = self.nhfb;
-            let mut plan_nlzb = self.nlzb;
-            let mut plan_num_huf = self.num_huf;
-            let mut group_enters_stmode = false;
-
-            if let Some(carried) = straddle.take() {
-                write_planned_flag_bits(&mut flags, 0, carried.rest);
-                flag_bits = carried.rest.len();
-                payloads.push(carried.token);
-                plan_num_huf += 1;
-                plan_huff_effect(&mut plan_nhfb, &mut plan_nlzb);
-            }
-
-            while flag_bits < 8 && pos < input.len() {
-                let flag = huff_flag_bits(plan_nlzb <= plan_nhfb);
-                if flag_bits + flag.len() > 8 {
-                    straddle = Some(split_flag(
-                        &mut flags,
-                        flag_bits,
-                        flag,
-                        EncodedToken::Literal(input[pos]),
-                    ));
-                    pos += 1;
-                    break;
-                }
-                write_planned_flag_bits(&mut flags, flag_bits, flag);
-                payloads.push(EncodedToken::Literal(input[pos]));
-                flag_bits += flag.len();
-                if flag_bits == 8 && plan_num_huf >= 16 && pos + 1 < input.len() {
-                    group_enters_stmode = true;
-                }
-                plan_num_huf += 1;
-                pos += 1;
-                plan_huff_effect(&mut plan_nhfb, &mut plan_nlzb);
-            }
-
-            self.emit_flags_byte(flags)?;
-            self.emit_payloads(payloads)?;
-            if group_enters_stmode {
-                if self.options.stmode_literal_runs {
-                    self.emit_stmode_literal_run(input, None, &mut pos)?;
-                }
-                self.emit_stmode_exit()?;
-            }
-        }
-        Ok(std::mem::take(&mut self.bits).into_bytes())
-    }
-
     pub fn encode_member(&mut self, input: &[u8]) -> RarResult<Vec<u8>> {
         self.encode_member_inner(input, None)
-    }
-
-    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-    pub(crate) fn encode_member_with_progress(
-        &mut self,
-        input: &[u8],
-        progress: &mut dyn FnMut(usize) -> bool,
-    ) -> RarResult<Vec<u8>> {
-        self.encode_member_inner(input, Some(progress))
     }
 
     /// Snapshot the persistent solid-chain state for a trial encode: every
@@ -792,43 +695,6 @@ impl Unpack15Encoder {
             .position(|&value| (value >> 8) as u8 == byte)
             .ok_or_else(|| enc_err("RAR 1.3 stmode literal is not encodable"))?;
         self.emit_literal_place(byte_place + 1, byte_place, false)
-    }
-
-    #[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-    fn emit_stmode_literal_run(
-        &mut self,
-        input: &[u8],
-        buckets: Option<&Rar13MatchFinder>,
-        pos: &mut usize,
-    ) -> RarResult<()> {
-        while *pos + 1 < input.len() {
-            if buckets
-                .and_then(|buckets| {
-                    find_lz_token(
-                        input,
-                        *pos,
-                        buckets,
-                        LzPlanState {
-                            last_dist: self.last_dist,
-                            last_length: self.last_length,
-                            old_dist: self.old_dist,
-                            old_dist_ptr: self.old_dist_ptr,
-                            max_dist3: self.max_dist3,
-                            nlzb: self.nlzb,
-                            nhfb: self.nhfb,
-                            l_count: self.l_count,
-                        },
-                        self.options,
-                    )
-                })
-                .is_some()
-            {
-                break;
-            }
-            self.emit_stmode_literal(input[*pos])?;
-            *pos += 1;
-        }
-        Ok(())
     }
 
     fn emit_literal_place(
@@ -1331,15 +1197,6 @@ fn write_planned_flag_bits(flags: &mut u8, start: usize, bits: &[bool]) {
 
 fn flag_fits(used: usize, flag: &[bool]) -> bool {
     used + flag.len() <= 8
-}
-
-#[allow(dead_code)] // rars parity surface (unused entry point; see module header)
-fn plan_huff_effect(nhfb: &mut u32, nlzb: &mut u32) {
-    *nhfb += 16;
-    if *nhfb > 0xff {
-        *nhfb = 0x90;
-        *nlzb >>= 1;
-    }
 }
 
 fn l_count_break_bit_cost(l_count: u32) -> usize {
