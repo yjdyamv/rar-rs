@@ -1,6 +1,6 @@
 # rar-rs
 
-> Last verified: 2026-11-24 @ `b1d5924`; implementation details are
+> Last verified: 2026-11-25 @ `6c6803d8`; implementation details are
 > authoritative in the source.
 
 **Pure-Rust RAR archive library and command-line tools.** Create, read, extract,

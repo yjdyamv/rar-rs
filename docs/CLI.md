@@ -1,6 +1,6 @@
 # Command-Line Reference
 
-> Last verified: 2026-11-24 @ `b1d5924`; switch coverage is checked against the
+> Last verified: 2026-11-25 @ `6c6803d8`; switch coverage is checked against the
 > clap surface, behavior against the tests and the official WinRAR 7.23 tools,
 > and the exit-code table against `src/error.rs`.
 

@@ -1,6 +1,6 @@
 # 架构与模块布局
 
-> 最后核对：2026-11-24 @ `b1d5924`；实现细节以源码为准。
+> 最后核对：2026-11-25 @ `6c6803d8`；实现细节以源码为准。
 
 库 crate `crates/rar`（crate 名 `rar-rs`）的模块地图与设计不变量。
 
@@ -34,7 +34,7 @@ version`，`crates/rar-napi/package.json` 的 `version`，以及根 `Cargo.toml`
 
 改版本号还要刷新 `Cargo.lock` 与 `fuzz/Cargo.lock`（两个 CI 检查都带
 `--locked`）。五者一致由 `check` job 的 "Workspace versions agree"
-步骤守住。**当前同为 `0.16.1`。**
+步骤守住。**当前同为 `0.17.0`。**
 
 ## 2 · 模块地图
 
