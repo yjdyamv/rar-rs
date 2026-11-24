@@ -38,28 +38,44 @@ pub(crate) const RAR_CLI: &str = env!("CARGO_BIN_EXE_rar");
 /// 8 MiB SFX scan window (the archive sits right after the stub), while the
 /// stripped release build is a few MiB. LTO is disabled for this one build so
 /// the stub appears quickly; `strip` still keeps it small.
+///
+/// Built for the test suite's own target: CI runs this suite under
+/// `--target i686-unknown-linux-gnu`, where a host-architecture stub would
+/// neither be found (cargo nests it under the triple directory) nor run.
 pub(crate) fn sfx_stub() -> &'static str {
     static STUB: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     STUB.get_or_init(|| {
-        let status = std::process::Command::new(env!("CARGO"))
-            .args([
-                "build",
-                "--release",
-                "--locked",
-                "--config",
-                "profile.release.lto=false",
-                "-p",
-                "rar-cli",
-                "--bin",
-                "rar-sfx",
-            ])
+        let debug_bin = std::path::Path::new(env!("CARGO_BIN_EXE_rar"));
+        let profile_dir = debug_bin
+            .parent()
+            .expect("the rar binary's debug directory");
+        // `<target>/<triple>/debug` under an explicit `--target`, `<target>/debug`
+        // otherwise; only the former needs the nested build to repeat the triple.
+        let cross = profile_dir
+            .parent()
+            .and_then(std::path::Path::file_name)
+            .is_some_and(|name| name == std::ffi::OsStr::new(env!("RAR_SFX_TARGET")));
+        let mut command = std::process::Command::new(env!("CARGO"));
+        command.args([
+            "build",
+            "--release",
+            "--locked",
+            "--config",
+            "profile.release.lto=false",
+            "-p",
+            "rar-cli",
+            "--bin",
+            "rar-sfx",
+        ]);
+        if cross {
+            command.args(["--target", env!("RAR_SFX_TARGET")]);
+        }
+        let status = command
             .status()
             .expect("run cargo build for the rar-sfx stub");
         assert!(status.success(), "building the release rar-sfx stub failed");
-        let debug_bin = std::path::Path::new(env!("CARGO_BIN_EXE_rar"));
-        let target = debug_bin
+        let target = profile_dir
             .parent()
-            .and_then(|dir| dir.parent())
             .expect("target directory above the debug binaries");
         target
             .join("release")
