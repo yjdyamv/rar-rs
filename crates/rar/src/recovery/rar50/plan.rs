@@ -53,20 +53,17 @@ pub fn plan_inline_recovery(
     archive_size: u64,
     recovery_percent: u64,
 ) -> Result<InlineRecoveryPlan> {
-    // RAR5's inline record is sized as a percent of the data shards, and the
-    // format never carries more recovery shards than data shards (mirrors
-    // WinRAR; FORMAT §9: `recovery_shards <= data_shards`), so the percent
-    // saturates at 100% — a request above it is accepted but yields the same
-    // full-protection record as 100%. Keeping the clamp explicit also bounds
-    // the arithmetic below.
-    let pct = recovery_percent.min(100);
     let data_shards = if archive_size >= 200 * KIB {
         MAX_WINRAR602_DATA_SHARDS
     } else {
         archive_size.div_ceil(KIB).max(1)
     };
-    let mut recovery_shards = (2 * pct * data_shards) / 200;
-    recovery_shards = recovery_shards.min(data_shards);
+    // WinRAR sizes the record as `pct` percent of the data shards and does NOT
+    // cap the result at the data-shard count: `-rr150` over 200 data shards
+    // writes 300 recovery shards, `-rr200` writes 400 (verified against 7.30),
+    // so the parity may legitimately exceed the data. The u16 shard-count
+    // fields and the GF(2^16) field bound it further upstream.
+    let mut recovery_shards = (2 * recovery_percent * data_shards) / 200;
     if recovery_shards == 0 && archive_size < 200 * KIB {
         recovery_shards = 1;
     }

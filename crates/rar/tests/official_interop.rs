@@ -661,6 +661,106 @@ fn official_unrar_validates_our_feature_archives() {
     }
 }
 
+/// RAR5 sizes its inline recovery record as a percent of the data shards and,
+/// like WinRAR, does NOT cap it at the data-shard count: `-rr150` writes 300
+/// recovery shards over 200 data shards, so the parity exceeds the data. Both
+/// directions must interoperate.
+#[test]
+fn official_unrar_validates_above_hundred_percent_recovery() {
+    let unrar = match std::env::var_os("SA_OFFICIAL_UNRAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let rar = match std::env::var_os("SA_OFFICIAL_RAR") {
+        Some(p) => p,
+        None => return skip_official(),
+    };
+    let dir = make_temp_dir();
+    let payload: Vec<u8> = (0..2 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir.path().join("payload.bin"), &payload).unwrap();
+
+    // Ours at 150%: official unrar validates it, and official `rar r` repairs a
+    // corrupted copy using the over-100% record.
+    let ours = dir.path().join("ours150.rar");
+    {
+        let mut ar = rar_rs::ArchiveWriter::create_with(
+            &ours,
+            rar_rs::WriterOptions::default().recovery_percent(150),
+        )
+        .unwrap();
+        ar.add_bytes("payload.bin", &payload, EntryWriteOptions::new())
+            .unwrap();
+        ar.finish().unwrap();
+    }
+    assert!(
+        std::process::Command::new(&unrar)
+            .arg("t")
+            .arg(&ours)
+            .status()
+            .unwrap()
+            .success(),
+        "official unrar rejected our 150% recovery archive"
+    );
+    let mut bytes = std::fs::read(&ours).unwrap();
+    let data_off = first_file_data_offset(&bytes);
+    for (i, byte) in bytes[data_off + 5..data_off + 13].iter_mut().enumerate() {
+        *byte ^= (i as u8).wrapping_add(0xA5);
+    }
+    std::fs::write(&ours, &bytes).unwrap();
+    assert!(
+        std::process::Command::new(&rar)
+            .args(["r", "-idq"])
+            .arg(&ours)
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success(),
+        "official rar could not repair our 150% recovery record"
+    );
+    let fixed = dir.path().join(format!(
+        "fixed.{}",
+        ours.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(fixed.exists(), "official rar did not produce {fixed:?}");
+    assert!(
+        std::process::Command::new(&unrar)
+            .arg("t")
+            .arg(&fixed)
+            .status()
+            .unwrap()
+            .success(),
+        "repaired 150% archive still fails official unrar test"
+    );
+
+    // Official at 150%: we read it, and our repair restores a corrupted copy.
+    let official = dir.path().join("official150.rar");
+    assert!(
+        std::process::Command::new(&rar)
+            .args(["a", "-idq", "-m0", "-rr150"])
+            .arg(&official)
+            .arg("payload.bin")
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success(),
+        "official rar could not create a 150% recovery archive"
+    );
+    let mut reader = rar_rs::ArchiveReader::open(&official).unwrap();
+    let id = reader.unique_entry("payload.bin").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), payload);
+    let mut obytes = std::fs::read(&official).unwrap();
+    let o_off = first_file_data_offset(&obytes);
+    for (i, byte) in obytes[o_off + 5..o_off + 13].iter_mut().enumerate() {
+        *byte ^= (i as u8).wrapping_add(0x5A);
+    }
+    std::fs::write(&official, &obytes).unwrap();
+    let repaired = dir.path().join("repaired-official.rar");
+    rar_rs::repair_archive_path(&official, &repaired).unwrap();
+    let mut reader = rar_rs::ArchiveReader::open(&repaired).unwrap();
+    let id = reader.unique_entry("payload.bin").unwrap();
+    assert_eq!(reader.read_entry(id).unwrap(), payload);
+}
+
 /// rar-rs reads archives created by the official RAR binary (solid,
 /// BLAKE2sp, header encryption, recovery records).
 #[test]

@@ -542,7 +542,7 @@ flowchart TD
               <div class="flex justify-between"><span>0x3e</span><span class="text-slate-400">shard_index (u16)</span></div>
               <div class="rounded deep text-slate-100 px-2 py-1 mt-1">… 8×N 状态表 + 奇偶数据 (group_count 字节)</div>
             </div>
-            <p class="text-xs text-slate-500 mt-2">规划：受保护前缀 ≥ 200 KiB 时 data_shards = 200；否则 <span class="mono">ceil(prefix/1 KiB)</span>。recovery_shards = <span class="mono">2·pct·data_shards/200</span>（≥1, ≤data_shards）。group_count = <span class="mono">2×ceil(prefix/(2·data_shards))</span>（偶数）。修复：找损坏分片（CRC64 状态不符），在 GF 上解缺失字节；无损坏原样返回。</p>
+            <p class="text-xs text-slate-500 mt-2">规划：受保护前缀 ≥ 200 KiB 时 data_shards = 200；否则 <span class="mono">ceil(prefix/1 KiB)</span>。recovery_shards = <span class="mono">2·pct·data_shards/200</span>（≥1；pct &gt; 100 时可超过 data_shards，与 WinRAR 7.30 实测一致）。group_count = <span class="mono">2×ceil(prefix/(2·data_shards))</span>（偶数）。修复：找损坏分片（CRC64 状态不符），在 GF 上解缺失字节；无损坏原样返回。</p>
           </div>
           <div class="rounded-xl border border-slate-200 bg-white p-5">
             <p class="tag text-slate-400 mb-2">9.1 GF(2¹⁶) Cauchy</p>

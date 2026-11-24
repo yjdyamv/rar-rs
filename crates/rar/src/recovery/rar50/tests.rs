@@ -43,7 +43,8 @@ fn rar5_inline_recovery_plan_matches_fixture_formula_examples() {
 }
 
 #[test]
-fn rar5_inline_recovery_plan_handles_clamps_and_large_prefixes() {
+fn rar5_inline_recovery_plan_honors_above_a_hundred_percent() {
+    // `0%` still floors to a single shard on a tiny archive.
     assert_eq!(
         plan_inline_recovery(0, 0).unwrap(),
         InlineRecoveryPlan {
@@ -54,11 +55,14 @@ fn rar5_inline_recovery_plan_handles_clamps_and_large_prefixes() {
             shard_size: 80,
         }
     );
+    // `pct` above 100 is NOT capped at the data-shard count: 1000% of 200 data
+    // shards is 2000 recovery shards (WinRAR 7.30 writes 300/400 for -rr150
+    // /-rr200 over 200 data shards), so the parity may exceed the data.
     assert_eq!(
         plan_inline_recovery(200 * 1024, 1000).unwrap(),
         InlineRecoveryPlan {
             data_shards: 200,
-            recovery_shards: 200,
+            recovery_shards: 2000,
             group_count: 1024,
             header_size: 1672,
             shard_size: 2696,

@@ -717,12 +717,12 @@ pub(super) fn parse_inline_recovery_chunk(input: &[u8]) -> Result<InlineRecovery
     {
         return Err(Error::BadRecoveryChunk);
     }
-    // A shard cannot be much larger than the data it protects, and its parity is
-    // at most that data as well. Both fields are cross-checked against each
-    // other above, which a CRC-valid record with hostile geometry can satisfy
-    // while claiming a shard of many TiB; the shard buffers are sized from them,
-    // so without this bound the repair path aborts on the allocation instead of
-    // reporting a bad chunk. Found by the `recovery` fuzz target.
+    // A shard cannot be much larger than the data it protects. Both fields are
+    // cross-checked against each other above, which a CRC-valid record with
+    // hostile geometry can satisfy while claiming a shard of many TiB; the
+    // shard buffers are sized from them, so without this bound the repair path
+    // aborts on the allocation instead of reporting a bad chunk. Found by the
+    // `recovery` fuzz target.
     //
     // The bound deliberately spans the whole shard rather than this one chunk: a
     // shard is carried by `blocks_per_shard()` chunks, each holding only its own
