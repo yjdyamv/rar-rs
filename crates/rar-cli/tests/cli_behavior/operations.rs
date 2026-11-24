@@ -389,6 +389,12 @@ fn cli_or_auto_renames_colliding_destinations() {
     );
 }
 
+/// SFX archives take the platform's executable extension (`.exe` on Windows,
+/// `.sfx` elsewhere), matching official `rar s`.
+fn sfx_ext() -> &'static str {
+    if cfg!(windows) { "exe" } else { "sfx" }
+}
+
 /// `rar s` converts an archive to SFX (prepending an SFX module) and `rar s-`
 /// strips it back; the resulting `.exe` must still extract byte-identically.
 /// A self-made module keeps the test independent of a WinRAR installation.
@@ -417,8 +423,8 @@ fn cli_sfx_roundtrip_with_module() {
         .status()
         .unwrap();
     assert!(status.success(), "s must convert the archive to SFX");
-    let sfx = dir.path().join("base.exe");
-    assert!(sfx.exists(), "base.exe must be created");
+    let sfx = dir.path().join(format!("base.{}", sfx_ext()));
+    assert!(sfx.exists(), "the SFX archive must be created");
     let sfx_len = std::fs::metadata(&sfx).unwrap().len();
     assert!(sfx_len > std::fs::metadata(&archive).unwrap().len());
 
@@ -439,7 +445,7 @@ fn cli_sfx_roundtrip_with_module() {
     // `rar s-` strips the module back to a plain archive.
     let status = std::process::Command::new(RAR_CLI)
         .args(["s-"])
-        .arg("base.exe")
+        .arg(format!("base.{}", sfx_ext()))
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -503,7 +509,8 @@ fn cli_sfx_refuses_to_clobber_existing_exe() {
         .unwrap();
     assert!(status.success());
 
-    std::fs::write(dir.path().join("base.exe"), b"EXISTING-PROGRAM").unwrap();
+    let sfx_path = dir.path().join(format!("base.{}", sfx_ext()));
+    std::fs::write(&sfx_path, b"EXISTING-PROGRAM").unwrap();
     let status = std::process::Command::new(RAR_CLI)
         .args(["s", "--sfx-module"])
         .arg(&module)
@@ -516,9 +523,9 @@ fn cli_sfx_refuses_to_clobber_existing_exe() {
         "s must refuse to clobber an existing .exe"
     );
     assert_eq!(
-        std::fs::read(dir.path().join("base.exe")).unwrap(),
+        std::fs::read(&sfx_path).unwrap(),
         b"EXISTING-PROGRAM",
-        "the existing .exe must be untouched"
+        "the existing executable must be untouched"
     );
 
     let status = std::process::Command::new(RAR_CLI)
@@ -529,10 +536,7 @@ fn cli_sfx_refuses_to_clobber_existing_exe() {
         .status()
         .unwrap();
     assert!(status.success(), "s -y must overwrite");
-    assert_ne!(
-        std::fs::read(dir.path().join("base.exe")).unwrap(),
-        b"EXISTING-PROGRAM"
-    );
+    assert_ne!(std::fs::read(&sfx_path).unwrap(), b"EXISTING-PROGRAM");
 }
 
 /// `rar s`/`s-` round-trips a RAR 1.5-4.x archive too: `s-` must find the
@@ -561,7 +565,8 @@ fn cli_sfx_roundtrip_rar4() {
     assert!(status.success());
     std::fs::remove_file(dir.path().join("base.rar")).unwrap();
     let status = std::process::Command::new(RAR_CLI)
-        .args(["s-", "base.exe"])
+        .args(["s-"])
+        .arg(format!("base.{}", sfx_ext()))
         .current_dir(dir.path())
         .status()
         .unwrap();

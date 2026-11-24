@@ -122,16 +122,17 @@ fn part_volume_base(name: &OsStr) -> Option<(OsString, usize)> {
         .map(|(base, width)| (OsString::from(base), width))
 }
 
-/// Strip a trailing `.rar`, `.rev` or `.exe` extension (ASCII
-/// case-insensitive) from raw bytes. `.exe` is WinRAR's SFX first volume
-/// (`{base}.part1.exe`).
+/// Strip a trailing `.rar`, `.rev`, `.exe` or `.sfx` extension (ASCII
+/// case-insensitive) from raw bytes. `.exe`/`.sfx` are the SFX first volume
+/// (`{base}.part1.exe` on Windows, `{base}.part1.sfx` elsewhere).
 #[cfg(unix)]
 fn strip_archive_extension_bytes(name: &[u8]) -> Option<&[u8]> {
     let stem_len = name.len().checked_sub(4)?;
     let extension = &name[stem_len..];
     (extension.eq_ignore_ascii_case(b".rar")
         || extension.eq_ignore_ascii_case(b".rev")
-        || extension.eq_ignore_ascii_case(b".exe"))
+        || extension.eq_ignore_ascii_case(b".exe")
+        || extension.eq_ignore_ascii_case(b".sfx"))
     .then(|| &name[..stem_len])
 }
 
@@ -208,20 +209,26 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
     let index = SiblingIndex::new(scan_dir);
 
     // Match .partN.rar naming (zero-padded or not). An SFX set keeps the
-    // module on its first volume, which WinRAR names `{base}.part1.exe`;
-    // that spelling is used for part 1 whenever the plain `.part1.rar` is
-    // absent, so any starting volume (and the base name) resolves the set.
+    // module on its first volume, named `{base}.part1.exe` on Windows and
+    // `{base}.part1.sfx` elsewhere; that spelling is used for part 1 whenever
+    // the plain `.part1.rar` is absent, so any starting volume (and the base
+    // name) resolves the set.
     if let Some((base, width)) = part_volume_base(file_name) {
         let first_volume = |width: usize| -> Option<PathBuf> {
             let rar = part_volume_path(parent, &base, 1, width);
             if let Some(volume) = index.resolve(&rar) {
                 return Some(volume);
             }
-            let exe = parent.join(with_name_suffix(
-                &base,
-                &format!(".part{:0width$}.exe", 1, width = width),
-            ));
-            index.resolve(&exe)
+            for extension in ["exe", "sfx"] {
+                let sfx = parent.join(with_name_suffix(
+                    &base,
+                    &format!(".part{:0width$}.{extension}", 1, width = width),
+                ));
+                if let Some(volume) = index.resolve(&sfx) {
+                    return Some(volume);
+                }
+            }
+            None
         };
         let mut volumes = Vec::new();
         let mut n = 1u64;
@@ -303,13 +310,16 @@ pub fn discover_volumes(path: &Path) -> Vec<PathBuf> {
         {
             return discover_volumes(&part1);
         }
-        // An SFX set's first volume is `{base}.part1.exe`; a caller naming
-        // the base (`set.rar`) must still find it.
-        let part1_exe = parent.join(with_name_suffix(stem, ".part1.exe"));
-        if let Some(part1) = index.resolve(&part1_exe)
-            && part1 != path
-        {
-            return discover_volumes(&part1);
+        // An SFX set's first volume is `{base}.part1.exe` (Windows) or
+        // `{base}.part1.sfx` (elsewhere); a caller naming the base
+        // (`set.rar`) must still find it.
+        for extension in ["exe", "sfx"] {
+            let part1_sfx = parent.join(with_name_suffix(stem, &format!(".part1.{extension}")));
+            if let Some(part1) = index.resolve(&part1_sfx)
+                && part1 != path
+            {
+                return discover_volumes(&part1);
+            }
         }
         // Also probe zero-padded first volumes ({stem}.part01.rar ..
         // part0001.rar): sets written with 10+ volumes now carry the
@@ -354,6 +364,18 @@ mod tests {
         }
         let expected = ["set.part1.exe", "set.part2.rar", "set.part3.rar"];
         for start in ["set.part1.exe", "set.part2.rar", "set.rar"] {
+            assert_eq!(names(&dir.path().join(start)), expected, "{start}");
+        }
+    }
+
+    #[test]
+    fn sfx_first_volume_sfx_is_discovered_from_every_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["set.part1.sfx", "set.part2.rar", "set.part3.rar"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let expected = ["set.part1.sfx", "set.part2.rar", "set.part3.rar"];
+        for start in ["set.part1.sfx", "set.part2.rar", "set.rar"] {
             assert_eq!(names(&dir.path().join(start)), expected, "{start}");
         }
     }

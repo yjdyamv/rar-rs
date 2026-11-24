@@ -430,7 +430,8 @@ fn cli_sfx_reserializes_embedded_archive() {
         .status()
         .unwrap();
     assert!(status.success());
-    let exe = std::fs::read(dir.path().join("base.exe")).unwrap();
+    let sfx_path = dir.path().join(format!("base.{}", sfx_ext()));
+    let exe = std::fs::read(&sfx_path).unwrap();
     assert_eq!(
         sfx_first_block_frame(&exe, 2),
         Some(base_frame - 2),
@@ -447,7 +448,7 @@ fn cli_sfx_reserializes_embedded_archive() {
     std::fs::create_dir_all(&out).unwrap();
     let status = std::process::Command::new(UNRAR_CLI)
         .args(["x", "-idq", "-y"])
-        .arg(dir.path().join("base.exe"))
+        .arg(&sfx_path)
         .args(["--dest"])
         .arg(&out)
         .status()
@@ -617,13 +618,19 @@ fn cli_solid_flag_only_for_compressed_members() {
     );
 }
 
+/// SFX archives take the platform's executable extension (`.exe` on Windows,
+/// `.sfx` elsewhere), matching official `rar s` / `a -sfx`.
+fn sfx_ext() -> &'static str {
+    if cfg!(windows) { "exe" } else { "sfx" }
+}
+
 /// `a -sfx` prepends the default SFX module at create time (skipped when
 /// no module is installed).
 #[test]
 fn cli_create_sfx_prepends_module() {
     let dir = make_temp_dir();
     std::fs::write(dir.path().join("f.txt"), b"s").unwrap();
-    let exe = dir.path().join("out.exe");
+    let exe = dir.path().join(format!("out.{}", sfx_ext()));
     let output = std::process::Command::new(RAR_CLI)
         .args(["a", "-sfx", "-idq"])
         .arg(&exe)
@@ -652,8 +659,9 @@ fn cli_create_sfx_prepends_module() {
     assert!(status.success(), "unrar t on the created SFX");
 }
 
-/// `a -sfx -v<size>` keeps WinRAR's naming: the SFX volume is an
-/// executable (`{base}.part1.exe` for a set, `{base}.exe` for one volume).
+/// `a -sfx -v<size>` keeps WinRAR's naming: the SFX volume takes the platform's
+/// executable extension (`{base}.part1.exe`/`{base}.exe` on Windows,
+/// `{base}.part1.sfx`/`{base}.sfx` elsewhere).
 #[test]
 fn cli_create_sfx_names_first_volume_exe() {
     let dir = make_temp_dir();
@@ -683,24 +691,25 @@ fn cli_create_sfx_names_first_volume_exe() {
         }
         panic!("a -sfx -v failed: {text}");
     }
+    let part1 = format!("set.part1.{}", sfx_ext());
     assert!(
-        dir.path().join("set.part1.exe").exists(),
-        "an SFX set's first volume must be named part1.exe"
+        dir.path().join(&part1).exists(),
+        "an SFX set's first volume must be named {part1}"
     );
     assert!(!dir.path().join("set.part1.rar").exists());
 
     let status = std::process::Command::new(UNRAR_CLI)
         .args(["t", "-idq"])
-        .arg("set.part1.exe")
+        .arg(&part1)
         .current_dir(dir.path())
         .status()
         .unwrap();
     assert!(status.success(), "unrar t on the SFX set");
-    let mut reader = rar_rs::ArchiveReader::open(dir.path().join("set.part1.exe")).unwrap();
+    let mut reader = rar_rs::ArchiveReader::open(dir.path().join(&part1)).unwrap();
     let id = reader.unique_entry("payload.bin").unwrap();
     assert_eq!(reader.read_entry(id).unwrap(), payload);
 
-    // A single-volume SFX archive is `{base}.exe` (no `.part1`).
+    // A single-volume SFX archive is `{base}.<ext>` (no `.part1`).
     let output = std::process::Command::new(RAR_CLI)
         .args(["a", "-sfx", "-idq"])
         .arg("solo.rar")
@@ -709,7 +718,7 @@ fn cli_create_sfx_names_first_volume_exe() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(dir.path().join("solo.exe").exists());
+    assert!(dir.path().join(format!("solo.{}", sfx_ext())).exists());
     assert!(!dir.path().join("solo.rar").exists());
 }
 

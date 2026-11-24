@@ -890,8 +890,9 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
     // replace path wrote through a staged copy that was installed over the
     // archive on commit, so the original path is the final one there.
     // A created SFX archive is named like WinRAR names it: the first volume
-    // is an executable (`{base}.exe`, or `{base}.part1.exe` for a set),
-    // while the remaining volumes keep their `.partN.rar` names.
+    // takes the platform's executable extension (`{base}.exe`/`.part1.exe` on
+    // Windows, `{base}.sfx`/`.part1.sfx` elsewhere), while the remaining
+    // volumes keep their `.partN.rar` names.
     if let Some(module) = &args.sfx_module {
         let target = if was_existing {
             std::path::Path::new(archive_path)
@@ -922,9 +923,13 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
                     })
                     .unwrap_or(1)
                     .max(1);
-                first.with_file_name(format!("{base}.part{:0width$}.exe", 1))
+                first.with_file_name(format!(
+                    "{base}.part{:0width$}.{}",
+                    1,
+                    crate::sfx::sfx_extension()
+                ))
             } else {
-                first.with_file_name(format!("{base}.exe"))
+                first.with_file_name(format!("{base}.{}", crate::sfx::sfx_extension()))
             };
             if exe != first {
                 std::fs::rename(&first, &exe)

@@ -186,7 +186,10 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
 - `-sfx[name]` — create an SFX archive at create time. The module goes on the
   first volume only, named like WinRAR names it: `{base}.exe` for a
   single-volume archive and `{base}.part1.exe` for a set (later volumes stay
-  `{base}.partN.rar`); readers accept either spelling of part 1.
+  `{base}.partN.rar`); on Linux the first volume takes `.sfx` instead of `.exe`
+  (official `rar s` spelling). Both `-sfx` and `s` default to the **console**
+  stub (`WinCon.SFX` on Windows, `default.sfx` on Linux) so the archive
+  self-extracts headlessly; readers accept either spelling of part 1.
 - `-z<file>` / `-c-` — comment file / no comment (`-z` is accepted and ignored
   outside the create and comment commands)
 

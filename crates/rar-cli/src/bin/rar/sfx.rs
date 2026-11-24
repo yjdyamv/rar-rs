@@ -53,7 +53,7 @@ pub(crate) fn cmd_sfx(args: &SfxArgs, assume_yes: bool) -> CliResult<()> {
         .file_stem()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "archive".to_string());
-    let out_path = format!("{base}.exe");
+    let out_path = format!("{base}.{}", sfx_extension());
     // Never clobber an existing executable -- and `<base>.exe` is very likely
     // someone's program -- without `-y`, matching WinRAR's overwrite query.
     if !assume_yes && std::path::Path::new(&out_path).exists() {
@@ -133,9 +133,19 @@ pub(crate) fn prepend_module_in_place(
     Ok(())
 }
 
-/// Locate a `default.sfx` module: `$HOME`, `/usr/lib`, `/usr/local/lib`,
-/// or the installed WinRAR directory (Windows: `%ProgramFiles%\WinRAR`,
+/// The extension WinRAR gives an SFX archive on this platform: `.exe` on
+/// Windows, `.sfx` elsewhere (official `rar s` on Linux writes `name.sfx`).
+pub(crate) fn sfx_extension() -> &'static str {
+    if cfg!(windows) { "exe" } else { "sfx" }
+}
+
+/// Locate an SFX module: `$HOME`, `/usr/lib`, `/usr/local/lib`, or the
+/// installed WinRAR directory (Windows: `%ProgramFiles%\WinRAR`,
 /// `%ProgramFiles(x86)%\WinRAR`, or the registry-installed path).
+///
+/// Windows prefers the **console** stub (`WinCon.SFX`) so the result is a
+/// CLI self-extractor that works without a desktop, then falls back to the GUI
+/// `Default.SFX`. Linux ships only the console `default.sfx`.
 pub(crate) fn find_sfx_module() -> Option<String> {
     #[cfg_attr(not(windows), allow(unused_mut))] // mut only for the Windows registry candidates
     let mut candidates: Vec<Option<String>> = vec![
@@ -175,8 +185,8 @@ pub(crate) fn find_sfx_module() -> Option<String> {
                 if status == 0 {
                     let len = (size / 2) as usize;
                     let dir = String::from_utf16_lossy(&buf[..len.min(buf.len())]);
-                    reg_paths.push(format!("{dir}\\Default.SFX"));
                     reg_paths.push(format!("{dir}\\WinCon.SFX"));
+                    reg_paths.push(format!("{dir}\\Default.SFX"));
                 }
                 unsafe { RegCloseKey(hkey) };
             }
@@ -188,8 +198,8 @@ pub(crate) fn find_sfx_module() -> Option<String> {
         .into_iter()
         .flatten()
         {
-            reg_paths.push(format!("{pf}\\WinRAR\\Default.SFX"));
             reg_paths.push(format!("{pf}\\WinRAR\\WinCon.SFX"));
+            reg_paths.push(format!("{pf}\\WinRAR\\Default.SFX"));
         }
         candidates.extend(reg_paths.into_iter().map(Some));
     }

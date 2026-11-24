@@ -4,14 +4,18 @@
 
 use std::path::{Path, PathBuf};
 
-/// Strip a trailing `.rar`, `.rev` or `.exe` extension (ASCII
-/// case-insensitive). `.exe` covers WinRAR's SFX first volume
-/// (`{base}.part1.exe`). ASCII lowering preserves byte offsets, so the
-/// returned slice is valid for the original name (a Unicode `to_lowercase`
-/// can expand characters).
+/// Strip a trailing `.rar`, `.rev`, `.exe` or `.sfx` extension (ASCII
+/// case-insensitive). `.exe`/`.sfx` cover the SFX first volume
+/// (`{base}.part1.exe` on Windows, `{base}.part1.sfx` elsewhere). ASCII
+/// lowering preserves byte offsets, so the returned slice is valid for the
+/// original name (a Unicode `to_lowercase` can expand characters).
 fn strip_archive_extension(name: &str) -> Option<&str> {
     let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".rar") || lower.ends_with(".rev") || lower.ends_with(".exe") {
+    if lower.ends_with(".rar")
+        || lower.ends_with(".rev")
+        || lower.ends_with(".exe")
+        || lower.ends_with(".sfx")
+    {
         Some(&name[..name.len() - 4])
     } else {
         None
@@ -130,14 +134,16 @@ pub(crate) fn volume_path_padded(
     parent.join(format!("{base}.part{part_num:0width$}.rar"))
 }
 
-/// Base name of a `{base}.partN.rar` (or SFX `.part1.exe`) volume file, if
-/// the name parses as one.
+/// Base name of a `{base}.partN.rar` / SFX `.part1.exe` (Windows) or
+/// `.part1.sfx` (elsewhere) volume file, if the name parses as one.
 fn part_volume_base(name: &str) -> Option<&str> {
     let stem = name
         .strip_suffix(".rar")
         .or_else(|| name.strip_suffix(".RAR"))
         .or_else(|| name.strip_suffix(".exe"))
-        .or_else(|| name.strip_suffix(".EXE"))?;
+        .or_else(|| name.strip_suffix(".EXE"))
+        .or_else(|| name.strip_suffix(".sfx"))
+        .or_else(|| name.strip_suffix(".SFX"))?;
     split_part_stem(stem).map(|(base, _)| base)
 }
 
@@ -157,7 +163,9 @@ fn part_recovery_base(name: &str) -> Option<&str> {
 fn plain_volume_base(name: &str) -> Option<&str> {
     let stem = name
         .strip_suffix(".rar")
-        .or_else(|| name.strip_suffix(".RAR"))?;
+        .or_else(|| name.strip_suffix(".RAR"))
+        .or_else(|| name.strip_suffix(".sfx"))
+        .or_else(|| name.strip_suffix(".SFX"))?;
     if split_part_stem(stem).is_some() {
         return None;
     }
@@ -283,6 +291,11 @@ mod tests {
             super::extract_volume_base("set.part01.exe"),
             Some(("set".to_string(), 2))
         );
+        // Linux SFX first volume uses `.sfx` instead of `.exe`.
+        assert_eq!(
+            super::extract_volume_base("set.part1.sfx"),
+            Some(("set".to_string(), 1))
+        );
         assert_eq!(
             super::legacy_volume_base("archive.rar").as_deref(),
             Some("archive")
@@ -313,8 +326,10 @@ mod tests {
             super::volume_base_of(Path::new("dir/archive.r00")),
             "archive.r00"
         );
-        // An SFX set's first volume is `{base}.part1.exe`.
+        // An SFX set's first volume is `{base}.part1.exe` (Windows) or
+        // `{base}.part1.sfx` (elsewhere).
         assert_eq!(super::volume_base_of(Path::new("dir/set.part1.exe")), "set");
+        assert_eq!(super::volume_base_of(Path::new("dir/set.part1.sfx")), "set");
         assert_eq!(
             super::volume_base_of(Path::new("dir/set.part01.exe")),
             "set"
