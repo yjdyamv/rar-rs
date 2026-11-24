@@ -132,7 +132,6 @@ Module map and design invariants: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **RAR 1.5 (`-ma15`) members** stay single-threaded: a RAR 1.5 member is one
   continuous adaptive stream with no block boundary to split on (RAR 2.x and
   RAR 3/4 large members do get block-level MT).
-- KDF strength is capped at 2²⁴ iterations (default 2¹⁵).
 
 The complete list of deliberate refusals and known interop differences is in
 [docs/PITFALLS.md](docs/PITFALLS.md) and [PLAN.md](PLAN.md)「已知小差异」.
