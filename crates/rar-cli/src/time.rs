@@ -14,6 +14,16 @@ use rar_rs::time::{civil_from_days, local_civil_to_system_time};
 /// `2020-01-02-03-04-05`). Missing components default to January 1st,
 /// midnight; the result is a *local* time.
 pub fn parse_tk_date(spec: &str) -> Result<SystemTime, String> {
+    // Reject a sign or stray character instead of silently dropping it
+    // (`-tk-2020` must not become the year 2020).
+    if spec.starts_with('-')
+        || spec.starts_with('+')
+        || !spec
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | ':'))
+    {
+        return Err(format!("invalid -tk date: {spec}"));
+    }
     let digits: String = spec.chars().filter(|ch| ch.is_ascii_digit()).collect();
     if digits.is_empty() {
         return Err(format!("invalid -tk date: {spec}"));

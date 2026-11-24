@@ -131,11 +131,7 @@ pub(crate) fn compression_pool() -> std::sync::Arc<rayon::ThreadPool> {
 
 #[cfg(feature = "parallel")]
 fn build_compression_pool(threads: usize) -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .thread_name(|i| format!("rar5-compress-{i}"))
-        .build()
-        .expect("build rar5 compression pool")
+    build_pool(threads, "rar5-compress")
 }
 
 /// Effective worker count for an extraction-local override, mirroring
@@ -185,11 +181,25 @@ pub(crate) fn extraction_pool(run_threads: Option<usize>) -> std::sync::Arc<rayo
 
 #[cfg(feature = "parallel")]
 fn build_pool(threads: usize, prefix: &'static str) -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .thread_name(move |i| format!("{prefix}-{i}"))
-        .build()
-        .expect("build rayon pool")
+    // A caller-supplied count can be absurd (e.g. `-mt18446744073709551615`).
+    // Cap it to the workers this host can actually run — more than the core
+    // count cannot help CPU-bound work and can exhaust the OS thread limit —
+    // then fall back to a single thread if the OS still refuses, so no count
+    // can panic the process.
+    let cap = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1);
+    let threads = threads.clamp(1, cap);
+    let make = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .thread_name(move |i| format!("{prefix}-{i}"))
+            .build()
+    };
+    make(threads)
+        .or_else(|_| make(1))
+        .expect("a single-thread rayon pool always builds")
 }
 
 // Set while a Rayon worker is preparing batch members. Nested parallelism
@@ -269,5 +279,16 @@ mod tests {
             None,
             "unexpected global extraction override in test"
         );
+    }
+
+    /// An absurd thread count (e.g. from a hostile `-mt`) must never panic: the
+    /// pool clamps to the host core count and otherwise falls back to one
+    /// worker.
+    #[test]
+    fn absurd_thread_counts_do_not_panic() {
+        let pool = build_pool(usize::MAX, "test");
+        assert!(pool.current_num_threads() >= 1);
+        let pool = build_compression_pool(usize::MAX);
+        assert!(pool.current_num_threads() >= 1);
     }
 }

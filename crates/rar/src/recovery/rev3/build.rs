@@ -38,6 +38,9 @@ pub(super) fn build_recovery_volumes_for_set_chunked(
             "recovery volumes require a multi-volume archive",
         ));
     }
+    if rec_count == 0 {
+        return Ok(Vec::new());
+    }
     if nd + rec_count > MAX_CODEWORD {
         return Err(RarError::invalid_option(format!(
             "legacy recovery volumes support at most {MAX_CODEWORD} data + recovery volumes"

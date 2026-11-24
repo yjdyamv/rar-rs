@@ -26,6 +26,17 @@ pub(crate) fn read_mask_file(path: &str) -> Result<Vec<String>, String> {
 /// (like `-tk`), so it is resolved through the current UTC offset before it
 /// is compared against file mtimes.
 pub(crate) fn parse_rar_date(s: &str) -> Result<u32, String> {
+    // Reject a sign or stray character instead of silently dropping it
+    // (`-ta-2020` must not become the year 2020). WinRAR dates are digits plus
+    // `-`/`.`/`:`/space separators and never start with a sign.
+    if s.starts_with('-')
+        || s.starts_with('+')
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, ' ' | '.' | ':' | '-'))
+    {
+        return Err(format!("invalid date: {s}"));
+    }
     let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
     let (y, m, d, hh, mm, ss) = match digits.len() {
         4 => (digits.parse::<i64>().unwrap(), 1, 1, 0, 0, 0),
@@ -130,11 +141,21 @@ fn parse_time_modifiers(s: &str) -> (Vec<TimeKind>, bool, usize) {
 /// Parse a WinRAR `-tn`/`-to` filter: optional leading `m`/`c`/`a`/`o`
 /// modifiers followed by a period `[<ndays>d][<nhours>h][<nminutes>m][<nseconds>s]`.
 /// Returns the time kinds, whether the `o` modifier selected OR logic, and
-/// the period in seconds. Like WinRAR, an empty or unparsable period is
-/// treated as 0 seconds.
-pub(crate) fn parse_period_filter(s: &str) -> (Vec<TimeKind>, bool, u64) {
+/// the period in seconds. An empty period is WinRAR's "0 seconds"; a sign or
+/// stray character (e.g. `-5d`) is rejected rather than treated as 0.
+pub(crate) fn parse_period_filter(s: &str) -> Result<(Vec<TimeKind>, bool, u64), String> {
     let (kinds, or, idx) = parse_time_modifiers(s);
-    (kinds, or, parse_period(&s[idx..]))
+    let period = &s[idx..];
+    // An empty period is WinRAR's "0 seconds" (matches everything); a sign or
+    // any stray character (`-5d`) is rejected instead of silently becoming 0.
+    if !period.is_empty()
+        && !period
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'd' | 'h' | 'm' | 's'))
+    {
+        return Err(format!("invalid period: {period}"));
+    }
+    Ok((kinds, or, parse_period(period)))
 }
 
 /// Parse a WinRAR `-ta`/`-tb` filter: the same modifiers followed by a
@@ -237,16 +258,16 @@ mod tests {
     /// flag selects OR logic; one kind is the default.
     #[test]
     fn modifiers_collect_kinds_and_or() {
-        let (kinds, or, period) = parse_period_filter("mc30d");
+        let (kinds, or, period) = parse_period_filter("mc30d").unwrap();
         assert!(!or);
         assert_eq!(period, 30 * 86400);
         assert_eq!(kinds, vec![TimeKind::Modified, TimeKind::Created]);
 
-        let (kinds, or, _) = parse_period_filter("co30d");
+        let (kinds, or, _) = parse_period_filter("co30d").unwrap();
         assert!(or);
         assert_eq!(kinds, vec![TimeKind::Created]);
 
-        let (kinds, or, _) = parse_period_filter("1h");
+        let (kinds, or, _) = parse_period_filter("1h").unwrap();
         assert!(!or);
         assert_eq!(kinds, vec![TimeKind::Modified]);
     }

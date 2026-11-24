@@ -420,7 +420,7 @@ pub(crate) struct RecoveryArgs {
     #[arg(
         long = "recovery-percent",
         value_name = "N",
-        value_parser = clap::value_parser!(u8).range(0..=100)
+        value_parser = clap::value_parser!(u8)
     )]
     pub(crate) recovery_percent: Option<u8>,
     /// Recovery record parity sectors (WinRAR's `-rr<N>`, legacy RAR4)
@@ -518,7 +518,7 @@ pub(crate) struct CreateArgs {
     #[arg(
         long = "recovery-percent",
         value_name = "N",
-        value_parser = clap::value_parser!(u8).range(0..=100)
+        value_parser = clap::value_parser!(u8)
     )]
     pub(crate) recovery_percent: Option<u8>,
     /// Recovery record parity sectors (WinRAR RAR4 `-rr<N>`)
@@ -694,13 +694,9 @@ pub(crate) struct CreateArgs {
 /// extension — WinRAR's `rr` ignores the argument entirely).
 fn parse_recovery_percent(s: &str) -> Result<u8, String> {
     let digits = s.strip_suffix('%').unwrap_or(s);
-    let percent = digits
+    digits
         .parse::<u8>()
-        .map_err(|_| format!("invalid recovery percent: {s}"))?;
-    if percent > 100 {
-        return Err(format!("invalid recovery percent: {s}"));
-    }
-    Ok(percent)
+        .map_err(|_| format!("invalid recovery percent: {s}"))
 }
 
 /// Recovery volumes parameter: an exact count or a percentage.
@@ -715,14 +711,12 @@ fn parse_recovery_volumes(s: &str) -> Result<RecoveryVolumes, String> {
         let v = pct
             .parse::<u8>()
             .map_err(|_| format!("invalid recovery percent: {s}"))?;
-        if v > 100 {
-            return Err(format!("invalid recovery percent: {s}"));
-        }
         return Ok(RecoveryVolumes::Percent(v));
     }
-    s.parse::<u32>()
-        .map(RecoveryVolumes::Count)
-        .map_err(|_| format!("invalid recovery volume count: {s}"))
+    let count = s
+        .parse::<u32>()
+        .map_err(|_| format!("invalid recovery volume count: {s}"))?;
+    Ok(RecoveryVolumes::Count(count))
 }
 
 fn parse_threads(s: &str) -> Result<usize, String> {

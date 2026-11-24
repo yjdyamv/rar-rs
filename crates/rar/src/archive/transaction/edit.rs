@@ -48,11 +48,6 @@ impl RarArchive {
                 "cannot edit an incomplete multi-volume archive; open the first volume with every part present",
             ));
         }
-        if force_rr.is_some_and(|percent| percent > 100) {
-            return Err(RarError::invalid_option(
-                "recovery percent must be in 0..=100",
-            ));
-        }
         self.ensure_write_ctx();
         if (!renames.is_empty()
             || !versions.is_empty()

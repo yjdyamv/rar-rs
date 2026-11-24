@@ -591,6 +591,10 @@ fn build_recovery_volumes_for_set_chunked(
     if nd == 0 {
         return Err(RarError::format("no volumes for recovery volumes"));
     }
+    // A count of zero asks for no recovery volumes, not the format minimum.
+    if rec_count == 0 {
+        return Ok(Vec::new());
+    }
     // Legacy RAR 1.5–4.x sets use their own recovery-volume codec.
     if crate::recovery::rev3::is_legacy_rev_set(&volume_paths[0])? {
         return crate::recovery::rev3::build_recovery_volumes_for_set(volume_paths, rec_count);

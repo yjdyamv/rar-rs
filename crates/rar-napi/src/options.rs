@@ -53,7 +53,7 @@ impl CreateArchiveOptions {
 
   pub(crate) fn to_writer_options(&self) -> Result<rar_rs::WriterOptions> {
     let recovery_percent =
-      checked_optional_js_integer(self.recovery_percent, "recoveryPercent", 0, 100)?
+      checked_optional_js_integer(self.recovery_percent, "recoveryPercent", 0, 255)?
         .filter(|&value| value != 0)
         .map(|value| value as u8);
     let recovery_sectors =
@@ -72,7 +72,7 @@ impl CreateArchiveOptions {
       self.recovery_volumes_percent,
       "recoveryVolumesPercent",
       0,
-      100,
+      255,
     )?
     .filter(|&value| value != 0)
     .map(|value| value as u8);

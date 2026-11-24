@@ -93,9 +93,6 @@ pub(crate) fn cmd_recovery_volumes(args: &RecoveryVolumesArgs) -> CliResult<()> 
         let pct: u64 = pct
             .parse()
             .map_err(|_| error::CliError::from(format!("invalid recovery percent: {spec}")))?;
-        if pct > 1000 {
-            return Err(format!("invalid recovery percent: {spec}").into());
-        }
         rar_rs::plan_recovery_volume_count(nd, pct)
             .map_err(|e| error::CliError::from(e).context("rv"))?
     } else {

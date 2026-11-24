@@ -525,6 +525,7 @@ impl ArchiveReader {
         id: EntryId,
         options: ExtractOptions,
     ) -> RarResult<Vec<u8>> {
+        options.validate()?;
         let index = self.resolve_id(id)?;
         self.archive.read_at_index_with_options(index, options)
     }
@@ -541,6 +542,7 @@ impl ArchiveReader {
         writer: &mut dyn Write,
         options: ExtractOptions,
     ) -> RarResult<u64> {
+        options.validate()?;
         let index = self.resolve_id(id)?;
         self.archive
             .read_to_writer_at_index_with_options(index, writer, options)
@@ -562,6 +564,7 @@ impl ArchiveReader {
         destination: impl AsRef<Path>,
         options: ExtractOptions,
     ) -> RarResult<PathBuf> {
+        options.validate()?;
         let index = self.resolve_id(id)?;
         self.archive
             .extract_at_index_with_options(index, destination, options)
@@ -581,6 +584,7 @@ impl ArchiveReader {
         &mut self,
         options: ExtractOptions,
     ) -> RarResult<VerificationReport> {
+        options.validate()?;
         let mut ids = Vec::new();
         let mut total_unpacked = 0u64;
         for entry in self.entries().filter(|entry| !entry.is_dir()) {
@@ -612,6 +616,7 @@ impl ArchiveReader {
         ids: &[EntryId],
         options: ExtractOptions,
     ) -> RarResult<VerificationReport> {
+        options.validate()?;
         let mut total_unpacked = 0u64;
         for &id in ids {
             let entry = self.entry(id)?;
@@ -736,6 +741,7 @@ impl ArchiveReader {
         destination: impl AsRef<Path>,
         options: ExtractOptions,
     ) -> RarResult<ExtractionReport> {
+        options.validate()?;
         self.archive.extract_all_with_options(destination, options)
     }
 
@@ -759,6 +765,7 @@ impl ArchiveReader {
         destination: impl AsRef<Path>,
         options: ExtractOptions,
     ) -> RarResult<ExtractionReport> {
+        options.validate()?;
         let mut total_unpacked = 0u64;
         for &id in ids {
             let entry = self.entry(id)?;

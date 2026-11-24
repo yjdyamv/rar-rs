@@ -681,8 +681,10 @@ impl RarArchive {
             .map_err(|e| RarError::format(format!("recovery record encode: {e}")))?
         };
 
-        // RR service header: type 3, name "RR", SubData = percent byte.
-        let subdata = recovery_record_subdata(percent as u8);
+        // RR service header: type 3, name "RR", SubData = percent byte. The
+        // RAR5 record is capped at 100%, so the declared byte matches the
+        // parity actually written.
+        let subdata = recovery_record_subdata(percent.min(100) as u8);
         let hdr = crate::format::rar5::headers::build_service_block(
             "RR",
             &subdata,

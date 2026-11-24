@@ -1203,13 +1203,13 @@ fn rar4_plan_validation_mirrors_rar5_before_any_write() {
     let before = std::fs::read(&path).unwrap();
 
     let mut editor = ArchiveEditor::open(&path).unwrap();
-    // Empty plan and out-of-range percent fail without touching the file.
+    // Empty plan and a zero sector count fail without touching the file.
     assert!(matches!(
         editor.apply(EditPlan::new()),
         Err(RarError::Format(_))
     ));
     assert!(matches!(
-        editor.apply(EditPlan::new().set_recovery(200)),
+        editor.apply(EditPlan::new().set_recovery_sectors(0)),
         Err(RarError::InvalidOption(_))
     ));
     // Deleting and renaming the same member in one plan is rejected before

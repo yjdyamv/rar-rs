@@ -471,6 +471,11 @@ impl RarArchive {
         password: &str,
         volume_size: Option<u64>,
     ) -> RarResult<Self> {
+        if volume_size == Some(0) {
+            return Err(RarError::invalid_option(
+                "volume size must be greater than zero",
+            ));
+        }
         let pw = if password.is_empty() {
             None
         } else {

@@ -3,6 +3,116 @@
 
 use crate::support::{RAR_CLI, UNRAR_CLI, make_temp_dir};
 
+/// A sign or stray character in a date/period filter is rejected instead of
+/// being silently dropped (`-ta-2020` must not mean the year 2020). Valid
+/// forms still work.
+#[test]
+fn cli_negative_and_stray_filter_values_are_rejected() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+    for sw in ["-ta-2020", "-tb-2020", "-tk-2020", "-tn-5d", "-to-5d"] {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(["a", sw, "-idq"])
+            .arg(dir.path().join("rejected.rar"))
+            .arg(dir.path().join("f.txt"))
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{sw} must be rejected");
+    }
+    for sw in ["-ta2020-01-01", "-tn30d"] {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(["a", sw, "-idq"])
+            .arg(dir.path().join("accepted.rar"))
+            .arg(dir.path().join("f.txt"))
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{sw} must be accepted: {out:?}");
+    }
+}
+
+/// Hostile / malformed values for the numeric and time-filter switches must be
+/// rejected cleanly: a real exit code (never a signal/abort) and no panic, and
+/// the negative forms specifically must not be read as valid input.
+#[test]
+fn cli_hostile_switch_values_exit_cleanly() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+    let cases = [
+        "-mt-1",
+        "-mt0",
+        "-mt",
+        "-mt1.5",
+        "-mt99999999999999999999",
+        "-m-1",
+        "-m6",
+        "-m9",
+        "-v-1",
+        "-v0",
+        "-v1x",
+        "-v99999999999999999999",
+        "-sl-1",
+        "-sm-1",
+        "-rr-1",
+        "-rv-1",
+        "-ta-2020",
+        "-tb-2020",
+        "-tk-2020",
+        "-tn-1d",
+        "-to-1d",
+        "-tnabc",
+        "-ta1.5",
+        "-md-1",
+        "-mdabc",
+        "-ma-1",
+    ];
+    for sw in cases {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(["a", sw, "-idq"])
+            .arg(dir.path().join("h.rar"))
+            .arg(dir.path().join("f.txt"))
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.code().is_some(), "{sw} crashed: {out:?}");
+        assert!(
+            !stderr.contains("panicked") && !stderr.contains("RUST_BACKTRACE"),
+            "{sw} panicked: {stderr}"
+        );
+        // `-mdx` is an extraction-only dictionary cap; WinRAR ignores it on a
+        // create, so it is the one value that may be accepted here.
+        assert!(!out.status.success(), "{sw} must be rejected");
+    }
+
+    // Extraction-only switches are ignored on `a` (like WinRAR) but parsed on
+    // `x`, where a hostile value must still be rejected cleanly.
+    let archive = dir.path().join("base.rar");
+    std::process::Command::new(RAR_CLI)
+        .args(["a", "-idq"])
+        .arg(&archive)
+        .arg(dir.path().join("f.txt"))
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    for sw in ["-mdx-1", "--max-unpacked=-1", "--max-total-unpacked=0"] {
+        let out = std::process::Command::new(RAR_CLI)
+            .args(["x", sw, "-idq"])
+            .arg(&archive)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.code().is_some(), "{sw} crashed: {out:?}");
+        assert!(
+            !stderr.contains("panicked") && !stderr.contains("RUST_BACKTRACE"),
+            "{sw} panicked: {stderr}"
+        );
+        assert!(!out.status.success(), "{sw} must be rejected on x");
+    }
+}
+
 /// `-p<pwd>` / `-m<N>` given before the command work like WinRAR, and the
 /// `unrar` binary keeps its own pre-command switch handling.
 #[test]

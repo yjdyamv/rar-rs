@@ -404,11 +404,6 @@ pub(crate) fn edit_rar4(
     force_sectors: Option<u32>,
     member_comments: &[(usize, Option<Vec<u8>>)],
 ) -> RarResult<EditSummary> {
-    if force_rr.is_some_and(|percent| percent > 100) {
-        return Err(RarError::invalid_option(
-            "recovery percent must be in 0..=100",
-        ));
-    }
     if force_sectors == Some(0) {
         return Err(RarError::invalid_option(
             "recovery sector count must be greater than zero",

@@ -400,11 +400,11 @@ pub(crate) fn cmd_create(args: &CreateArgs, misc: &common::MiscSwitches) -> CliR
             set(&kinds, or, TimeBound::Before(date));
         }
         for spec in &args.tn_filters {
-            let (kinds, or, period) = parse_period_filter(spec);
+            let (kinds, or, period) = parse_period_filter(spec)?;
             set(&kinds, or, TimeBound::Newer(period));
         }
         for spec in &args.to_filters {
-            let (kinds, or, period) = parse_period_filter(spec);
+            let (kinds, or, period) = parse_period_filter(spec)?;
             set(&kinds, or, TimeBound::Older(period));
         }
         // Compare in nanosecond precision (like WinRAR): whole-second

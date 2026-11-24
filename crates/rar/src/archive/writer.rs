@@ -428,6 +428,13 @@ impl WriterOptions {
                 "delta filter channels must be in 1..=31, got {channels}"
             )));
         }
+        if let Some(bits) = self.rar4_dict_bits
+            && bits > 6
+        {
+            return Err(RarError::invalid_option(format!(
+                "RAR4 dictionary bits must be in 0..=6, got {bits}"
+            )));
+        }
         // The combination rules live in `options` so the plain
         // `CreateOptions` struct rejects exactly the same set: a validated
         // typed option must never be silently dropped or clamped.
@@ -1025,6 +1032,41 @@ mod tests {
         assert_eq!(options.dict_size_log, None);
         assert_eq!(options.dict_size_bytes, None);
         assert!(!options.force_v70);
+    }
+
+    #[test]
+    fn rar4_dictionary_bits_above_six_is_rejected() {
+        let err = WriterOptions::new()
+            .compression(ArchiveVersion::V29)
+            .rar4_dictionary_bits(7)
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("dictionary bits"), "{err}");
+    }
+
+    #[test]
+    fn append_rejects_a_zero_volume_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.rar");
+        let err = match crate::ArchiveWriter::append_with(
+            &path,
+            crate::AppendOptions::new().volume_size(0),
+        ) {
+            Ok(_) => panic!("a zero volume size must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, crate::error::RarError::InvalidOption(_)),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn recovery_percent_above_a_hundred_is_accepted() {
+        WriterOptions::new()
+            .recovery_percent(150)
+            .validate()
+            .unwrap();
     }
 
     #[test]

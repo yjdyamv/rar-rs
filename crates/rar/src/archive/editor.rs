@@ -143,7 +143,8 @@ pub enum EditOp {
     /// block after the member data (RAR 1.5–2.9 nested it in the header).
     SetMemberComment(EntryId, Vec<u8>),
     /// Rebuild the inline recovery record protecting this percent of the
-    /// archive (like `rar rr`; 0..=100). Only valid on single-volume
+    /// archive (like `rar rr`; on RAR5 the strength is capped at 100). Only
+    /// valid on single-volume
     /// archives. Without this op the record is rebuilt at its original
     /// percentage when the archive had one.
     SetRecovery(u8),
@@ -223,8 +224,8 @@ impl EditPlan {
         self
     }
 
-    /// Queue an inline recovery-record rebuild at `percent` (0..=100,
-    /// like `rar rr`).
+    /// Queue an inline recovery-record rebuild at `percent` (like `rar rr`;
+    /// on RAR5 the strength is capped at 100).
     #[must_use]
     pub fn set_recovery(mut self, percent: u8) -> Self {
         self.ops.push(EditOp::SetRecovery(percent));

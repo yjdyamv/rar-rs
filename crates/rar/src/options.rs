@@ -431,16 +431,6 @@ pub(crate) fn validate_combinations(rules: CombinationRules<'_>) -> RarResult<()
             "quick-open cannot be combined with header encryption",
         ));
     }
-    for (name, percent) in [
-        ("recovery percent", rules.recovery_percent),
-        ("recovery-volume percent", rules.recovery_volumes_percent),
-    ] {
-        if percent.is_some_and(|value| value > 100) {
-            return Err(RarError::invalid_option(format!(
-                "{name} must be in 0..=100"
-            )));
-        }
-    }
     if rules.volume_size == Some(0) {
         return Err(RarError::invalid_option(
             "volume size must be greater than zero",
@@ -466,6 +456,8 @@ pub(crate) fn validate_combinations(rules: CombinationRules<'_>) -> RarResult<()
             "recovery-volume percent and exact count are mutually exclusive",
         ));
     }
+    // A zero percent is defined by the format as the minimum (`max(1, …)`) and
+    // a zero count asks for no recovery volumes, so neither is rejected.
     if (rules.recovery_volumes_percent.is_some() || rules.recovery_volume_count.is_some())
         && rules.volume_size.is_none()
     {
@@ -691,6 +683,28 @@ impl ExtractOptions {
     /// The effective service-payload ceiling; `None` means unbounded.
     pub(crate) fn metadata_limit(&self) -> u64 {
         self.max_metadata_bytes.unwrap_or(u64::MAX)
+    }
+
+    /// Reject limits that cannot mean what the caller asked for: a zero cap
+    /// silently rejects every member. (The per-member ≤ total cross-check lives
+    /// in the CLI, where both caps are `Option`s from flags; the library's
+    /// defaults make `max_unpacked_bytes` a large `Some`, so the same
+    /// comparison here would wrongly reject a caller who only lowers the total
+    /// cap.)
+    pub(crate) fn validate(&self) -> RarResult<()> {
+        for (name, value) in [
+            ("max_unpacked_bytes", self.max_unpacked_bytes),
+            ("max_total_unpacked_bytes", self.max_total_unpacked_bytes),
+            ("max_dict_size", self.max_dict_size),
+            ("max_metadata_bytes", self.max_metadata_bytes),
+        ] {
+            if value == Some(0) {
+                return Err(RarError::invalid_option(format!(
+                    "{name} must be greater than zero"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Whether `other` carries the same extraction policy as `self`.
@@ -1019,6 +1033,45 @@ fn parse_dict_bytes_with_floor(num: &str, mult: u64, floor: u64) -> Option<u64> 
 #[cfg(test)]
 mod tests {
     use super::{MAX_RAR7_DICTIONARY_BYTES, parse_dict_bytes, parse_dict_size};
+
+    #[test]
+    fn extract_options_validate_accepts_huge_caps() {
+        let opts = super::ExtractOptions {
+            max_unpacked_bytes: Some(u64::MAX),
+            max_total_unpacked_bytes: Some(u64::MAX),
+            max_dict_size: Some(u64::MAX),
+            max_metadata_bytes: Some(u64::MAX),
+            threads: Some(usize::MAX),
+            ..super::ExtractOptions::default()
+        };
+        assert!(opts.validate().is_ok());
+    }
+
+    #[test]
+    fn extract_options_validate_rejects_zero_caps() {
+        let base = super::ExtractOptions::default();
+        assert!(base.validate().is_ok());
+        for zero in [
+            super::ExtractOptions {
+                max_unpacked_bytes: Some(0),
+                ..base.clone()
+            },
+            super::ExtractOptions {
+                max_total_unpacked_bytes: Some(0),
+                ..base.clone()
+            },
+            super::ExtractOptions {
+                max_dict_size: Some(0),
+                ..base.clone()
+            },
+            super::ExtractOptions {
+                max_metadata_bytes: Some(0),
+                ..base.clone()
+            },
+        ] {
+            assert!(zero.validate().is_err());
+        }
+    }
 
     #[test]
     fn dict_size_parses_rar5_range() {
