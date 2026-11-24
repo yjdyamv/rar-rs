@@ -1,6 +1,6 @@
 # 不变量与地雷（改代码前先看）
 
-> 最后核对：2026-11-24 @ `cd269b1`；实现细节以源码为准。
+> 最后核对：2026-11-24 @ `b1d5924`；实现细节以源码为准。
 
 本文件是**长期规则**的单一来源：所有「改回去就是 bug」「看着像 bug 其实是设计」
 「与官方有意不同」的结论都收在这里，**一条一行**。这里的每条都由源码或测试钉住
@@ -398,7 +398,7 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 
 - **磁盘/格式量不进 `usize`**：成员大小、偏移、字典尺寸、扇区/块计数一律在 `u64`（或格式字段自身的宽度：RAR5 用 u64、RAR4 用 u32）里算，只在真正下标内存的那一步用 `usize::try_from(..)` 降下来。
 - **收窄一律 `try_from`，禁止裸 `as`**：`as usize` / `as u32` / `as u8` 都可能截断；用 `try_from(..)?`（返回错误）或 `saturating_*`（有明确上限时）。clippy 的 `cast_possible_truncation` 是**目标宽度感知**的——在 x86_64 上也会为 `u64 as usize` 报警（"on targets with 32-bit wide pointers"），不需要 32 位主机就能拦。`format/rar5/sfx.rs` 与 `format/rar5/headers/encrypt.rs` 已用 `#![deny(clippy::cast_possible_truncation)]` 钉住，是照抄的模板；其余模块**清一个、钉一个**。
-- **算术用 `checked_*`/`saturating_*`**：来自文件头或用户 `-md` 的值不要裸 `+ - * <<`；`block_start += 258`、`1usize << log`、`file_pow2 * 2` 都是这样来的。`recovery/legacy.rs` 第 239 行 `usize::try_from(..).unwrap_or(usize::MAX)` 是范例。
+- **算术用 `checked_*`/`saturating_*`**：来自文件头或用户 `-md` 的值不要裸 `+ - * <<`；`block_start += 258`、`1usize << log`、`file_pow2 * 2` 都是这样来的。`recovery/legacy.rs` 第 238 行 `usize::try_from(..).unwrap_or(usize::MAX)` 是范例。
 - **32 位回归测试**：能在 64 位也成立的断言就别 `cfg` 掉（`format/rar5/write/layout.rs` 的 multi-GiB 测试是无条件的）；只有 64 位根本复现不了（如 `0xFFFF_FFFF + 258`）才 `#[cfg(target_pointer_width = "32")]`——而每个这样的测试都必须有能跑它的 job。
 - **待清点（burndown）**：`codec/*`、`recovery/{legacy,rev50}.rs`、`format/rar5/write/*` 等仍有大量收窄（多数是有界安全的：位读取 `read_bits(8)? as u8`、掩码后的 `(x & MASK) as u8`、`.min(u32::MAX) as u32`）。加 `#![deny]` 前先清到零；热循环里的有界转换就地写 `#[allow(clippy::cast_possible_truncation)] // 原因`。
 - **清点时按门禁的 cfg 扫**：`check` 用 `--target x86_64-unknown-linux-gnu` 编译，所以计数也用它（`cargo clippy -p rar-rs --all-features --all-targets --target x86_64-unknown-linux-gnu -- -W clippy::cast_possible_truncation`）；`#[cfg(unix)]`/`#[cfg(windows)]` 分支必须各自的目标各扫一遍——只扫开发机（Windows）会漏掉 unix-only 的收窄。
@@ -436,9 +436,8 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `SA_REQUIRE_WINRAR=1`，Linux 因 2.90/3.00 无 Linux 版而允许自跳）。JS/WASI
   绑定套件仍是本地闸门。**改行为后本地必须自己跑受影响套件**——0.12.0 曾带着
   过期断言发布。
-- **文档一致性靠人工**：面向实现的文档（`README`/`CONTEXT`/`ARCHITECTURE`/`CLI`/
-  `testing`/`rar4-creation-spec`）在标题下标注
-  `最后核对：YYYY-MM-DD @ <短 commit>`，改行为要同步刷新。
+- **文档一致性靠人工**：面向实现的文档在标题下标注
+  `最后核对：YYYY-MM-DD @ <短 commit>`（清单见 [`README.md`](README.md)），改行为要同步刷新。
   项目**不加**强制校验脚本（已定）。
 - **`MAX_CATALOG_ENTRIES` / `MAX_MEMBER_CHUNKS` 等上限对每一族都要设**：RAR13
   每条 21 字节头也会 push 条目，legacy 跨卷合并同样要查 chunk
@@ -966,7 +965,7 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   条类型 1。判价函数 （`FUN_14004600c`）逆完只值 0.16 pp，所以剩下的 2.9 pp
   更可能在块大小与滤镜上。
 
-## MT 行索引与 solid 成员（2026-11-16）
+## MT 行索引与 solid 成员
 
 - **solid 成员必须走逐块滤镜选择器**：`try_solid_filters` 原来调的是整成员探针
   `lzss_huff::solid_filter_specs`（`filter_transform_wins` + 3 % 余量），它在

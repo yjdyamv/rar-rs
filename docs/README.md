@@ -33,6 +33,7 @@
 | 压缩性能议题、契约与已否决方向                | [`../PLAN.md`](../PLAN.md)「性能」段 + [`issues/compression-perf/`](issues/compression-perf/)                          |
 | 测试怎么跑 / 耗时                             | [`testing.md`](testing.md)                                                                                             |
 | fuzz 目标                                     | [`../fuzz/README.md`](../fuzz/README.md)                                                                               |
+| 跨层依赖边界（自动生成快照）                  | [`dependency-matrix.txt`](dependency-matrix.txt)（由 `tests/dependency_matrix.rs` 校验）                               |
 | 法务与许可                                    | [`../NOTICE`](../NOTICE) · [`../THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md) · [`../LICENSES/`](../LICENSES/) |
 
 CI 的 job 图、每个 job 的职责与成本见 [`ci.md`](ci.md)（`.github/workflows/`
@@ -51,7 +52,7 @@ CI 的 job 图、每个 job 的职责与成本见 [`ci.md`](ci.md)（`.github/wo
   [0009 匹配器内核替换（已否决）](adr/0009-match-finder-kernel.md) ·
   [0010 哈希环匹配器（已否决）](adr/0010-hash-ring-finder.md) ·
   [0011 按官方形状重做匹配器（已否决）](adr/0011-official-shaped-matcher.md) ·
-  [0012 两段式解析：距离/rep 裁决后置（提议）](adr/0012-deferred-distance-adjudication.md)
+  [0012 两段式解析：距离/rep 裁决后置（已落地，默认关闭）](adr/0012-deferred-distance-adjudication.md)
 - **议题**（`docs/issues/<feature>/`，只留未关闭的）：判决留在议题文件里；议题**关闭时**把结论并进
   [`../PLAN.md`](../PLAN.md)（下一步 / 已知小差异）或
   [`PITFALLS.md`](PITFALLS.md)（长期规则）并删文件。
@@ -85,7 +86,8 @@ CI 的 job 图、每个 job 的职责与成本见 [`ci.md`](ci.md)（`.github/wo
 与评审按下述办法人工核对并留痕。
 
 - **留痕**：面向实现的文档（`README` / `CONTEXT` / `ARCHITECTURE` / `CLI` /
-  `testing` / `PITFALLS` / `rar4-creation-spec`）在标题下标注
+  `testing` / `PITFALLS` / `rar4-creation-spec` / `FORMAT_RAR5_RAR7.html` /
+  `ci.md`）在标题下标注
   `最后核对：YYYY-MM-DD @ <短 commit>`。**改行为必须同步改对应 owner
   文档并刷新日期；只改代码不改文档视为未完成。**
 - **怎么核对**（改文档或评审时逐项过）：

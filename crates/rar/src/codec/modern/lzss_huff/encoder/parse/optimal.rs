@@ -1871,9 +1871,9 @@ fn walk_gates_enabled() -> bool {
 /// It does not work with a slot-cost proxy: `-m3` goes 6,217,902 (44.68%) to
 /// 6,291,522 (45.21%). The slot index is not a code length, and a 2-byte match
 /// that "saves" 8 bits by the proxy also costs the four bytes of match it
-/// displaces. This is the same shape as the one-step-back experiment in
-/// `non-dp-plan.md`: a greedy needs a real entropy model to price against, and
-/// the priced DP — which has one — is the rung we keep for ratio.
+/// displaces. This is the same shape as the one-step-back experiment on the
+/// non-DP walk branch: a greedy needs a real entropy model to price against,
+/// and the priced DP — which has one — is the rung we keep for ratio.
 #[cfg(feature = "parallel")]
 fn walk_priced_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

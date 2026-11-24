@@ -43,6 +43,7 @@
           与 bitplane/rars 及其 <span class="mono">rar-research</span> 规格书冲突处，<strong>以本实现为准</strong>。
           所有 <span class="mono">vint</span> 为 RAR5 变长整数（§2.2）；多字节整数一律<strong>小端</strong>。
         </p>
+        <p class="mt-2 text-xs text-slate-400">最后核对：2026-11-24 @ <span class="mono">b1d5924</span>；实现细节以源码为准。</p>
 
         <div class="mt-6 flex flex-wrap gap-x-6 gap-y-3 text-xs text-slate-600">
           <span class="inline-flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-sm bg-slate-200 border border-slate-400"></span>块（block）</span>
@@ -394,7 +395,7 @@ flowchart LR
   B --> C[LZSS 符号流]
   C --> D{过滤器}
   D -->|Delta/E8/E8E9/ARM| E[解压输出区域]
-  E --> F[Huffman 表 ×4: BC/NC/DC/LDC/RC]
+  E --> F[Huffman 表 ×5: BC/NC/DC/LDC/RC]
   F --> G[压缩块帧: 标志/校验/大小]
   G --> H[MSB 位流打包]
   H --> I[packed 输出]
@@ -411,7 +412,7 @@ flowchart LR
           </div>
           <div class="rounded-xl border border-slate-200 bg-white p-4">
             <p class="tag text-indigo-500 mb-2">6.2 Huffman 表</p>
-            <p class="mono text-xs text-slate-600 mb-2">每块先写 4 张表，码长 ≤ 15</p>
+            <p class="mono text-xs text-slate-600 mb-2">每块先写 5 张表，码长 ≤ 15</p>
             <table class="w-full text-xs border-collapse">
               <tbody class="mono text-slate-600">
                 <tr class="border-b border-slate-100"><td class="py-1 pr-3">BC</td><td>20</td><td class="text-slate-400">编码其余表的码长</td></tr>
@@ -499,7 +500,7 @@ flowchart TD
           </div>
           <div class="rounded-xl border border-slate-200 bg-white p-4">
             <p class="tag text-indigo-500 mb-2">7.4 头加密（-hp）</p>
-            <p class="text-xs text-slate-600">每卷开头写明文归档加密头（无 IV）；其后每块头为 <span class="mono">[16B 随机 IV][AES-256-CBC(zero-fill) 密文]</span>。密钥每卷重派（同盐），块 IV 各自随机。🔧 限制（与 WinRAR 一致）：<span class="mono">-hp</span> 分卷不能用内联 RR；QO 不与 <span class="mono">-hp</span>/分卷组合。</p>
+            <p class="text-xs text-slate-600">每卷开头写明文归档加密头（无 IV）；其后每块头为 <span class="mono">[16B 随机 IV][AES-256-CBC(zero-fill) 密文]</span>。密钥每卷重派（同盐），块 IV 各自随机。🔧 限制（与 WinRAR 一致）：<span class="mono">-hp</span> 可与内联 RR 共存（每次编辑重建）；QO 不与 <span class="mono">-hp</span> 组合。</p>
           </div>
           <div class="rounded-xl border border-slate-200 bg-white p-4">
             <p class="tag text-indigo-500 mb-2">7.5 hash-key MAC</p>
@@ -517,7 +518,7 @@ flowchart TD
           <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><div class="flex justify-between"><span class="tag text-slate-500">卷 1 · part1.rar</span><span class="mono text-xs text-slate-400">[加密头?][主头][成员…][结束头 · NEXT_VOLUME]</span></div></div>
           <div class="rounded-lg border border-slate-300 bg-slate-50 p-3"><div class="flex justify-between"><span class="tag text-slate-500">卷 2 · part2.rar</span><span class="mono text-xs text-slate-400">[加密头?][成员…][结束头 · NEXT_VOLUME]</span></div></div>
           <div class="rounded-lg deep text-slate-100 p-3"><div class="flex justify-between"><span class="tag text-indigo-200">卷 N · partN.rar（末卷）</span><span class="mono text-xs text-slate-300">[加密头?][成员…][QO?][RR?][结束头 · 0]</span></div></div>
-          <p class="mono text-xs text-slate-400">跨卷成员：旧卷写 DATA_CONTINUES 块（非末块头带密文 CRC32），新卷写 DATA_CONTINUE_TO 块（末块头带 MAC 明文 CRC + 完整 extra 区）。支持创建/读取/删除/重命名跨卷成员；<strong>不支持</strong>分卷 append、分卷锁定、分卷注释、分卷内联 RR（官方 <span class="mono">rar</span> 同样拒绝）。恢复卷见 §9.2。</p>
+          <p class="mono text-xs text-slate-400">跨卷成员：旧卷写 DATA_CONTINUES 块（非末块头带密文 CRC32），新卷写 DATA_CONTINUE_TO 块（末块头带 MAC 明文 CRC + 完整 extra 区）。支持创建/读取/删除/重命名跨卷成员；分卷 append、锁定、注释与内联 RR 也都支持（append/注释走整集重打包，逐卷重建恢复记录）。恢复卷见 §9.2。</p>
         </div>
       </section>
 
@@ -571,7 +572,7 @@ flowchart TD
             <li>· solid 分卷同样支持（状态跨卷保持）。</li>
           </ul>
           <div class="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
-            <p class="text-xs text-emerald-700">🔧 rar-rs：solid 与多线程压缩<strong>互斥</strong>（solid 保持串行）；WinRAR 无 rarfiles.lst 时按名字/扩展名启发式排序，rar-rs 按参数顺序（已知小差异，互操作无碍）。</p>
+            <p class="text-xs text-emerald-700">🔧 rar-rs：RAR5 solid 支持 chunk 级多线程（RAR4 solid 链仍串行）；solid 成员排序按 WinRAR 的分组规则（扩展名 → 基本名 → 大小 → 全名），互操作无碍。</p>
           </div>
         </div>
       </section>
@@ -675,7 +676,7 @@ flowchart TD
         <h2 class="font-serif text-2xl font-semibold mb-1">附录 B · 参考来源</h2>
         <div class="rounded-xl border border-slate-200 bg-white p-5 mt-4 text-sm text-slate-600">
           <ul class="space-y-1.5">
-            <li>· <strong>权威</strong>：rar-rs 实现（<span class="mono">crates/rar/src/format/rar5/{mod,payload,extract}.rs</span>、<span class="mono">format/rar5/headers/{parse,serialize,locator,quick_open}.rs</span>、<span class="mono">format/rar5/write/{mod,engine,layout}.rs</span>、<span class="mono">codec/modern/lzss_huff/{encoder,decoder}.rs</span>、<span class="mono">crypto/rar50.rs</span>、<span class="mono">recovery/{rar50,rev50}.rs</span>），WinRAR 7.23 双向互操作验证。</li>
+            <li>· <strong>权威</strong>：rar-rs 实现（<span class="mono">crates/rar/src/format/rar5/{mod,payload,extract}.rs</span>、<span class="mono">format/rar5/headers/{parse,serialize,locator,quick_open}.rs</span>、<span class="mono">format/rar5/write/{mod,engine,layout}.rs</span>、<span class="mono">codec/modern/lzss_huff/{encoder/,decode.rs}</span>、<span class="mono">crypto/rar50.rs</span>、<span class="mono">recovery/{rar50,rev50}.rs</span>），WinRAR 7.23 双向互操作验证。</li>
             <li>· 交叉核对：bitplane/rars（<span class="mono">crates/rars/src/rar50*.rs</span>）与 <a class="text-indigo-600" href="https://github.com/bitplane/rar-research">rar-research</a> 规格书；冲突处以本实现为准。</li>
             <li>· 位流格式源自对 libarchive <span class="mono">archive_read_support_format_rar5.c</span>（Grzegorz Antoniak, 2018, BSD-2-Clause）的独立分析。</li>
           </ul>

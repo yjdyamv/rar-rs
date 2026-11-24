@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-11-24 @ `cd269b1`；实现细节以源码为准。
+> 最后核对：2026-11-24 @ `b1d5924`；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -102,7 +102,7 @@
       **机制（`Rar7.exe` 7-23）**：`FUN_14003631c(stream,size)` = `seek`+`SetEndOfFile`，把每个非末卷预分配到计划大小，扩出来的零就是卷尾；多卷驱动 `FUN_14005be6c` 在 L428 对每卷调用它，大小取自 `[base+vol*0x40+0x30]`。每卷数据预算在 `FUN_14007de58(ctx,volume_size)`；`FUN_14007d704` 是前缀搜索；`FUN_140054100(type=3,pct,prefix)` = `plan_inline_recovery(prefix,pct).payload_size() + 0x16`（官方按**固定 22 字节**估 RR 服务头，实际头是 19/23/25，差额落在零尾）；`FUN_140054dfc` 是 RR 计划（data_shards 上限 200、`(2*pct*ds)/200`、group_count 取偶、header_size=`ds*8+0x48`、shard=`blocks*header+gc`，与我们 `plan_inline_recovery` 逐项一致）；`FUN_1400542cc` 发射 `{RB}` 块（magic `7b52427d`、64 KiB 分块）。
       **完整预算模型**（设 `V = volume_size`）：① `bound = V − 8`（8 = RAR5 END；`-hp` 时 32）。② 无 `-rr` 时 `term = bound`；有 `-rr` 时取满足 `u + plan_inline_recovery(u,pct).payload_size() + 0x16 ≤ bound` 的**最大前缀** `u`，再 `term = u − 8`（`FUN_14007de58` 里 `ctx[0x1f80] = lVar3 − lVar6` 的 `−8`）。③ `QO 预留 = 有 QO ? quick_open::entry_len_upper(V, header_len) + 8 : 0`（我们现在只到 `+0`）。④ 成员数据预算 `data = term − QO预留 − (8 签名 + 主头 + 文件头)`。⑤ **补零规则**：`content = 8 + 主头 + 文件头 + data + QO实际 + RR实际 + END`；非末卷**当且仅当 `V − content ≤ max(V/128, 1024)`** 时补零到 `V`，否则停在 `content`（末卷永不补）。
       **对拍**（`-m0` STORE，`-v{32k…512k} × -rr{1..100}%`，取每例的非末卷）：实现后**卷文件大小 / 成员 `data` / `content` 全部 1000/1000**。`-qo-` 无 RR 时本就逐字节相同。
-      **实现（2026-11-22）**：`volume_term()` 复刻 `FUN_14007de58` 的 term；`volume_tail_reserve()` 用 `QO预留(+8) + (V − term)`；`pad_volume_tail()` 复刻「`V − content ≤ max(V/128,1024)` 才补零」；顺带把服务块 `data_size`/`unpacked_size` 改为走成员宽度分档（实测官方在 >7.5 KiB 时也宽 3 字节，QO 与 RR 都如此）。`format_parity` 的 `-rr` 分卷用例已从「字段级」升级为「padding 与 chunk 全等」，`cargo test --workspace --all-features` 全绿。复现脚本 `.scratch/{fastsweep,verify_ours}.mjs`；Ghidra 结论在 `Rar7.exe` 的 `rar5-volume` note。
+      **实现（2026-11-22）**：`volume_term()` 复刻 `FUN_14007de58` 的 term；`volume_tail_reserve()` 用 `QO预留(+8) + (V − term)`；`pad_volume_tail()` 复刻「`V − content ≤ max(V/128,1024)` 才补零」；顺带把服务块 `data_size`/`unpacked_size` 改为走成员宽度分档（实测官方在 >7.5 KiB 时也宽 3 字节，QO 与 RR 都如此）。`format_parity` 的 `-rr` 分卷用例已从「字段级」升级为「padding 与 chunk 全等」，`cargo test --workspace --all-features` 全绿。取证过程在 git 历史；Ghidra 结论在 `Rar7.exe` 的 `rar5-volume` note。
 
 - [x] **solid 里的滤波：换逐块选择器（2026-11-21）**：solid 成员改用非 solid 的
       逐 64 KiB 块选择器（`best_combined_specs`），拿回整员探针漏掉的 x86——87 MB
@@ -126,8 +126,8 @@
 
 - [x] **MT
       档位改成「全档走法」（2026-11-17，`exp/non-dp-official-shape`）**：当前基线见
-      本文件上表，过程与被排除的方案见
-      `docs/issues/compression-perf/handoff-2026-11-17.md`。内核镜像上
+      本文件上表，被排除的方案见
+      [`docs/adr/0011-official-shaped-matcher.md`](docs/adr/0011-official-shaped-matcher.md)。内核镜像上
       `-m3`~`-m5` 与官方 同速（0.96 / 1.00 / 0.99x），`-m1`/`-m2`
       的比率好于官方，其余档差 +1.2…+3.2 pp。 同一分支上继续追比率的结果是：**非
       DP 路的杠杆已穷举**（候选结构、判决规则、
@@ -317,12 +317,12 @@ B）上各档与官方的差距在 ±0.8 pp 内，时间 0.9–1.3x。
 `-m1`~`-m5` 的比率各压低 0.1–0.25 pp，代价是 `-m3`/`-m5` 各 +12/+23
 ms（仍与官方同档）。
 判决规则本身（官方接受的"更近的短匹配"闸门、比特定价、收紧距离闸门）三样实测都是负的，
-证据与逆向读到的判决循环见 handoff。 `-m1` 只在**内核镜像**上慢（1.52x，另两份
+证据与逆向读到的判决循环见
+[`docs/adr/0011-official-shaped-matcher.md`](docs/adr/0011-official-shaped-matcher.md)。 `-m1` 只在**内核镜像**上慢（1.52x，另两份
 0.97 / 1.05x），而且差距不在索引结构：官方 `FUN_140043670` 把链按 `window * 4`
 分配、`FUN_1400468d4` 按"位置模窗口"走链，与我们 一样是每位置 4 字节，另外还多了
 prev1/2/4 距离表。剩下的是**每位置的解析开销**
-（短匹配源、惰性探针、距离缓存排序各占一段，实测 waves 里没有一个超过 20%）。见
-[`docs/issues/compression-perf/handoff-2026-11-17.md`](docs/issues/compression-perf/handoff-2026-11-17.md)。
+（短匹配源、惰性探针、距离缓存排序各占一段，实测 waves 里没有一个超过 20%）。
 
 **位置索引的构建与预表**：链没法分片建——每片头表从空开始，walk
 走到"该片内首次出现" 就断，而断的正是长距匹配（实测 markdown：精确 244,419 B，2
@@ -421,8 +421,12 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 [`docs/PITFALLS.md`](docs/PITFALLS.md)，并删掉文件。
 
 - [`compression-perf/`](docs/issues/compression-perf/) —
-  04（窗口级不可压缩跳过）、 09（DLL 解析速度）、15（价格驱动解析），均对应上面
-  「性能」段的清单项。
+  04（[窗口级不可压缩跳过](docs/issues/compression-perf/04-window-incompressible-skip.md)）、
+  09（[DLL 解析速度](docs/issues/compression-perf/09-dll-parse-speed.md)）、
+  15（[价格驱动解析](docs/issues/compression-perf/15-fl2-zstd-parser-tiers.md)），均对应
+  上面「性能」段的清单项。
+- [`rar5-decode/`](docs/issues/rar5-decode/) —
+  [`FUN_14007ab9c` 的距离码 → 槽位解析与轮转、记录类型 4 的语义](docs/issues/rar5-decode/official-decode-path.md)。
 
 ## 一致拒绝（别"修"）
 
@@ -592,5 +596,5 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
    404，别拿它当判据）；`npm view
    @yjdyamv/rar-rs version` 与
    `npm i @yjdyamv/rar-rs` 后 `require('@yjdyamv/rar-rs')` 能加载。
-8. 刷新本文件与 `README` / `CONTEXT` / `ARCHITECTURE` / `CLI` / `testing` 的
-   `最后核对` 锚点。
+8. 刷新本文件与各实现性文档的 `最后核对` 锚点（清单见
+   [`docs/README.md`](docs/README.md)）。

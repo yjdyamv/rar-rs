@@ -1,6 +1,6 @@
 # Testing
 
-> Last verified: 2026-11-23 @ `c756675`; every timing number here is a
+> Last verified: 2026-11-24 @ `b1d5924`; every timing number here is a
 > host-specific snapshot, not a contract.
 
 How the suite is organized, what it costs, and the traps to know before changing
@@ -20,98 +20,49 @@ fast (it parallelizes across test binaries instead of running them one after
 another) and prints a per-test timing report — the easiest way to find what got
 slow. It is a local convenience only.
 
-**This is the main test gate.** CI runs a deterministic **smoke** subset in the
-`test` job: `cargo test -p rar-rs --all-features --locked` plus
-`cargo test -p rar-cli --locked --bins --test cli_behavior --test volume_bare_name`
-plus `cargo test -p rar-rs-napi --lib --locked` — the library and CLI suites,
-with no official-tool interop and no JS/WASI binding suite. That was added
-2026-09-28 after a stale assertion shipped with 0.12.0 because nothing ran the
-tests; the JS/WASI binding suites stay local (2026-09, owner's request: the WASI
-binding suite blocked a release on a non-reproducible
-`memory access out of bounds`, and a red run must mean a compile/lint/test-fact
-failure, not a test flake). `--all-features` is one run rather than the earlier
-default/feature pair because `crates/rar` declares `default = []` and no test is
-`cfg(not(feature = ...))`: with `default` the feature-gated code
-(`extract_all_parallel`, `encode_chunked_mt`, the simd paths) was only ever
-_compiled_ by the clippy matrix, never executed — which is how a dead progress
-tracker and a `Collect` policy that silently behaved like `Abort` reached main.
-`--bins` covers just the 104 unit tests inside the binaries, so the hermetic CLI
-integration targets are named explicitly — `cli_behavior` (the WinRAR switch
-contract) and `volume_bare_name` (a regression that only surfaced on Unix), so
-adding a hermetic suite cannot silently stay out of CI. `official_interop` has
-its own jobs — `test-interop` on Linux and `test-interop-windows` on Windows:
-each fetches the official builds, points `SA_OFFICIAL_RAR` / `SA_OFFICIAL_UNRAR`
-at them and sets `SA_REQUIRE_OFFICIAL=1`, so the suite executes instead of
-printing skip markers. `winrar_interop` needs the Windows `WinRAR.exe`, so it
-runs in `test-interop-windows` (and locally). The static
-counterpart, the `check` job, keeps fmt, the guards, clippy (which subsumes
-`cargo check`), the wasm-target `cargo check`, `cargo deny` and rustdoc; the
-binding's `tsc --noEmit` gate runs in the `build` matrix, on the one target
-whose generated `binding.d.ts` it needs.
+**This is the main gate.** CI runs a deterministic **smoke** subset in the
+`test` job — `cargo test -p rar-rs --all-features --locked`, the rar-cli hermetic
+targets (`--bins --test cli_behavior --test volume_bare_name`), and
+`cargo test -p rar-rs-napi --lib` — with no official-tool interop and no JS/WASI
+binding suite. The interop suites have their own jobs that fetch the official
+builds and set `SA_REQUIRE_OFFICIAL=1` so they execute instead of self-skipping;
+the job graph itself — every job, what it may prove and what it costs — is
+[`ci.md`](ci.md)'s. Two of the choices here are testing's own:
 
-The `test` job also carries the checks that need neither an addon nor an
-official tool: the binding's Rust unit tests (`cargo test -p rar-rs-napi --lib`,
-which pin the public error contract),
-`node --test
-crates/rar-napi/__test__/wasi-path-map.test.mjs` (the hand-written
-JS path mapping and the loader's export table — it imports only tracked sources,
-so it cannot flake on a missing build), and
-`bash scripts/ci/test-install-zig.sh` against its fixture server (tarball naming
-variants, checksum failure, mirror race, the `GITHUB_PATH` export — it drives
-the zig half of `scripts/ci/install-musl-toolchain.sh`). Two of `test`'s steps
-are `schedule`/tag only because dropping them would drop coverage, not
-duplication: the second pass over the 10 generated-corpus targets, this time
-against a scalar (`default = []`) library build, and — in the Windows job — the
-same corpus with `SA_REQUIRE_WINRAR=1`. The `--all-features` pass on every push
-already executes those suites; the extra passes buy a different library
-configuration for a second compile of the crate plus every test binary. Two
-Windows jobs run on `windows-latest` on the same triggers, split like `check` /
-`test`: `check-windows` is clippy over all features and targets, `test-windows`
-is `cli_behavior`, `volume_bare_name` and the binding's lib tests (plus, on
-tags/dispatches, the generated corpus), and `test-interop-windows` is the two
-interop suites (`official_interop`, `winrar_interop`) against the official
-Windows builds. On Linux the same two axes are `test` and `test-interop`.
-`release` waits on all of them — everything
-under `#[cfg(windows)]` used to be compiled for the first time by the release
-matrix itself. A `test-i686` job mirrors `test`'s three commands
-(`rar-rs --all-features`, the rar-cli hermetic targets, the binding's lib tests)
-on `i686-unknown-linux-gnu` — 32-bit `usize`, where the
-`#[cfg(target_pointer_width = "32")]` regression tests (the rar29 VM block-start
-overflow, the rar5 dictionary caps, the rar4 `LONG_BLOCK` narrowing, the
-decoder) exist at all; Linux/glibc rather than Windows x86 because the reports
-came from Debian's i386 port, and `release` waits on it. A fifth, `msrv`,
-installs the `rust-version` read out of `Cargo.toml`
-(1.95) and runs `cargo check --workspace --all-features --locked` with it, so
-the declared floor is executed rather than asserted; `release` waits on it too,
-because publishing a crate whose stated MSRV does not compile is a broken
-promise. Everything under "Running" above (including the interop suites and the
-ignored codec matrix) is still yours to run before tagging a release. The Linux
-half in one command: `bash scripts/wsl/ci-linux.sh` (WSL2 — it _is_ the Linux
-test gate now).
+- **`--all-features`, one run rather than a `default`/feature pair.** `crates/rar`
+  declares `default = []` and no test is `cfg(not(feature = ...))`: under `default`
+  the feature-gated code (`extract_all_parallel`, `encode_chunked_mt`, the simd
+  paths) was only ever _compiled_ by the clippy matrix and never executed — which
+  is how a dead progress tracker and a `Collect` policy that silently behaved like
+  `Abort` reached main.
+- **The hermetic CLI targets are named explicitly.** `--bins` covers only the unit
+  tests inside the binaries, so `cli_behavior` (the WinRAR switch contract) and
+  `volume_bare_name` (a regression that only surfaced on Unix) are listed by name,
+  so a new hermetic suite cannot silently stay out of CI.
 
-The **static** checks `check` runs — actionlint over the workflow files,
-shellcheck over `scripts/**/*.sh`, fmt, the host-path guard, the five-place
-version comparison, the wasm-target `cargo check`, clippy over the `rar-rs`
-feature combinations the workspace build cannot cover (the all-features one is
-that build), rustdoc and the `cargo deny` gate — are not part of
-`cargo test --workspace`. `scripts/ci-lint.sh` runs them (and `test`'s targets)
-in one command:
+The JS/WASI binding suites stay local on purpose: a red run must mean a
+compile/lint/test-fact failure, not a flake (the WASI suite once blocked a release
+on a non-reproducible `memory access out of bounds`).
+
+Everything under "Running" above — the interop suites and the ignored codec
+matrix included — is still yours to run before tagging a release; the Linux half
+in one command is `bash scripts/wsl/ci-linux.sh` (WSL2 — it _is_ the Linux test
+gate now).
+
+`scripts/ci-lint.sh` runs the `check` job's static checks (fmt, the manifest
+guards, the version comparison, clippy, rustdoc, `cargo deny`, actionlint and
+shellcheck) plus the `test` job's targets in one command:
 
 ```sh
 scripts/ci-lint.sh              # static checks + the `test` job's targets
 scripts/ci-lint.sh --no-tests   # static checks only (fast)
 ```
 
-It runs the same checks as the `check` and `test` jobs
-(`.github/workflows/CI.yml` is the source of truth) and runs on Linux, macOS and
-Windows Git Bash, skipping the `cargo deny`, actionlint, shellcheck and node
-steps when those tools are absent (actionlint is the one check it cannot
-download for you — the pinned release tarball there is Linux-only; set
-`ACTIONLINT_BIN` to a local binary to include it). The checks that used to be
-copy-pasted — the host-path guard, the five-place version comparison, the
-`rar-rs` clippy feature matrix and the generated-corpus target list — now live
-in `scripts/ci/` and are called from both sides, so only the orchestration can
-drift:
+It runs on Linux, macOS and Windows Git Bash, skipping the `cargo deny`,
+actionlint, shellcheck and node steps when those tools are absent (set
+`ACTIONLINT_BIN` to a local binary to include actionlint). What each check is and
+why it is shaped that way is [`ci.md`](ci.md)'s; the guards that used to be
+copy-pasted now live in `scripts/ci/`, so only the orchestration can drift.
 
 ## The other two platforms
 
@@ -148,7 +99,7 @@ RUSTFLAGS="-D warnings" cargo check -p rar-rs --all-features \
   CI's `--workspace` jobs pass. The `wasm32-wasip1-threads` binding additionally
   needs the `EMNAPI_LINK_DIR` that `napi build` injects, so build it with
   `npm run build:wasi` (`--target wasm32-wasip1-threads --no-js`, then
-  `scripts/patch-wasi-loader.mjs` — it must stay the last step: a later native
+  `crates/rar-napi/scripts/patch-wasi-loader.mjs` — it must stay the last step: a later native
   `napi build` regenerates the loader unpatched, and the `--no-js` WASI build
   prunes the generated `binding.js` that `rar-rs.js` requires).
 

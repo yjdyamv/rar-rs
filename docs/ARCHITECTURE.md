@@ -1,6 +1,6 @@
 # 架构与模块布局
 
-> 最后核对：2026-11-24 @ `cd269b1`；实现细节以源码为准。
+> 最后核对：2026-11-24 @ `b1d5924`；实现细节以源码为准。
 
 库 crate `crates/rar`（crate 名 `rar-rs`）的模块地图与设计不变量。
 
@@ -24,20 +24,16 @@
 三个 crate 都不依赖外部 RAR/UNRAR 二进制；库 crate 只用纯 Rust 基础依赖（CRC /
 AES / HMAC / SHA / rand / zeroize，`parallel` / `simd` 可选）。
 
-**版本号一致（发布不变式）。** 必须相等的四处：三个 crate 的
+**版本号一致（发布不变式）。** 必须相等的五处：三个 crate 的
 `[package]
-version`，以及 `crates/rar-napi/package.json` 的
-`version`。绑定产物（原生 `.node` 与 wasm）都出自
-`rar-rs-napi`，**没有独立版本号**——「napi 版本」就是「wasm 版本」。另有两处要与
-`crates/rar` 对齐：
-
-- 根 `Cargo.toml` 的 `[workspace.dependencies] rar-rs` 的 `version`：不等时
-  `cargo package` 直接拒绝。
-- 发布 tag `vX.Y.Z`：Release job 只校验它等于 `crates/rar-napi` 的 Cargo.toml 与
-  package.json。
+version`，`crates/rar-napi/package.json` 的 `version`，以及根 `Cargo.toml` 的
+`[workspace.dependencies] rar-rs` 的 `version`（不等时 `cargo package` 直接拒绝）。
+绑定产物（原生 `.node` 与 wasm）都出自 `rar-rs-napi`，**没有独立版本号**——「napi
+版本」就是「wasm 版本」。此外发布 tag `vX.Y.Z` 要与 `crates/rar-napi` 的 Cargo.toml
+与 package.json 对齐（Release job 只校验这一处）。
 
 改版本号还要刷新 `Cargo.lock` 与 `fuzz/Cargo.lock`（两个 CI 检查都带
-`--locked`）。四者一致由 `check` job 的 "Workspace versions agree"
+`--locked`）。五者一致由 `check` job 的 "Workspace versions agree"
 步骤守住。**当前同为 `0.16.1`。**
 
 ## 2 · 模块地图
