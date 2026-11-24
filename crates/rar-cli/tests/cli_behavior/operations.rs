@@ -604,14 +604,6 @@ fn cli_sfx_stub_self_extracts() {
     let sfx = dir.path().join(format!("base.{}", sfx_ext()));
     assert!(sfx.exists(), "the SFX archive must exist");
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&sfx).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&sfx, perms).unwrap();
-    }
-
     let out = dir.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
     let mut command = std::process::Command::new(&sfx);
@@ -673,6 +665,171 @@ fn cli_sfx_convert_rejects_a_volume_set() {
     assert!(
         !dir.path().join(format!("set.part1.{}", sfx_ext())).exists(),
         "no SFX may be written for a set"
+    );
+}
+
+/// The bundled stub mirrors WinRAR's console SFX: an archive password can be
+/// set with `-p<pwd>` or typed at the no-echo prompt, and closing stdin at the
+/// prompt aborts with WinRAR's exit 12.
+#[test]
+fn cli_sfx_stub_handles_encrypted_archives() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("s.txt"), b"secret payload").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sfx", "-ppw", "-idq"])
+        .env("RAR_SFX_STUB", sfx_stub())
+        .arg("enc.rar")
+        .arg("s.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let sfx = dir.path().join(format!("enc.{}", sfx_ext()));
+
+    // `-p<pwd>` answers without prompting.
+    let flag = dir.path().join("flag");
+    std::fs::create_dir(&flag).unwrap();
+    let status = std::process::Command::new(&sfx)
+        .arg("-ppw")
+        .current_dir(&flag)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read(flag.join("s.txt")).unwrap(),
+        b"secret payload"
+    );
+
+    // Typed at the prompt.
+    std::fs::write(dir.path().join("pw.txt"), b"pw\n").unwrap();
+    let typed = dir.path().join("typed");
+    std::fs::create_dir(&typed).unwrap();
+    let status = std::process::Command::new(&sfx)
+        .current_dir(&typed)
+        .stdin(std::process::Stdio::from(
+            std::fs::File::open(dir.path().join("pw.txt")).unwrap(),
+        ))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read(typed.join("s.txt")).unwrap(),
+        b"secret payload"
+    );
+
+    // EOF at the prompt aborts (exit 12) and writes nothing.
+    let empty = dir.path().join("empty.txt");
+    std::fs::write(&empty, b"").unwrap();
+    let aborted = dir.path().join("aborted");
+    std::fs::create_dir(&aborted).unwrap();
+    let status = std::process::Command::new(&sfx)
+        .current_dir(&aborted)
+        .stdin(std::process::Stdio::from(
+            std::fs::File::open(&empty).unwrap(),
+        ))
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(12));
+    assert!(!aborted.join("s.txt").exists());
+}
+
+/// `-t` verifies, `-v` lists the members and `-?` prints the help.
+#[test]
+fn cli_sfx_stub_test_list_and_help() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"payload").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sfx", "-idq"])
+        .env("RAR_SFX_STUB", sfx_stub())
+        .arg("plain.rar")
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let sfx = dir.path().join(format!("plain.{}", sfx_ext()));
+
+    let test = std::process::Command::new(&sfx)
+        .arg("-t")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(test.status.success());
+    assert!(String::from_utf8_lossy(&test.stdout).contains("All OK"));
+
+    let list = std::process::Command::new(&sfx)
+        .arg("-v")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let listed = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        listed.contains("a.txt"),
+        "listing should name the member: {listed}"
+    );
+
+    let help = std::process::Command::new(&sfx)
+        .arg("-?")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("-x"));
+}
+
+/// An existing destination is asked about (`Yes`/`No`/...); `-o+`/`-o-` skip the
+/// question, and `Q`/EOF at the prompt aborts with exit 12.
+#[test]
+fn cli_sfx_stub_overwrite_prompt() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"new payload").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-sfx", "-idq"])
+        .env("RAR_SFX_STUB", sfx_stub())
+        .arg("plain.rar")
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let sfx = dir.path().join(format!("plain.{}", sfx_ext()));
+
+    let case = |name: &str, answer: Option<&str>, extra: &[&str]| {
+        let out = dir.path().join(name);
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("a.txt"), b"OLD").unwrap();
+        let mut command = std::process::Command::new(&sfx);
+        command.args(extra).current_dir(&out);
+        match answer {
+            Some(answer) => {
+                let path = dir.path().join(format!("{name}.in"));
+                std::fs::write(&path, answer).unwrap();
+                command.stdin(std::process::Stdio::from(
+                    std::fs::File::open(path).unwrap(),
+                ));
+            }
+            None => {
+                command.stdin(std::process::Stdio::null());
+            }
+        }
+        let status = command.status().unwrap();
+        (status.code(), std::fs::read(out.join("a.txt")).unwrap())
+    };
+
+    assert_eq!(
+        case("yes", Some("y\n"), &[]),
+        (Some(0), b"new payload".to_vec())
+    );
+    assert_eq!(case("no", Some("n\n"), &[]), (Some(0), b"OLD".to_vec()));
+    assert_eq!(case("eof", None, &[]), (Some(12), b"OLD".to_vec()));
+    assert_eq!(
+        case("oplus", Some("n\n"), &["-o+"]),
+        (Some(0), b"new payload".to_vec())
+    );
+    assert_eq!(
+        case("ominus", Some("y\n"), &["-o-"]),
+        (Some(0), b"OLD".to_vec())
     );
 }
 

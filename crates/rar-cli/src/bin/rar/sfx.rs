@@ -76,6 +76,7 @@ pub(crate) fn cmd_sfx(args: &SfxArgs, assume_yes: bool) -> CliResult<()> {
     out.extend_from_slice(&module_bytes);
     out.extend_from_slice(&payload);
     std::fs::write(&out_path, &out).map_err(|e| format!("write: {e}"))?;
+    make_executable(std::path::Path::new(&out_path));
     info!("Created {out_path}");
     Ok(())
 }
@@ -139,8 +140,26 @@ pub(crate) fn prepend_module_in_place(
         let _ = std::fs::remove_file(&tmp);
     }
     staged.map_err(|e| format!("write: {e}"))?;
+    make_executable(archive);
     Ok(())
 }
+
+/// On Unix a self-extracting archive has to be executable to run, so mark it
+/// like official `rar s` does: grant an execute bit wherever the matching read
+/// bit is set. A no-op on Windows, where the `.exe` extension suffices.
+#[cfg(unix)]
+pub(crate) fn make_executable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        let mode = permissions.mode();
+        permissions.set_mode(mode | ((mode & 0o444) >> 2));
+        let _ = std::fs::set_permissions(path, permissions);
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn make_executable(_path: &std::path::Path) {}
 
 /// The extension WinRAR gives an SFX archive on this platform: `.exe` on
 /// Windows, `.sfx` elsewhere (official `rar s` on Linux writes `name.sfx`).

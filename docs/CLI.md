@@ -191,7 +191,12 @@ skipping. With a terminal and no `-y`/`-o±`/`-or`/`-f`/`-u`, extraction asks
   **console** self-extractor built next to `rar` (`rar-sfx`, so no WinRAR
   install is needed; `RAR_SFX_STUB` overrides it), falling back to an official
   console stub (`WinCon.SFX` / `default.sfx`); readers accept either spelling
-  of part 1.
+  of part 1. The stub's own command line follows WinRAR's console SFX: the
+  commands `-x` (extract, default) / `-t` / `-v` / `-?`, an archive-password
+  prompt (no echo; also settable with `-p<pwd>`, `-p-` disables it) and an
+  interactive overwrite prompt (bypassed with `-y`/`-o+`, or `-o-` to skip,
+  `-or` to rename). It exits 11 on a wrong password and 12 when a prompt is
+  closed, like WinRAR. A created SFX is marked executable on Unix.
 - `-z<file>` / `-c-` — comment file / no comment (`-z` is accepted and ignored
   outside the create and comment commands)
 
