@@ -1,6 +1,6 @@
 # rar-rs 计划
 
-> 最后核对：2026-11-23 @ `c756675`；实现细节以源码为准。
+> 最后核对：2026-11-24 @ `cd269b1`；实现细节以源码为准。
 
 本文件只留**下一步**与**当前判断**。规则、契约与「别改回去」的地雷在
 [`docs/PITFALLS.md`](docs/PITFALLS.md)；模块地图与设计不变量在
@@ -93,12 +93,8 @@
 
 ### 待办总览（未完成项）
 
-- **CI 首跑/复核**：跨平台 build 矩阵、绑定 `typecheck`、release 上传与跨 target
-  的二进制加载只能由 CI 证明；`workflow_dispatch` 带一个**已发布**的
-  `release_tag` 复核 skip 分支（OIDC 真发已由 `v0.15.3` 证明）。
 - **性能**：issue 09（DLL 单线程解析）、issue 15（价格驱动解析中间档 `-m1.5`?
   待决策）、issue 04（MT 窗口级不可压缩跳过）。
-- **溯源**：`rars` 移植的逐文件与上游对拍（in-tree claim，不影响许可表达式）。
 
 ### 已知差异（已量化；`-qo`/`-rr` 分卷已对齐）
 
@@ -384,8 +380,6 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
       路径（宁可变慢也不能搬错）；legacy 源仍走 STORE（`unp_ver` 20
       的既有理由）。 测试
       `archive::reconstruct::tests::rebuild_keeps_the_members_compression`。
-- [ ] **逐文件与上游对拍**：`rars` 移植的出处目前是 in-tree claim（每个文件头 +
-      inventory 表），尚未与上游 diff。不影响已定的许可表达式。
 
 ### 有意不做（设计决定，别当缺口修）
 
@@ -411,8 +405,12 @@ DP 阶段的成本结构（第 22 项调查时用临时 stage 计时器 +
 
 ## 已完成
 
-已发布 `0.15.1` / `0.15.2` / `0.15.3`（GitHub Releases、crates.io、npm
-`@yjdyamv/rar-rs`）。发布流水线、Trusted Publishing、npm 单包决策与 CI 形态见
+已发布 `0.15.1`–`0.16.1`（GitHub Releases、crates.io、npm `@yjdyamv/rar-rs`）。
+**发布链路已端到端验证**（`v0.16.1`，2026-11-23）：31 个资产（9 个平台
+`.node` + 7 个 CLI tarball + WASI 三件套与 loader + 许可 + `SHA-256SUMS`），
+`crates.io` 与 npm 的 0.16.1 均已上架；main 上 push / schedule /
+`workflow_dispatch` 三种触发的 CI 全绿（含 Windows interop 与 i686）。
+发布流水线、Trusted Publishing、npm 单包决策与 CI 形态见
 [`docs/ci.md`](docs/ci.md)；测试语料、`SA_REQUIRE_WINRAR` 与版本上限见
 [`docs/testing.md`](docs/testing.md)；`rar-cli` 的空 lib 目标为何存在见
 [`crates/rar-cli/src/lib.rs`](crates/rar-cli/src/lib.rs)。
