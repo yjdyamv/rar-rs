@@ -160,16 +160,26 @@ fn read_vint(data: &[u8], offset: usize) -> Option<(u64, usize)> {
     None
 }
 
+/// The fixed RAR4 main header: `HEAD_CRC(2) HEAD_TYPE(1) HEAD_FLAGS(2)
+/// HEAD_SIZE(2)` plus the six reserved bytes. Also the only bytes `HEAD_CRC`
+/// covers when `MHD_COMMENT` is set — the coverage rule owned by
+/// `format::rar4::envelope::header_crc_end`.
+const RAR4_MAIN_HEADER_SIZE: usize = 13;
+
+/// `MHD_COMMENT`: a main header whose embedded comment follows the fixed
+/// header, so its `HEAD_CRC` stops at [`RAR4_MAIN_HEADER_SIZE`] bytes.
+const RAR4_MHD_COMMENT: u16 = 0x0002;
+
 fn rar4_main_header_starts(input: &[u8], offset: usize) -> bool {
     let Some(rest) = input.get(offset + RAR4_SIGNATURE.len()..) else {
         return false;
     };
     // HEAD_CRC(2) HEAD_TYPE(1)=0x73 HEAD_FLAGS(2) HEAD_SIZE(2).
-    if rest.len() < 13 || rest[2] != 0x73 {
+    if rest.len() < RAR4_MAIN_HEADER_SIZE || rest[2] != 0x73 {
         return false;
     }
     let head_size = u16::from_le_bytes([rest[5], rest[6]]) as usize;
-    if !(0x0d..=rest.len()).contains(&head_size) {
+    if !(RAR4_MAIN_HEADER_SIZE..=rest.len()).contains(&head_size) {
         return false;
     }
     // A type + size match is not enough inside an SFX stub: the release
@@ -185,9 +195,9 @@ fn rar4_main_header_starts(input: &[u8], offset: usize) -> bool {
         return true;
     }
     let flags = u16::from_le_bytes([rest[3], rest[4]]);
-    // A main header with an embedded comment covers only the fixed 13 bytes.
-    let crc_end = if flags & 0x0002 != 0 {
-        13.min(head_size)
+    // A main header with an embedded comment covers only the fixed header.
+    let crc_end = if flags & RAR4_MHD_COMMENT != 0 {
+        RAR4_MAIN_HEADER_SIZE.min(head_size)
     } else {
         head_size
     };
@@ -310,6 +320,33 @@ mod tests {
         let found = find_archive_start(&input, 128).unwrap();
         assert_eq!(found.0, ArchiveFamily::Rar15To40);
         assert_eq!(found.1, real);
+    }
+
+    /// `MHD_COMMENT` widens `HEAD_SIZE` to span the embedded comment, but the
+    /// probe must still compute `HEAD_CRC` over only the fixed header — the
+    /// coverage rule `envelope::header_crc_end` owns.
+    #[test]
+    fn accepts_a_comment_carrying_rar4_main_header_with_a_13_byte_crc() {
+        let mut header = [0u8; 20];
+        header[2] = 0x73;
+        header[3..5].copy_from_slice(&super::RAR4_MHD_COMMENT.to_le_bytes());
+        header[5..7].copy_from_slice(&20u16.to_le_bytes());
+        let crc = (crc32fast::hash(&header[2..super::RAR4_MAIN_HEADER_SIZE]) & 0xffff) as u16;
+        header[..2].copy_from_slice(&crc.to_le_bytes());
+        let mut input = super::RAR4_SIGNATURE.to_vec();
+        input.extend_from_slice(&header);
+        assert!(super::rar4_main_header_starts(&input, 0));
+    }
+
+    /// The RAR 1.5.4-era `0xFFFF` "no CRC" sentinel is accepted, matching
+    /// `read_envelope`, which skips the check for it.
+    #[test]
+    fn accepts_the_no_crc_sentinel_on_a_rar4_main_header() {
+        let mut header = rar4_main_header();
+        header[..2].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        let mut input = super::RAR4_SIGNATURE.to_vec();
+        input.extend_from_slice(&header);
+        assert!(super::rar4_main_header_starts(&input, 0));
     }
 
     #[test]
