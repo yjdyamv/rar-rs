@@ -46,6 +46,13 @@ pub(crate) const NEWSUB_HEAD: u8 = 0x7a;
 /// `NEWSUB_HEAD` (0x7a).
 pub(crate) const COMM_HEAD: u8 = 0x75;
 
+/// Whether `head_type` is one of the RAR 1.5–4.x block types: `MARK_HEAD`
+/// (0x72) through `ENDARC_HEAD` (0x7b). A byte outside the range starts no
+/// block header, so the resync and recovery walks share this probe.
+pub(crate) fn is_head_type(head_type: u8) -> bool {
+    (MARK_HEAD..=ENDARC_HEAD).contains(&head_type)
+}
+
 // ── Header flags ───────────────────────────────────────────────────────────
 
 pub(crate) const LONG_BLOCK: u16 = 0x8000;

@@ -12,6 +12,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::{
     COMM_HEAD, FHD_COMMENT, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, MARK_HEAD, file_header_crc_end,
+    is_head_type,
 };
 use crate::crc32::crc32;
 use crate::crypto::Rar30Cipher;
@@ -176,7 +177,7 @@ fn block_candidate<R: Read + Seek>(stream: &mut R, pos: u64, end: u64) -> RarRes
     }
     let head_type = base[2];
     let head_size = u64::from(u16::from_le_bytes([base[5], base[6]]));
-    let candidate = (0x72..=0x7b).contains(&head_type) && head_size >= 7 && pos + head_size <= end;
+    let candidate = is_head_type(head_type) && head_size >= 7 && pos + head_size <= end;
     stream.seek(SeekFrom::Start(pos))?;
     Ok(candidate)
 }

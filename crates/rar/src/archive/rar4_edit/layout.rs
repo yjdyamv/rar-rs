@@ -18,7 +18,7 @@ use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::{
     ENDARC_HEAD, EnvelopePolicy, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD,
-    NEWSUB_HEAD, Rar4Block, read_block,
+    NEWSUB_HEAD, Rar4Block, is_head_type, read_block,
 };
 use crate::fs::atomic::copy_prefix;
 
@@ -322,7 +322,7 @@ pub(super) fn scan_layout_stream(
             let mut probe = [0u8; 3];
             let n = stream.read(&mut probe)?;
             stream.seek(SeekFrom::Start(pos))?;
-            if n < probe.len() || !(0x72..=0x7b).contains(&probe[2]) {
+            if n < probe.len() || !is_head_type(probe[2]) {
                 break;
             }
         }

@@ -32,6 +32,7 @@
 
 use crate::detect::{RAR4_SIGNATURE, find_bytes};
 use crate::error::{RarError, RarResult};
+use crate::format::rar4::{ENDARC_HEAD, MAIN_HEAD, NEWSUB_HEAD, is_head_type};
 
 /// `PROTECT_HEAD` / `RR` NEWSUB parsed from a legacy archive
 /// (file-absolute positions).
@@ -170,8 +171,6 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
     password: Option<&[u8]>,
     tolerant: bool,
 ) -> RarResult<Option<Rar4Protect>> {
-    const ENDARC_HEAD: u8 = 0x7b;
-
     let mut protect = None;
     // `-hp` flag, latched from the (plaintext) main header: every block
     // after it has an encrypted header.
@@ -193,7 +192,7 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
             stream
                 .seek(std::io::SeekFrom::Start(here))
                 .map_err(RarError::Io)?;
-            if n < probe.len() || !(0x72..=0x7b).contains(&probe[2]) {
+            if n < probe.len() || !is_head_type(probe[2]) {
                 break;
             }
         }
@@ -258,7 +257,7 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
                 None => break,
             }
         }
-        if head_type == 0x73 && flags & 0x0080 != 0 {
+        if head_type == MAIN_HEAD && flags & 0x0080 != 0 {
             // MAIN_HEAD + MHD_PASSWORD: the rest of the archive is `-hp`.
             encrypted = true;
         }
@@ -295,7 +294,7 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
         // RAR 3.x/4.x NEWSUB (0x7a) named `RR`: FILE_HEAD-shaped header
         // whose 20-byte tail after the name is `Protect+` + rec_sectors
         // (u32) + total_blocks (u32) + zero.
-        if head_type == 0x7a
+        if head_type == NEWSUB_HEAD
             && flags & 0x8000 != 0
             && header.len() >= 32 + 2 + 20
             && header.get(32..34) == Some(b"RR")
@@ -608,7 +607,7 @@ pub(crate) fn build_legacy_recovery_block(prefix: &[u8], rec_sectors: u32) -> Ra
     let mut header = Vec::with_capacity(32 + 2 + 20);
     // CRC placeholder + type + flags (LONG_BLOCK) + head_size + add_size.
     header.extend_from_slice(&[0u8; 2]);
-    header.push(0x7a); // NEWSUB_HEAD
+    header.push(NEWSUB_HEAD);
     header.extend_from_slice(&(0xC000u16).to_le_bytes()); // LONG_BLOCK
     header.extend_from_slice(&(54u16).to_le_bytes()); // head_size
     header.extend_from_slice(&data_len_u32.to_le_bytes()); // packed/add
