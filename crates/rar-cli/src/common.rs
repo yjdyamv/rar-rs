@@ -109,7 +109,6 @@ fn dedupe_last_wins(
 
 /// Parse a WinRAR `-mdx<size>[k|m|g]` extraction dictionary cap: unlike
 /// `-md`, no unit means **GiB** (`-mdx8` = 8 GiB, per the WinRAR docs).
-#[allow(dead_code)] // used by the `unrar` binary only
 pub fn parse_mdx_size(s: &str) -> Result<u64, String> {
     let (num, mult) = match s.chars().last() {
         Some('k') | Some('K') => (&s[..s.len() - 1], 1024u64),
@@ -710,12 +709,7 @@ pub struct MiscSwitches {
     #[allow(dead_code)]
     pub sound: Option<String>,
 }
-/// Normalize rar-style switches (`-htb`, `-ep1`, `-m3`, `-ap<path>`, ...)
-/// into clap long options. clap short flags are single characters, so the
-/// multi-character rar forms are mapped here; the single-character forms
-/// (`-m`, `-p`, `-v`, `-s`) keep their rar spelling via `short`.
-/// Used only by the `rar` binary.
-#[allow(dead_code)]
+
 /// Exact rar switch spellings and the clap long option they map to. A long
 /// value may already carry its own `=value` (`-ad1`, `-o+`), `-idq` maps to
 /// `--quiet` (informational messages only) and `-inul` to `--silent` (every
@@ -856,9 +850,7 @@ const PREFIX_SWITCHES: &[(&str, &str)] = &[
 /// (`-m`, `-p`, `-v`, `-s`) keep their rar spelling via `short`.
 ///
 /// Simple spellings live in [`EXACT_SWITCHES`] and [`PREFIX_SWITCHES`]; only
-/// the three that need real logic stay as code below. Used only by the `rar`
-/// binary.
-#[allow(dead_code)]
+/// the three that need real logic stay as code below.
 pub fn normalize_switch(arg: &str) -> String {
     // Official `rar`/`unrar` answer `-?` with the command and switch help —
     // the same display clap renders for `--help` — so translate the WinRAR
