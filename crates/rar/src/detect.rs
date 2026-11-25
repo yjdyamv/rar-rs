@@ -20,9 +20,12 @@ pub const RAR13_SIGNATURE: &[u8; 4] = b"RE~^";
 
 /// Which container family a detected signature belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ArchiveFamily {
+pub enum ArchiveFamily {
+    /// The RAR 1.3/1.4 container (`RE~^`).
     Rar13,
+    /// The RAR 1.5–4.x container (7-byte `Rar!\x1a\x07\x00`).
     Rar15To40,
+    /// The RAR5/RAR7 container (8-byte `Rar!\x1a\x07\x01\x00`).
     Rar50Plus,
 }
 
@@ -33,7 +36,11 @@ pub(crate) enum ArchiveFamily {
 /// bytes (our own `rar-sfx` links this crate, so its rodata contains them) is
 /// skipped for the next candidate. Four-byte `RE~^` is only trusted when no
 /// strong signature begins a valid archive.
-pub(crate) fn find_archive_start(input: &[u8], max_scan: usize) -> Option<(ArchiveFamily, usize)> {
+///
+/// This is the single owner of "which archive, and where": the readers open
+/// through it, and callers that only need the family (for example to pick a
+/// repair path) call it rather than re-scanning for the magic bytes.
+pub fn find_archive_start(input: &[u8], max_scan: usize) -> Option<(ArchiveFamily, usize)> {
     if let Some(found) = first_plausible_strong(input, max_scan) {
         return Some(found);
     }
@@ -320,6 +327,22 @@ mod tests {
         let found = find_archive_start(&input, 128).unwrap();
         assert_eq!(found.0, ArchiveFamily::Rar15To40);
         assert_eq!(found.1, real);
+    }
+
+    /// A stub's rodata holds both strong signatures (the crate's constants sit
+    /// next to each other), so detection must skip a bogus *RAR5* one for the
+    /// real RAR4 archive behind it — not only a bogus RAR4 one. This is the
+    /// family a caller like the CLI's `is_rar4_file` must see.
+    #[test]
+    fn skips_an_embedded_rar5_signature_before_a_real_rar4_archive() {
+        let mut input = b"stub".to_vec();
+        input.extend_from_slice(super::RAR5_SIGNATURE);
+        input.extend_from_slice(&[0x41u8; 16]);
+        let real = input.len();
+        input.extend_from_slice(super::RAR4_SIGNATURE);
+        input.extend_from_slice(&rar4_main_header());
+        let found = find_archive_start(&input, 128).unwrap();
+        assert_eq!(found, (ArchiveFamily::Rar15To40, real));
     }
 
     /// `MHD_COMMENT` widens `HEAD_SIZE` to span the embedded comment, but the

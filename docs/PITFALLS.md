@@ -396,9 +396,7 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   自解压器 `rar-sfx`**（与 `rar` 同目录构建，`RAR_SFX_STUB` 可覆盖），回退到
   官方控制台存根（`WinCon.SFX`/`default.sfx`），无需桌面即可自解压。自带存根
   链接 rar-rs，rodata 里含 RAR 签名常量——`detect` 因此按「签名后能解析出合法
-  主头」挑选起点（`detect.rs`），否则会把存根里的假签名当归档开头。存根的
-  CLI 对齐官方控制台 SFX（`-x`/`-t`/`-v`/`-?`、密码提示、覆盖提示、退出码
-  11/12）；创建的 SFX 在 Unix 上置可执行位（否则无法直接运行）。
+  主头」挑选起点（`detect.rs`），否则会把存根里的假签名当归档开头。这条判定只有一个 owner：`rar s-` 的兜底与 CLI 的 `list::is_rar4_file`/`is_rar13_file` 都走 `detect::find_archive_start`，别再按「文件里哪个签名先出现」重扫——存根 rodata 里 RAR5 常量可能排在 RAR4 之前，那种写法会把 RAR4 SFX 判成 RAR5，还会随编译器排布漂移。存根的 CLI 对齐官方控制台 SFX（`-x`/`-t`/`-v`/`-?`、密码提示、覆盖提示、退出码 11/12）；创建的 SFX 在 Unix 上置可执行位（否则无法直接运行）。
 - **删光成员后的重建保留档级元数据**：`a` 替换全部成员时 staging 档会被抹掉，
   `create` 必须把原档的格式（RAR4/RAR5）、卷大小（有 `-v` 时用请求值）、固实标志、注释、`-hp` 和 RR
   重新写回，否则会塌缩成单卷或静默丢注释/加密。`-hp` 重建还要关掉 quick-open

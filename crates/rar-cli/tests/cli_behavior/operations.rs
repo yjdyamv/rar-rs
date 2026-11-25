@@ -613,6 +613,40 @@ fn cli_sfx_stub_self_extracts() {
     assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"hello sfx");
 }
 
+/// The bundled stub embeds the crate's container-signature constants in its
+/// rodata, so the SFX bytes hold both magics *before* the real archive.
+/// Detection must report the payload's family and offset (what `is_rar4_file`
+/// and `rar s-` rely on), never a byte of the module.
+#[test]
+fn cli_sfx_family_follows_the_payload_not_the_stub() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("a.txt"), b"rar4 sfx").unwrap();
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-ma4", "-idq"])
+        .arg("base.rar")
+        .arg("a.txt")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["s", "--sfx-module"])
+        .arg(sfx_stub())
+        .arg("base.rar")
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "s must convert with our stub");
+
+    let bytes = std::fs::read(dir.path().join(format!("base.{}", sfx_ext()))).unwrap();
+    let (family, offset) =
+        rar_rs::detect::find_archive_start(&bytes, rar_rs::detect::SFX_SCAN_LIMIT)
+            .expect("the embedded payload must be detected");
+    assert_eq!(family, rar_rs::detect::ArchiveFamily::Rar15To40);
+    assert!(offset > 0, "the module prefix must be skipped");
+    assert_eq!(Some(offset), rar_rs::sfx_offset_of(&bytes));
+}
+
 /// `-sfx` renames the first volume to the stub name. A queued `-z` comment must
 /// land on that final `.exe`, not the `.rar` that no longer exists.
 #[test]

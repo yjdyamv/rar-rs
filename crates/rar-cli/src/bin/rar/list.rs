@@ -402,44 +402,96 @@ pub(crate) fn apply_rarfiles_order(
     *collected = reordered;
 }
 
-/// Whether `path` carries the legacy 7-byte `Rar!\x1a\x07\x00` signature
-/// (peek at the head, tolerating an SFX stub within the first 8 MiB).
-pub(crate) fn is_rar4_file(path: &std::path::Path) -> bool {
+/// The archive family `path` opens as, judged exactly the way the readers do:
+/// `detect::find_archive_start` skips a stub's embedded signature constants for
+/// the real archive, so this can never disagree with what `open` will pick.
+/// Reads at most the SFX scan window.
+fn archive_family_of(path: &std::path::Path) -> Option<rar_rs::detect::ArchiveFamily> {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut buf = vec![0u8; 8 * 1024 * 1024];
-    let Ok(n) = f.read(&mut buf) else {
-        return false;
-    };
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; rar_rs::detect::SFX_SCAN_LIMIT];
+    let n = f.read(&mut buf).ok()?;
     buf.truncate(n);
-    let rar4 = b"Rar!\x1a\x07\x00";
-    let rar5 = b"Rar!\x1a\x07\x01\x00";
-    let first = |needle: &[u8]| buf.windows(needle.len()).position(|w| w == needle);
-    match (first(rar5), first(rar4)) {
-        (Some(r5), Some(r4)) => r4 < r5, // earliest signature wins (SFX stub)
-        (None, Some(_)) => true,
-        _ => false,
-    }
+    rar_rs::detect::find_archive_start(&buf, rar_rs::detect::SFX_SCAN_LIMIT)
+        .map(|(family, _)| family)
 }
 
-/// Whether `path` is a DOS-era RAR 1.3/1.4 archive: the weak `RE~^`
-/// signature is present and no RAR4/RAR5 signature appears anywhere in the
-/// scanned window (a strong signature always wins, matching
-/// `detect::find_archive_start`).
+/// Whether `path` is (or wraps) a RAR 1.5-4.x archive. Judged by the reader's
+/// own detection, so a RAR4 SFX whose stub embeds the RAR5 constant earlier in
+/// the file is still RAR4 rather than being read as RAR5.
+pub(crate) fn is_rar4_file(path: &std::path::Path) -> bool {
+    matches!(
+        archive_family_of(path),
+        Some(rar_rs::detect::ArchiveFamily::Rar15To40)
+    )
+}
+
+/// Whether `path` is a DOS-era RAR 1.3/1.4 archive: the weak `RE~^` signature
+/// and no strong signature the reader would open instead.
 pub(crate) fn is_rar13_file(path: &std::path::Path) -> bool {
-    use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut buf = vec![0u8; 8 * 1024 * 1024];
-    let Ok(n) = f.read(&mut buf) else {
-        return false;
-    };
-    buf.truncate(n);
-    let rar4 = b"Rar!\x1a\x07\x00";
-    let rar5 = b"Rar!\x1a\x07\x01\x00";
-    let first = |needle: &[u8]| buf.windows(needle.len()).position(|w| w == needle);
-    first(rar5).is_none() && first(rar4).is_none() && first(b"RE~^").is_some()
+    matches!(
+        archive_family_of(path),
+        Some(rar_rs::detect::ArchiveFamily::Rar13)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_rar4_file, is_rar13_file};
+
+    /// A minimal valid RAR4 main header (13 bytes) with a correct 16-bit
+    /// `HEAD_CRC`, so `find_archive_start` accepts it.
+    fn rar4_main_header() -> [u8; 13] {
+        let mut header = [0u8; 13];
+        header[2] = 0x73;
+        header[5] = 0x0d;
+        let crc = (crc32fast::hash(&header[2..]) & 0xffff) as u16;
+        header[..2].copy_from_slice(&crc.to_le_bytes());
+        header
+    }
+
+    fn write(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// The classification follows the reader, not the earliest magic byte: a
+    /// stub that holds the RAR5 constant *before* the RAR4 one (as our own
+    /// `rar-sfx` rodata can) must still report the real RAR4 archive. The old
+    /// "earliest signature wins" scan returned `false` here.
+    #[test]
+    fn classifies_through_a_stub_embedded_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = b"stub bytes ".to_vec();
+        bytes.extend_from_slice(rar_rs::detect::RAR5_SIGNATURE);
+        bytes.extend_from_slice(&[0x41u8; 16]);
+        bytes.extend_from_slice(rar_rs::detect::RAR4_SIGNATURE);
+        bytes.extend_from_slice(&rar4_main_header());
+        let path = write(&dir, "wrapped.sfx", &bytes);
+        assert!(is_rar4_file(&path));
+        assert!(!is_rar13_file(&path));
+    }
+
+    #[test]
+    fn classifies_plain_rar4_and_rar13_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rar4 = rar_rs::detect::RAR4_SIGNATURE.to_vec();
+        rar4.extend_from_slice(&rar4_main_header());
+        let rar4_path = write(&dir, "plain.rar", &rar4);
+        assert!(is_rar4_file(&rar4_path));
+        assert!(!is_rar13_file(&rar4_path));
+
+        let rar13_path = write(&dir, "old.rar", b"RE~^payload");
+        assert!(is_rar13_file(&rar13_path));
+        assert!(!is_rar4_file(&rar13_path));
+    }
+
+    #[test]
+    fn a_missing_file_is_neither() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.rar");
+        assert!(!is_rar4_file(&missing));
+        assert!(!is_rar13_file(&missing));
+    }
 }
