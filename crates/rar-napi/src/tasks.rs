@@ -12,7 +12,7 @@ use napi_derive::napi;
 
 use crate::error::to_napi_error;
 use crate::guard::run_guarded;
-use crate::options::{checked_js_integer, checked_optional_js_integer, parse_dict_size};
+use crate::options::{checked_js_integer, checked_optional_js_usize, parse_dict_size};
 use crate::{
   AppendArchiveOptions, CreateArchiveOptions, CreateResult, EntryInfo, EntryInput,
   ExtractArchiveOptions, ExtractionResult, ProgressData, RenameEntry,
@@ -581,8 +581,8 @@ impl Task for AppendArchiveTask {
           })?);
       }
       if let Some(threads) = self.opts.thread_count {
-        let threads = checked_optional_js_integer(Some(threads), "threadCount", 0, 64)?
-          .expect("a present value stays present") as usize;
+        let threads = checked_optional_js_usize(Some(threads), "threadCount")?
+          .expect("a present value stays present");
         append_opts = append_opts.thread_count(
           rar_rs::ThreadCount::try_from(threads)
             .map_err(|err| Error::new(Status::InvalidArg, format!("{err}")))?,

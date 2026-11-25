@@ -96,7 +96,8 @@ pub struct CreateArchiveOptions {
   pub quick_open: Option<bool>,
   /// Write BLAKE2sp hash records for every member (like WinRAR `-htb`).
   pub blake2: Option<bool>,
-  /// Compression threads (1..=64; 0 = automatic, the library default).
+  /// Compression threads (any positive count; 0 = automatic). The worker pool
+  /// clamps to the host's cores.
   pub threads: Option<f64>,
   /// Save the creation time (Windows) / ctime (Unix) in the FILE_TIME
   /// extra record (like WinRAR `-tsc`).
@@ -149,7 +150,8 @@ pub struct AppendArchiveOptions {
   /// Dictionary size for the added members (like `-md`; see
   /// [`CreateArchiveOptions::dict_size`]).
   pub dict_size: Option<String>,
-  /// Compression threads for the appended members (1..=64; 0 = automatic).
+  /// Compression threads for the appended members (any positive count; 0 =
+  /// automatic; the pool clamps to the host's cores).
   pub thread_count: Option<f64>,
 }
 #[napi(object)]
@@ -226,7 +228,8 @@ pub struct ExtractArchiveOptions {
   /// Update (`-u`): like `freshen`, but a missing destination is extracted
   /// too. Takes precedence when both are set.
   pub update: Option<bool>,
-  /// Extraction worker threads for this run (1..=64; 0 = automatic).
+  /// Extraction worker threads for this run (any positive count; 0 =
+  /// automatic; the pool clamps to the host's cores).
   /// Scoped to this call, like `-mt<N>`; falls back to the process-global
   /// default when unset.
   pub threads: Option<f64>,

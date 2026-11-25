@@ -37,6 +37,17 @@ pub(crate) fn checked_optional_js_integer(
     .transpose()
 }
 
+/// Like [`checked_optional_js_integer`], but for a `usize` field. A value above
+/// `usize::MAX` (possible on a 32-bit target) saturates instead of truncating:
+/// a thread count above the core count is harmless and the worker pool clamps
+/// it to the host, so saturation is the right failure mode here.
+pub(crate) fn checked_optional_js_usize(value: Option<f64>, field: &str) -> Result<Option<usize>> {
+  Ok(
+    checked_optional_js_integer(value, field, 0, JS_MAX_SAFE_INTEGER as u64)?
+      .map(|value| usize::try_from(value).unwrap_or(usize::MAX)),
+  )
+}
+
 impl CreateArchiveOptions {
   pub(crate) fn level(&self) -> Result<u8> {
     checked_js_integer(self.level.unwrap_or(3.0), "level", 0, 5).map(|value| value as u8)
@@ -82,8 +93,7 @@ impl CreateArchiveOptions {
       1,
       JS_MAX_SAFE_INTEGER as u64,
     )?;
-    let threads =
-      checked_optional_js_integer(self.threads, "threads", 0, 64)?.map(|value| value as usize);
+    let threads = checked_optional_js_usize(self.threads, "threads")?;
     let password = self.password.as_deref().filter(|p| !p.is_empty());
     let format = self.format.as_deref().unwrap_or("rar5");
     let compression = match format {
@@ -267,8 +277,7 @@ impl ExtractArchiveOptions {
       // Per-run worker count (`-mt<N>`), scoped to this extraction like
       // `WriterOptions::threads` is scoped to one archive; unset falls back
       // to the process-global default.
-      threads: checked_optional_js_integer(self.threads, "threads", 0, 64)?
-        .map(|value| value as usize),
+      threads: checked_optional_js_usize(self.threads, "threads")?,
       // Mark of the Web is not exposed through the JS API.
       mark_web: None,
       max_dict_size,
