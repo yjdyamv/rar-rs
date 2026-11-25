@@ -840,6 +840,26 @@ pub fn verify_members(
         .map_err(|e| CliError::from(e).context("test"))
 }
 
+/// Print each failing member and return the exit code scripts expect: the
+/// first failure's category (CRC 3, wrong password 11, ...) instead of a
+/// generic error, or the fatal code when nothing failed. Both `t`
+/// implementations share this; only their summary line differs.
+pub fn test_failure_exit_code(rar: &ArchiveReader, report: &rar_rs::VerificationReport) -> i32 {
+    for failure in report.failures() {
+        let name = rar
+            .entry(failure.entry_id())
+            .map(|entry| entry.name().to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string());
+        crate::info!("{name}: {}", failure.error());
+    }
+    report
+        .failures()
+        .first()
+        .map_or(crate::error::EXIT_FATAL, |failure| {
+            crate::error::exit_code_for(failure.error().code())
+        })
+}
+
 /// Verification streams every member to a sink, so the in-memory size caps
 /// guarding the materializing read API do not apply (official `Rar.exe t`
 /// tests members of any size). The dictionary cap stays: it bounds decoder

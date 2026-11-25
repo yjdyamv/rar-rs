@@ -575,21 +575,7 @@ fn cmd_test(
         info!("All {} files OK", report.checked());
         Ok(())
     } else {
-        for failure in report.failures() {
-            let name = rar
-                .entry(failure.entry_id())
-                .map(|entry| entry.name().to_string())
-                .unwrap_or_else(|_| "<unknown>".to_string());
-            info!("{name}: {}", failure.error());
-        }
-        // Surface the first failure's category so scripts see CRC failures
-        // (exit 3) or wrong passwords (exit 11) instead of a generic error.
-        let code = report
-            .failures()
-            .first()
-            .map_or(error::EXIT_FATAL, |failure| {
-                error::exit_code_for(failure.error().code())
-            });
+        let code = ops::test_failure_exit_code(&rar, &report);
         Err(error::CliError::with_code(
             format!(
                 "{} file(s) failed, {} checked",
