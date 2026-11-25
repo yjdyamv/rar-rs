@@ -12,7 +12,9 @@ use napi_derive::napi;
 
 use crate::error::to_napi_error;
 use crate::guard::run_guarded;
-use crate::options::{checked_js_integer, checked_optional_js_usize, parse_dict_size};
+use crate::options::{
+  checked_js_integer, checked_optional_js_usize, dictionary_from_parsed, parse_dict_size,
+};
 use crate::{
   AppendArchiveOptions, CreateArchiveOptions, CreateResult, EntryInfo, EntryInput,
   ExtractArchiveOptions, ExtractionResult, ProgressData, RenameEntry,
@@ -568,17 +570,7 @@ impl Task for AppendArchiveTask {
         append_opts = append_opts.password(pw.to_string());
       }
       if let Some(spec) = self.opts.dict_size.as_deref() {
-        let (dict_log, dict_bytes) = parse_dict_size(spec)?;
-        let bytes = dict_bytes
-          .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
-          .expect("dictionary parse returns a log or a byte count");
-        append_opts =
-          append_opts.dictionary_size(rar_rs::DictionarySize::try_from(bytes).map_err(|err| {
-            Error::new(
-              Status::InvalidArg,
-              format!("invalid dictionary size: {err}"),
-            )
-          })?);
+        append_opts = append_opts.dictionary_size(dictionary_from_parsed(parse_dict_size(spec)?)?);
       }
       if let Some(threads) = self.opts.thread_count {
         let threads = checked_optional_js_usize(Some(threads), "threadCount")?

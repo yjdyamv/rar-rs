@@ -129,16 +129,7 @@ impl CreateArchiveOptions {
         } else {
           parse_dict_size(s)
         };
-        let (dict_log, dict_bytes) = parsed?;
-        let bytes = dict_bytes
-          .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
-          .expect("dictionary parse returns a log or a byte count");
-        Some(rar_rs::DictionarySize::try_from(bytes).map_err(|err| {
-          Error::new(
-            Status::InvalidArg,
-            format!("invalid dictionary size: {err}"),
-          )
-        })?)
+        Some(dictionary_from_parsed(parsed?)?)
       }
       None => None,
     };
@@ -319,4 +310,22 @@ impl ExtractArchiveOptions {
 pub(crate) fn parse_dict_size(s: &str) -> Result<(Option<u8>, Option<u64>)> {
   rar_rs::parse_dict_size(s)
     .ok_or_else(|| Error::new(Status::InvalidArg, format!("invalid dictionary size: {s}")))
+}
+
+/// Resolve a parsed `(dict log, byte count)` pair into a `DictionarySize`: the
+/// log (128 KiB units) supplies the byte count when only a log was given.
+/// Shared by the create and append paths, which parse the spec the same way.
+pub(crate) fn dictionary_from_parsed(
+  parsed: (Option<u8>, Option<u64>),
+) -> Result<rar_rs::DictionarySize> {
+  let (dict_log, dict_bytes) = parsed;
+  let bytes = dict_bytes
+    .or_else(|| dict_log.map(|log| (128u64 * 1024) << log))
+    .expect("dictionary parse returns a log or a byte count");
+  rar_rs::DictionarySize::try_from(bytes).map_err(|err| {
+    Error::new(
+      Status::InvalidArg,
+      format!("invalid dictionary size: {err}"),
+    )
+  })
 }
