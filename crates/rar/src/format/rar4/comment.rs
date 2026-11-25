@@ -18,7 +18,7 @@
 use std::io::{Read, Seek};
 
 use crate::error::{RarError, RarResult};
-use crate::format::rar4::LONG_BLOCK;
+use crate::format::rar4::{COMM_HEAD, LONG_BLOCK, NEWSUB_HEAD};
 use crate::format::shared::checksum::header_crc16;
 
 /// Header byte count of the NEWSUB `CMT` archive-comment block (32 fixed
@@ -49,7 +49,7 @@ pub(crate) struct LegacyComment<'a> {
 /// method, comm_crc16` — 13 bytes, then the payload.
 pub(crate) fn parse_legacy_comment(main_header: &[u8]) -> Option<LegacyComment<'_>> {
     let block = main_header.get(MAIN_HEAD_SIZE..)?;
-    if block.len() < LEGACY_COMMENT_HEAD_SIZE || block[2] != 0x75 {
+    if block.len() < LEGACY_COMMENT_HEAD_SIZE || block[2] != COMM_HEAD {
         return None;
     }
     let head_size = usize::from(u16::from_le_bytes([block[5], block[6]]));
@@ -94,7 +94,7 @@ pub(crate) fn build_legacy_comment_block(text: &[u8], unp_ver: u8) -> RarResult<
     })?;
     let mut block = Vec::with_capacity(usize::from(head_size));
     block.extend_from_slice(&[0u8, 0]); // header CRC, filled last
-    block.push(0x75); // comment header
+    block.push(COMM_HEAD);
     block.extend_from_slice(&0u16.to_le_bytes()); // flags: no LONG_BLOCK
     block.extend_from_slice(&head_size.to_le_bytes());
     block.extend_from_slice(&unp_size.to_le_bytes());
@@ -178,7 +178,7 @@ pub(crate) fn build_comment_block(payload: &[u8], unicode: bool) -> Vec<u8> {
     let head_size = 32u16 + 3;
     let mut block = Vec::with_capacity(head_size as usize + payload.len());
     block.extend_from_slice(&[0u8, 0]); // header CRC, filled last
-    block.push(0x7a); // NEWSUB_HEAD
+    block.push(NEWSUB_HEAD);
     block.extend_from_slice(&LONG_BLOCK.to_le_bytes());
     block.extend_from_slice(&head_size.to_le_bytes());
     let len = payload.len() as u32;
