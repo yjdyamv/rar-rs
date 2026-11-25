@@ -11,8 +11,8 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use super::{
-    COMM_HEAD, FHD_COMMENT, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, MARK_HEAD, file_header_crc_end,
-    is_head_type,
+    COMM_HEAD, FHD_COMMENT, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, MARK_HEAD, MHD_COMMENT,
+    file_header_crc_end, is_head_type,
 };
 use crate::crc32::crc32;
 use crate::crypto::Rar30Cipher;
@@ -409,7 +409,7 @@ pub(crate) fn read_envelope(
 /// comment stop before the comment (which has its own CRC).
 fn header_crc_end(header: &[u8], head_type: u8, flags: u16) -> usize {
     match head_type {
-        MAIN_HEAD if flags & 0x0002 != 0 => 13.min(header.len()),
+        MAIN_HEAD if flags & MHD_COMMENT != 0 => 13.min(header.len()),
         FILE_HEAD if flags & FHD_COMMENT != 0 => file_header_crc_end(header),
         // A standalone COMM_HEAD's `HEAD_SIZE` spans the 13-byte block
         // header plus its payload, but `HEAD_CRC` covers only the header

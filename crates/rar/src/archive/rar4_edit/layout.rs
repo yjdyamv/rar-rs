@@ -18,7 +18,7 @@ use crate::archive::RarArchive;
 use crate::error::{RarError, RarResult};
 use crate::format::rar4::{
     ENDARC_HEAD, EnvelopePolicy, FILE_HEAD, LONG_BLOCK, MAIN_HEAD, MHD_LOCK, MHD_PASSWORD,
-    NEWSUB_HEAD, Rar4Block, is_head_type, read_block,
+    NEWSUB_HEAD, PROTECT_HEAD, Rar4Block, is_head_type, read_block,
 };
 use crate::fs::atomic::copy_prefix;
 
@@ -227,7 +227,6 @@ fn layout_offset(offset: u64) -> RarResult<usize> {
 /// `recovery::legacy_rr::scan_protect_with_password`'s header checks without
 /// touching the record's data area.
 fn parse_protect_record(view: &Rar4Block) -> RarResult<Option<ProtectRecord>> {
-    const PROTECT_HEAD: u8 = 0x78;
     let header = &view.header;
     let flags = u16::from_le_bytes([header[3], header[4]]);
     // RAR 2.5-era PROTECT_HEAD (0x78): 26-byte fixed header with the

@@ -8,7 +8,9 @@ use super::{
     check_cancel, crc64_rar_state, crc64_xz, make_encoder_matrix, shared_gf16,
 };
 use crate::format::rar5::headers::MAX_HEADER_SIZE;
-use crate::format::rar5::{BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER};
+use crate::format::rar5::{
+    BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER,
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct InlineRecoveryChunk {
@@ -216,13 +218,13 @@ fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
         let (flags, f) = crate::vint::decode_from_slice(prefix, body + t)
             .map_err(|_| Error::BadRecoveryChunk)?;
         let mut p = body + t + f;
-        if flags & 0x1 != 0 {
+        if flags & BLOCK_FLAG_EXTRA_DATA != 0 {
             let (_, n) =
                 crate::vint::decode_from_slice(prefix, p).map_err(|_| Error::BadRecoveryChunk)?;
             p += n;
         }
         let mut data_size = 0u64;
-        if flags & 0x2 != 0 {
+        if flags & BLOCK_FLAG_DATA_AREA != 0 {
             let (v, _n) =
                 crate::vint::decode_from_slice(prefix, p).map_err(|_| Error::BadRecoveryChunk)?;
             data_size = v;

@@ -40,6 +40,10 @@ pub(crate) const ENDARC_HEAD: u8 = 0x7b;
 /// comment `CMT` are both NEWSUB blocks).
 pub(crate) const NEWSUB_HEAD: u8 = 0x7a;
 
+/// PROTECT_HEAD: the RAR 2.5-era inline recovery record. Superseded by the
+/// NEWSUB `RR` block but still read and rebuilt.
+pub(crate) const PROTECT_HEAD: u8 = 0x78;
+
 /// COMM_HEAD: a per-member comment block. RAR 3.x/4.x stores it as a
 /// standalone block after the member data; RAR 1.5–2.9 nested it inside the
 /// `FILE_HEAD` (flagged `FHD_COMMENT`). Distinct from `FILE_HEAD` (0x74) and

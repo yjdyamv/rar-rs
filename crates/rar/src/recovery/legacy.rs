@@ -32,7 +32,9 @@
 
 use crate::detect::{RAR4_SIGNATURE, find_bytes};
 use crate::error::{RarError, RarResult};
-use crate::format::rar4::{ENDARC_HEAD, MAIN_HEAD, NEWSUB_HEAD, is_head_type};
+use crate::format::rar4::{
+    ENDARC_HEAD, LONG_BLOCK, MAIN_HEAD, MHD_PASSWORD, NEWSUB_HEAD, PROTECT_HEAD, is_head_type,
+};
 
 /// `PROTECT_HEAD` / `RR` NEWSUB parsed from a legacy archive
 /// (file-absolute positions).
@@ -257,16 +259,16 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
                 None => break,
             }
         }
-        if head_type == MAIN_HEAD && flags & 0x0080 != 0 {
+        if head_type == MAIN_HEAD && flags & MHD_PASSWORD != 0 {
             // MAIN_HEAD + MHD_PASSWORD: the rest of the archive is `-hp`.
             encrypted = true;
         }
 
         // RAR 2.5-era PROTECT_HEAD (0x78): 26-byte fixed header with the
         // `Protect!` mark in the last eight bytes.
-        if head_type == 0x78
+        if head_type == PROTECT_HEAD
             && header.len() == 26
-            && flags & 0x8000 != 0
+            && flags & LONG_BLOCK != 0
             && header.get(18..26) == Some(b"Protect!")
         {
             let rec_sectors = u16::from_le_bytes(header[12..14].try_into().unwrap());
@@ -295,7 +297,7 @@ fn scan_protect_stream<R: std::io::Read + std::io::Seek>(
         // whose 20-byte tail after the name is `Protect+` + rec_sectors
         // (u32) + total_blocks (u32) + zero.
         if head_type == NEWSUB_HEAD
-            && flags & 0x8000 != 0
+            && flags & LONG_BLOCK != 0
             && header.len() >= 32 + 2 + 20
             && header.get(32..34) == Some(b"RR")
         {
@@ -653,8 +655,8 @@ pub(crate) fn build_legacy_protect_head_block(
     let data_len_u32 = u32::try_from(data_len)
         .map_err(|_| RarError::format("RAR4: recovery data size overflows u32"))?;
     let mut header = vec![0u8; 26];
-    header[2] = 0x78; // PROTECT_HEAD
-    header[3..5].copy_from_slice(&0x8000u16.to_le_bytes()); // LONG_BLOCK
+    header[2] = PROTECT_HEAD;
+    header[3..5].copy_from_slice(&LONG_BLOCK.to_le_bytes());
     header[5..7].copy_from_slice(&26u16.to_le_bytes()); // head_size
     header[7..11].copy_from_slice(&data_len_u32.to_le_bytes()); // add_size
     header[12..14].copy_from_slice(&rec_sectors.to_le_bytes());
