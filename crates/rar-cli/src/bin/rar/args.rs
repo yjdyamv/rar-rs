@@ -255,7 +255,7 @@ pub(crate) struct ExtractArgs {
     #[arg(value_name = "NAMES")]
     pub(crate) names: Vec<String>,
     /// Compression threads (like `-mt<N>`; also used for extraction)
-    #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
+    #[arg(long = "threads", value_name = "N", value_parser = common::parse_threads)]
     pub(crate) threads: Option<usize>,
     /// Alternate destination: `-ad` appends the archive base name to the
     /// destination, `-ad1` uses the archive's directory with the base name,
@@ -532,7 +532,7 @@ pub(crate) struct CreateArgs {
     #[arg(long = "recovery-volumes", value_name = "N|N%", value_parser = parse_recovery_volumes)]
     pub(crate) recovery_volumes: Option<RecoveryVolumes>,
     /// Compression threads
-    #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
+    #[arg(long = "threads", value_name = "N", value_parser = common::parse_threads)]
     pub(crate) threads: Option<usize>,
     /// Store basename-only names (no directory entries)
     #[arg(long = "basename-only")]
@@ -717,16 +717,6 @@ fn parse_recovery_volumes(s: &str) -> Result<RecoveryVolumes, String> {
         .parse::<u32>()
         .map_err(|_| format!("invalid recovery volume count: {s}"))?;
     Ok(RecoveryVolumes::Count(count))
-}
-
-fn parse_threads(s: &str) -> Result<usize, String> {
-    let n = s
-        .parse::<usize>()
-        .map_err(|_| format!("invalid thread count: {s}"))?;
-    if n == 0 {
-        return Err(format!("invalid thread count: {s}"));
-    }
-    Ok(n)
 }
 
 pub(crate) fn parse_size(s: &str) -> Result<u64, String> {

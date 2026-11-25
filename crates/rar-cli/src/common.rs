@@ -122,6 +122,20 @@ pub fn parse_mdx_size(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("dictionary size is too large: {s}"))
 }
 
+/// Parse a thread count for `-mt` / `--threads`: any positive integer. There is
+/// deliberately no fixed upper cap — the library clamps to the host's available
+/// parallelism — so `-mt100` is fine on a many-core box. Shared by both
+/// binaries so the bound cannot drift between them again.
+pub fn parse_threads(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| format!("invalid thread count: {s}"))?;
+    if n == 0 {
+        return Err(format!("invalid thread count: {s}"));
+    }
+    Ok(n)
+}
+
 /// Parse a byte size with an optional binary `k`/`m`/`g`/`t` suffix
 /// (case-insensitive; `t` is 2^40). No suffix means bytes. A `0` is accepted
 /// here — callers that need a positive size reject it themselves.
@@ -1049,7 +1063,7 @@ fn volume_base(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_name, merge_default_switches, normalize_switch, parse_mdx_size,
+        command_name, merge_default_switches, normalize_switch, parse_mdx_size, parse_threads,
         switches_after_command, value_options,
     };
     use std::collections::HashSet;
@@ -1072,6 +1086,19 @@ mod tests {
     fn mdx_size_parsing_checks_multiplication_overflow() {
         assert_eq!(parse_mdx_size("2k"), Ok(2 * 1024));
         assert!(parse_mdx_size("18446744073709551615g").is_err());
+    }
+
+    /// No fixed upper cap (the library clamps to the host): `-mt100` is valid;
+    /// only zero and non-numbers are rejected. This is the rule both binaries
+    /// now share — `unrar` used to cap at 64 on its own.
+    #[test]
+    fn thread_count_is_any_positive_integer() {
+        assert_eq!(parse_threads("1"), Ok(1));
+        assert_eq!(parse_threads("100"), Ok(100));
+        assert!(parse_threads("0").is_err());
+        assert!(parse_threads("-1").is_err());
+        assert!(parse_threads("1.5").is_err());
+        assert!(parse_threads("").is_err());
     }
 
     #[test]

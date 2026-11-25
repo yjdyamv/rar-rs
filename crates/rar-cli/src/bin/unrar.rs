@@ -148,7 +148,7 @@ struct ExtractArgs {
     #[arg(long = "delete-archive")]
     delete_archive: bool,
     /// Extraction threads (like `rar -mt<N>`)
-    #[arg(long = "threads", value_name = "N", value_parser = parse_threads)]
+    #[arg(long = "threads", value_name = "N", value_parser = common::parse_threads)]
     threads: Option<usize>,
     /// Alternate destination: `-ad` appends the archive base name to the
     /// destination, `-ad1` uses the archive's directory with the base name,
@@ -194,17 +194,6 @@ fn size_limits(args: &ExtractArgs) -> Result<ops::ExtractLimits, String> {
         max_total_unpacked_bytes: args.max_total_unpacked,
     }
     .validate()
-}
-
-fn parse_threads(s: &str) -> Result<usize, String> {
-    let n: usize = s
-        .parse()
-        .map_err(|_| format!("invalid thread count: {s}"))?;
-    if (1..=64).contains(&n) {
-        Ok(n)
-    } else {
-        Err("thread count must be between 1 and 64".to_string())
-    }
 }
 
 /// Archive path.
