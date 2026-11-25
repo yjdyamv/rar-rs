@@ -191,7 +191,7 @@ pub fn repair_inline_recovery_prefix(
 /// sizes followed by the header body; the data area trails the header.
 fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
     let mut blocks = Vec::new();
-    if prefix.len() < 8 || &prefix[..7] != b"Rar!\x1a\x07\x01" {
+    if !prefix.starts_with(crate::detect::RAR5_SIGNATURE) {
         return Ok(blocks);
     }
     let mut pos = 8usize;
@@ -891,7 +891,7 @@ mod tests {
     #[test]
     fn relocation_parse_failure_falls_back_to_parity() {
         let mut prefix: Vec<u8> = (0..32_000).map(|index| (index * 11) as u8).collect();
-        prefix[..7].copy_from_slice(b"Rar!\x1a\x07\x01");
+        prefix[..8].copy_from_slice(crate::detect::RAR5_SIGNATURE);
         // A valid 10-byte non-canonical vint encoding zero: the block walk
         // stops at the zero header size.
         prefix[12..21].fill(0x80);

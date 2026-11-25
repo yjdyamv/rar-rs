@@ -53,8 +53,7 @@ pub fn find_archive_start(input: &[u8], max_scan: usize) -> Option<(ArchiveFamil
     let limit = input
         .len()
         .min(max_scan.saturating_add(RAR5_SIGNATURE.len()));
-    let window = &input[..limit];
-    find_bytes(window, RAR13_SIGNATURE)
+    find_bytes(input, RAR13_SIGNATURE, limit)
         .filter(|offset| *offset <= max_scan)
         .map(|offset| (ArchiveFamily::Rar13, offset))
 }
@@ -64,14 +63,13 @@ fn earliest_strong(input: &[u8], max_scan: usize) -> Option<(ArchiveFamily, usiz
     let limit = input
         .len()
         .min(max_scan.saturating_add(RAR5_SIGNATURE.len()));
-    let window = &input[..limit];
     [
         (ArchiveFamily::Rar50Plus, &RAR5_SIGNATURE[..]),
         (ArchiveFamily::Rar15To40, &RAR4_SIGNATURE[..]),
     ]
     .into_iter()
     .filter_map(|(family, signature)| {
-        find_bytes(window, signature)
+        find_bytes(input, signature, limit)
             .filter(|offset| *offset <= max_scan)
             .map(|offset| (family, offset))
     })
@@ -228,12 +226,16 @@ pub fn sfx_offset_of(input: &[u8]) -> Option<usize> {
     first_plausible_strong(input, input.len()).map(|(_, offset)| offset)
 }
 
-/// Find the first occurrence of `needle` in `haystack`.
-pub(crate) fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
+/// Find the first occurrence of `needle` within the first `limit` bytes of
+/// `haystack`. The single owner of the bounded byte search: a signature can
+/// sit behind an SFX stub, so callers search a prefix rather than the whole
+/// input, and `legacy`'s recovery scanner shares this instead of its own copy.
+pub(crate) fn find_bytes(haystack: &[u8], needle: &[u8], limit: usize) -> Option<usize> {
+    let window = &haystack[..haystack.len().min(limit)];
+    if needle.is_empty() || window.len() < needle.len() {
         return None;
     }
-    haystack.windows(needle.len()).position(|w| w == needle)
+    window.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(test)]

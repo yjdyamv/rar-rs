@@ -23,6 +23,7 @@ use std::path::Path;
 use super::{
     ArchiveReader, ArchiveWriter, CompressionLevel, EntryWriteOptions, OpenOptions, WriterOptions,
 };
+use crate::detect::RAR5_SIGNATURE;
 use crate::error::RarResult;
 use crate::options::ExtractOptions;
 use crate::version::ArchiveVersion;
@@ -150,9 +151,6 @@ pub fn reconstruct_archive_path(
     report.legacy = version == ArchiveVersion::V29;
     Ok(report)
 }
-
-/// The RAR5 archive signature, written once at the start of a plain archive.
-const RAR5_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
 
 /// Try to rebuild `dst` from `src` by copying each intact member's blocks
 /// verbatim, the way WinRAR's `rar r` does.

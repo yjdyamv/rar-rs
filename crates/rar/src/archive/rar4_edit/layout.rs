@@ -98,7 +98,7 @@ pub(super) fn locate_signature(stream: &mut File) -> RarResult<usize> {
     let mut head = vec![0u8; scan];
     stream.seek(SeekFrom::Start(0))?;
     stream.read_exact(&mut head).map_err(RarError::Io)?;
-    crate::detect::find_bytes(&head, crate::detect::RAR4_SIGNATURE)
+    crate::detect::find_bytes(&head, crate::detect::RAR4_SIGNATURE, head.len())
         .ok_or_else(|| RarError::format("RAR4: volume has no archive signature"))
 }
 

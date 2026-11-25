@@ -30,7 +30,7 @@
 //! recovery volumes are a separate follow-up.
 #![deny(clippy::cast_possible_truncation)] // offsets/sizes read from a damaged archive are u64; no silent narrowing
 
-use crate::detect::RAR4_SIGNATURE;
+use crate::detect::{RAR4_SIGNATURE, find_bytes};
 use crate::error::{RarError, RarResult};
 
 /// `PROTECT_HEAD` / `RR` NEWSUB parsed from a legacy archive
@@ -563,11 +563,6 @@ pub fn repair_legacy_archive_path_with_password(
     drop(file);
     staged.commit()?;
     Ok(report)
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8], limit: usize) -> Option<usize> {
-    let window = &haystack[..haystack.len().min(limit)];
-    window.windows(needle.len()).position(|w| w == needle)
 }
 
 // ── Write side ──────────────────────────────────────────────────────────────
