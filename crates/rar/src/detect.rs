@@ -165,11 +165,34 @@ fn rar4_main_header_starts(input: &[u8], offset: usize) -> bool {
         return false;
     };
     // HEAD_CRC(2) HEAD_TYPE(1)=0x73 HEAD_FLAGS(2) HEAD_SIZE(2).
-    if rest.len() < 8 || rest[2] != 0x73 {
+    if rest.len() < 13 || rest[2] != 0x73 {
         return false;
     }
     let head_size = u16::from_le_bytes([rest[5], rest[6]]) as usize;
-    head_size >= 0x0d && head_size <= rest.len()
+    if !(0x0d..=rest.len()).contains(&head_size) {
+        return false;
+    }
+    // A type + size match is not enough inside an SFX stub: the release
+    // `rar-sfx` links this crate, so its rodata embeds the RAR4 signature,
+    // and the ppc64le build had one followed by bytes that looked like a
+    // 13-byte main header — the reader then parsed that bogus offset and
+    // failed its HEAD_CRC. Validate the 16-bit CRC like the RAR5 probe above
+    // and the envelope parser (`read_envelope`'s `check_header_crc`), so an
+    // embedded signature is skipped for the real archive.
+    let head_crc = u16::from_le_bytes([rest[0], rest[1]]);
+    if head_crc == 0xFFFF {
+        // RAR 1.5.4-era "no CRC" sentinel: `read_envelope` skips the check.
+        return true;
+    }
+    let flags = u16::from_le_bytes([rest[3], rest[4]]);
+    // A main header with an embedded comment covers only the fixed 13 bytes.
+    let crc_end = if flags & 0x0002 != 0 {
+        13.min(head_size)
+    } else {
+        head_size
+    };
+    let actual = (crc32fast::hash(&rest[2..crc_end]) & 0xffff) as u16;
+    actual == head_crc
 }
 
 /// Scan at most this many bytes of an input for the archive signature.
@@ -201,11 +224,14 @@ mod tests {
     use super::{ArchiveFamily, RAR13_SIGNATURE, find_archive_start};
 
     /// A minimal valid RAR4 main header (13 bytes): `HEAD_CRC(2) HEAD_TYPE(1)
-    /// HEAD_FLAGS(2) HEAD_SIZE(2) …`.
+    /// HEAD_FLAGS(2) HEAD_SIZE(2) …`, with a correct 16-bit HEAD_CRC so the
+    /// detection probe accepts it.
     fn rar4_main_header() -> [u8; 13] {
         let mut header = [0u8; 13];
         header[2] = 0x73;
         header[5] = 0x0d;
+        let crc = (crc32fast::hash(&header[2..]) & 0xffff) as u16;
+        header[..2].copy_from_slice(&crc.to_le_bytes());
         header
     }
 
@@ -261,6 +287,28 @@ mod tests {
         input.extend_from_slice(&rar5_main_header());
         let found = find_archive_start(&input, 128).unwrap();
         assert_eq!(found.0, ArchiveFamily::Rar50Plus);
+        assert_eq!(found.1, real);
+    }
+
+    /// The RAR4 counterpart of the check above: an embedded signature whose
+    /// following bytes merely *look* like a main header (type 0x73, plausible
+    /// size) but have a wrong HEAD_CRC must be skipped. The ppc64le `rar-sfx`
+    /// release stub hit exactly this — the reader used to accept the bogus
+    /// offset and `unrar t`/the stub then failed with a "RAR4 block type 0x73
+    /// header" CRC mismatch.
+    #[test]
+    fn skips_an_embedded_rar4_signature_with_a_bogus_plausible_header() {
+        let mut input = b"stub".to_vec();
+        input.extend_from_slice(super::RAR4_SIGNATURE);
+        // A fake "main header" that only passes a type + size heuristic: type
+        // 0x73, size 13, but a HEAD_CRC that does not cover these bytes.
+        let fake = [0x00u8, 0x00, 0x73, 0x00, 0x00, 0x0d, 0x00, 0, 0, 0, 0, 0, 0];
+        input.extend_from_slice(&fake);
+        let real = input.len();
+        input.extend_from_slice(super::RAR4_SIGNATURE);
+        input.extend_from_slice(&rar4_main_header());
+        let found = find_archive_start(&input, 128).unwrap();
+        assert_eq!(found.0, ArchiveFamily::Rar15To40);
         assert_eq!(found.1, real);
     }
 
