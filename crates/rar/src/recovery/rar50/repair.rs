@@ -7,6 +7,9 @@ use super::{
     Error, RAR5_RECOVERY_BLOCK_PAYLOAD_SIZE, RAR5_RECOVERY_CHUNK_FIXED_HEADER_SIZE, Result,
     check_cancel, crc64_rar_state, crc64_xz, make_encoder_matrix, shared_gf16,
 };
+use crate::format::rar5::headers::MAX_HEADER_SIZE;
+use crate::format::rar5::{BLOCK_TYPE_END_ARCHIVE, BLOCK_TYPE_FILE_HEADER};
+
 #[derive(Debug, Clone)]
 pub(super) struct InlineRecoveryChunk {
     pub(super) plan: InlineRecoveryPlan,
@@ -198,7 +201,7 @@ fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
     while pos + 4 < prefix.len() {
         let (header_size, size_bytes) =
             crate::vint::decode_from_slice(prefix, pos + 4).map_err(|_| Error::BadRecoveryChunk)?;
-        if header_size == 0 || header_size > crate::format::rar5::headers::MAX_HEADER_SIZE {
+        if header_size == 0 || header_size > MAX_HEADER_SIZE {
             break;
         }
         let body = pos + 4 + size_bytes;
@@ -224,7 +227,7 @@ fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
                 crate::vint::decode_from_slice(prefix, p).map_err(|_| Error::BadRecoveryChunk)?;
             data_size = v;
         }
-        if block_type == 2 {
+        if block_type == BLOCK_TYPE_FILE_HEADER {
             let data_start = block_end;
             let data_end = data_start
                 .checked_add(data_size as usize)
@@ -240,7 +243,7 @@ fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
             break;
         }
         pos = next;
-        if block_type == 5 {
+        if block_type == BLOCK_TYPE_END_ARCHIVE {
             break;
         }
     }

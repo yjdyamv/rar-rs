@@ -7,16 +7,14 @@ use crate::format::rar5::headers::{
     ArchiveHeader, BlockMeta, EndOfArchiveHeader, FileHeader, MAX_HEADER_SIZE, RawBlock, RawHeader,
 };
 use crate::format::rar5::{
-    ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_END_ARCHIVE,
-    COMP_INFO_DICT_MASK, COMP_INFO_DICT_SHIFT, COMP_INFO_METHOD_MASK, COMP_INFO_METHOD_SHIFT,
-    COMP_INFO_SOLID_BIT, COMP_INFO_VERSION_MASK, EXTRA_FILE_HASH, EXTRA_FILE_OWNER,
-    EXTRA_FILE_REDIRECT, EXTRA_FILE_TIME, EXTRA_FILE_VERSION, EXTRA_SERVICE_SUBDATA,
-    FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX,
+    ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA,
+    BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_END_ARCHIVE, COMP_INFO_DICT_MASK, COMP_INFO_DICT_SHIFT,
+    COMP_INFO_METHOD_MASK, COMP_INFO_METHOD_SHIFT, COMP_INFO_SOLID_BIT, COMP_INFO_VERSION_MASK,
+    EXTRA_FILE_HASH, EXTRA_FILE_OWNER, EXTRA_FILE_REDIRECT, EXTRA_FILE_TIME, EXTRA_FILE_VERSION,
+    EXTRA_SERVICE_SUBDATA, FILE_FLAG_CRC32, FILE_FLAG_DIRECTORY, FILE_FLAG_TIME_UNIX,
 };
 #[cfg(test)]
-use crate::format::rar5::{
-    BLOCK_TYPE_ARCHIVE_HEADER, BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER,
-};
+use crate::format::rar5::{BLOCK_TYPE_FILE_HEADER, BLOCK_TYPE_SERVICE_HEADER};
 use crate::format::shared::entry_ext::RedirectSpec;
 use crate::vint;
 
@@ -133,7 +131,7 @@ fn plain_block_candidate<R: Read + Seek>(
         }
         let (block_type, _) = read_vint(reader)?;
         // Known RAR5 block types: 1 main, 2 file, 3 service, 4 encryption, 5 end.
-        let known = (1..=5).contains(&block_type);
+        let known = (BLOCK_TYPE_ARCHIVE_HEADER..=BLOCK_TYPE_END_ARCHIVE).contains(&block_type);
         // The size vint counts the body (`hsize`), which holds the type vint.
         let total = 4u64.checked_add(vint_len)?.checked_add(hsize)?;
         Some(known && pos.checked_add(total).is_some_and(|end| end <= file_len))
