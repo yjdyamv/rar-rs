@@ -25,6 +25,21 @@ const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Maximum total input size across all entries (32 GiB).
 const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
+/// Open a reader for a read task: seed `options` (e.g. the scan strategy), then
+/// attach the task's password unless it is empty. The one place the empty
+/// password rule lives; every read path goes through here.
+fn open_reader(
+  archive_path: &str,
+  password: Option<&str>,
+  options: rar_rs::OpenOptions,
+) -> Result<rar_rs::ArchiveReader> {
+  let mut options = options;
+  if let Some(password) = password.filter(|pw| !pw.is_empty()) {
+    options = options.password(password);
+  }
+  rar_rs::ArchiveReader::open_with(archive_path, options).map_err(to_napi_error)
+}
+
 struct PlannedEntry {
   kind: String,
   path: Option<PathBuf>,
@@ -742,12 +757,11 @@ impl Task for TestArchiveTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_guarded(|| {
-      let mut options = rar_rs::OpenOptions::new();
-      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-        options = options.password(pw);
-      }
-      let mut archive =
-        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      let mut archive = open_reader(
+        &self.archive_path,
+        self.password.as_deref(),
+        rar_rs::OpenOptions::new(),
+      )?;
       let report = archive.verify().map_err(to_napi_error)?;
       Ok(vec![report.checked() as u32, report.failed() as u32])
     })
@@ -779,12 +793,11 @@ impl Task for ListEntriesTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_guarded(|| {
-      let mut options = rar_rs::OpenOptions::new();
-      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-        options = options.password(pw);
-      }
-      let archive =
-        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      let archive = open_reader(
+        &self.archive_path,
+        self.password.as_deref(),
+        rar_rs::OpenOptions::new(),
+      )?;
       Ok(
         archive
           .entries()
@@ -857,16 +870,12 @@ impl Task for ListEntriesDetailedTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_guarded(|| {
-      let mut options = rar_rs::OpenOptions::new().scan_strategy(if self.quick {
+      let options = rar_rs::OpenOptions::new().scan_strategy(if self.quick {
         rar_rs::ScanStrategy::PreferQuickOpen
       } else {
         rar_rs::ScanStrategy::Full
       });
-      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-        options = options.password(pw);
-      }
-      let archive =
-        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      let archive = open_reader(&self.archive_path, self.password.as_deref(), options)?;
       Ok(entry_infos(&archive))
     })
   }
@@ -1147,12 +1156,11 @@ impl Task for ExtractArchiveTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_guarded(|| {
-      let mut options = rar_rs::OpenOptions::new();
-      if let Some(pw) = self.opts.password.as_deref().filter(|pw| !pw.is_empty()) {
-        options = options.password(pw);
-      }
-      let mut archive =
-        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      let mut archive = open_reader(
+        &self.archive_path,
+        self.opts.password.as_deref(),
+        rar_rs::OpenOptions::new(),
+      )?;
       archive.set_cancel_flag(self.cancel.take());
       let dest = Path::new(&self.opts.dest_path);
       fs::create_dir_all(dest)
@@ -1275,12 +1283,11 @@ impl Task for ExtractMemberTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_guarded(|| {
-      let mut options = rar_rs::OpenOptions::new();
-      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-        options = options.password(pw);
-      }
-      let mut archive =
-        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      let mut archive = open_reader(
+        &self.archive_path,
+        self.password.as_deref(),
+        rar_rs::OpenOptions::new(),
+      )?;
       archive.set_cancel_flag(self.cancel.take());
       let id = archive.unique_entry(&self.name).map_err(to_napi_error)?;
       let dest = Path::new(&self.dest_dir);
@@ -1338,12 +1345,11 @@ impl Task for ReadMemberTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_guarded(|| {
-      let mut options = rar_rs::OpenOptions::new();
-      if let Some(pw) = self.password.as_deref().filter(|pw| !pw.is_empty()) {
-        options = options.password(pw);
-      }
-      let mut archive =
-        rar_rs::ArchiveReader::open_with(&self.archive_path, options).map_err(to_napi_error)?;
+      let mut archive = open_reader(
+        &self.archive_path,
+        self.password.as_deref(),
+        rar_rs::OpenOptions::new(),
+      )?;
       let id = archive.unique_entry(&self.name).map_err(to_napi_error)?;
       archive.read_entry(id).map_err(to_napi_error)
     })
