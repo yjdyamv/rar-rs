@@ -20,6 +20,11 @@ pub(crate) mod parse;
 pub(crate) mod quick_open;
 pub(crate) mod serialize;
 
+/// The most a RAR5 block header (its 4-byte CRC32, size vint and `HEAD_SIZE`
+/// body) may occupy, per the official reader. A larger size field is corrupt,
+/// so the streaming parser rejects it and the recovery walk stops there.
+pub(crate) const MAX_HEADER_SIZE: u64 = 2 * 1024 * 1024;
+
 pub use crate::model::{DataChunk, FileHeader};
 pub(crate) use encrypt::{
     build_archive_encrypt_header_block, derive_header_key, parse_archive_encrypt_header,

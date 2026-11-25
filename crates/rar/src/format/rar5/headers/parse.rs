@@ -4,7 +4,7 @@ use std::io::{self, Read, Seek};
 
 use crate::error::{RarError, RarResult};
 use crate::format::rar5::headers::{
-    ArchiveHeader, BlockMeta, EndOfArchiveHeader, FileHeader, RawBlock, RawHeader,
+    ArchiveHeader, BlockMeta, EndOfArchiveHeader, FileHeader, MAX_HEADER_SIZE, RawBlock, RawHeader,
 };
 use crate::format::rar5::{
     ARCHIVE_FLAG_VOLUME_NUM, BLOCK_FLAG_DATA_AREA, BLOCK_FLAG_EXTRA_DATA, BLOCK_TYPE_END_ARCHIVE,
@@ -128,7 +128,7 @@ fn plain_block_candidate<R: Read + Seek>(
         let mut crc = [0u8; 4];
         reader.read_exact(&mut crc).ok()?;
         let (hsize, vint_len) = read_vint(reader)?;
-        if hsize == 0 || hsize > 2 * 1024 * 1024 {
+        if hsize == 0 || hsize > MAX_HEADER_SIZE {
             return Some(false);
         }
         let (block_type, _) = read_vint(reader)?;
@@ -223,7 +223,7 @@ fn read_plain_header<R: Read>(reader: &mut R) -> RarResult<Option<RawHeader>> {
             ));
         }
     };
-    if hsize == 0 || hsize > 2 * 1024 * 1024 {
+    if hsize == 0 || hsize > MAX_HEADER_SIZE {
         return Err(RarError::format(format!(
             "implausible header size: {hsize}"
         )));
@@ -280,7 +280,7 @@ fn read_encrypted_header<R: Read>(reader: &mut R, key: &[u8; 32]) -> RarResult<O
             .map_err(|e| RarError::format(format!("encrypted block vint: {e}")))?;
         (stored_crc, vint_len, hsize)
     };
-    if hsize == 0 || hsize > 2 * 1024 * 1024 {
+    if hsize == 0 || hsize > MAX_HEADER_SIZE {
         return Err(RarError::format(format!(
             "implausible encrypted header size: {hsize}"
         )));

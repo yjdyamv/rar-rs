@@ -198,7 +198,7 @@ fn parse_file_data_blocks(prefix: &[u8]) -> Result<Vec<(usize, usize)>> {
     while pos + 4 < prefix.len() {
         let (header_size, size_bytes) =
             crate::vint::decode_from_slice(prefix, pos + 4).map_err(|_| Error::BadRecoveryChunk)?;
-        if header_size == 0 || header_size > 2 * 1024 * 1024 {
+        if header_size == 0 || header_size > crate::format::rar5::headers::MAX_HEADER_SIZE {
             break;
         }
         let body = pos + 4 + size_bytes;
