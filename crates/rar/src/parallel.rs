@@ -45,8 +45,8 @@ pub(crate) fn configured_extraction_threads() -> Option<usize> {
 /// would resize the pool out from under another in flight). The global
 /// default setting selects the pool for archives without an override.
 ///
-/// Compression uses *all* host cores by default (like `rar -mt0`): the
-/// dedicated pool is sized from the host's available parallelism so
+/// Compression uses *all* host cores by default: the dedicated pool is sized
+/// from the host's available parallelism so
 /// medium/large members get the full parallel win. Low-core machines
 /// naturally get fewer workers. The host may cap the count explicitly with
 /// `SA_RAR5_WASM_WORKERS` (wasm) / `set_compression_threads` (native) if a

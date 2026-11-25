@@ -113,6 +113,31 @@ fn cli_hostile_switch_values_exit_cleanly() {
     }
 }
 
+/// `-mt`/`--threads` accept any positive count, with no upper cap — a deliberate
+/// divergence from official `Rar.exe`/`UnRAR.exe` (which reject `-mt65`+). The
+/// worker pool clamps to the host, so `-mt100` just works on a big box.
+#[test]
+fn cli_accepts_large_thread_counts() {
+    let dir = make_temp_dir();
+    std::fs::write(dir.path().join("f.txt"), b"x").unwrap();
+    let archive = dir.path().join("mt.rar");
+    let status = std::process::Command::new(RAR_CLI)
+        .args(["a", "-mt100", "-idq"])
+        .arg(&archive)
+        .arg(dir.path().join("f.txt"))
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "rar a -mt100 must be accepted");
+
+    let status = std::process::Command::new(UNRAR_CLI)
+        .args(["t", "--threads", "100", "-idq"])
+        .arg(&archive)
+        .status()
+        .unwrap();
+    assert!(status.success(), "unrar t --threads 100 must be accepted");
+}
+
 /// `-p<pwd>` / `-m<N>` given before the command work like WinRAR, and the
 /// `unrar` binary keeps its own pre-command switch handling.
 #[test]

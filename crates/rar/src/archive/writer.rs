@@ -11,8 +11,6 @@ use crate::error::{RarError, RarResult};
 use crate::options::{CreateOptions, DictionarySize, FilterOptions, SolidReset};
 use crate::version::ArchiveVersion;
 
-const MAX_THREADS: usize = 64;
-
 /// A validated archive-member compression level in the range `0..=5`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CompressionLevel(u8);
@@ -78,13 +76,10 @@ impl TryFrom<usize> for ThreadCount {
     type Error = RarError;
 
     fn try_from(value: usize) -> Result<Self, Self::Error> {
-        if value <= MAX_THREADS {
-            Ok(Self(value))
-        } else {
-            Err(RarError::invalid_option(format!(
-                "compression threads must be in 0..={MAX_THREADS}, got {value}"
-            )))
-        }
+        // No upper cap: the worker pool clamps to the host's available
+        // parallelism (see `parallel::build_pool`), so a count above the core
+        // count is harmless rather than invalid.
+        Ok(Self(value))
     }
 }
 

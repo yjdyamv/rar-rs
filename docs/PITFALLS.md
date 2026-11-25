@@ -284,6 +284,7 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
   `cli_directory_members_carry_no_trailing_separator`。
 - **`-idn` 仍不生效、`-idc` 恒等效**（我们不打印官方版权/Trial 横幅）、`-iver`
   文案与官方不同；`rar r` 对载荷损坏的处置见上。
+- **`-mt` / `--threads` 不设上限**：官方 `Rar.exe`/`UnRAR.exe`（6.23、7.23 实测）拒绝 `-mt65`+（退 7），但我们接受任意正整数，只拒 0 与非数字；worker 池按宿主 `available_parallelism` clamp、OS 拒绝时退回单线程（`parallel::build_pool`），所以 `-mt100` 在 128 核机器上正常、也不会 panic。这是**有意不追平官方**，别按官方把它修回 64。
 
 ## RAR4 读取
 

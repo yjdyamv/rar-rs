@@ -231,7 +231,6 @@ impl RarArchive {
                 "compression threads can only be set while writing or appending",
             ));
         }
-        crate::options::validate_threads(threads)?;
         let write = self
             .write
             .as_mut()

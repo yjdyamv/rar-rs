@@ -5,7 +5,7 @@ the map: the job graph, what each job is allowed to prove, what it costs, and
 what was deliberately left out. The workflow file stays the source of truth —
 when the two disagree, fix one of them in the same commit.
 
-> Last verified: 2026-11-25 @ `6c6803d8`; implementation details are
+> Last verified: 2026-11-25 @ `f1504615`; implementation details are
 > authoritative in the workflow file.
 
 ## The graph

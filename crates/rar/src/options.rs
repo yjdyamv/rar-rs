@@ -3,7 +3,6 @@
 use crate::error::{RarError, RarResult};
 use crate::version::ArchiveVersion;
 
-pub(crate) const MAX_COMPRESSION_THREADS: usize = 64;
 const MIN_DICTIONARY_BYTES: u64 = 128 * 1024;
 const MAX_RAR5_DICTIONARY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub(crate) const DEFAULT_RAR7_DICTIONARY_BYTES: u64 = 32 * 1024 * 1024;
@@ -298,7 +297,6 @@ impl CreateOptions {
         validate_locator_estimate(self.estimated_size, self.compression)?;
         validate_solid_reset(self.compression, self.solid_reset)?;
         validate_dictionary(self.dict_size_log, self.dict_size_bytes)?;
-        validate_threads(self.threads)?;
         validate_combinations(CombinationRules {
             quick_open: self.quick_open || self.quick_open_auto,
             encrypt_headers: self.encrypt_headers,
@@ -369,17 +367,6 @@ pub(crate) fn validate_dictionary(
     {
         return Err(RarError::invalid_option(format!(
             "dictionary size {bytes} bytes is outside the supported range {MIN_DICTIONARY_BYTES}..={MAX_RAR7_DICTIONARY_BYTES}"
-        )));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_threads(threads: Option<usize>) -> RarResult<()> {
-    if let Some(threads) = threads
-        && threads > MAX_COMPRESSION_THREADS
-    {
-        return Err(RarError::invalid_option(format!(
-            "compression threads must be in 0..={MAX_COMPRESSION_THREADS}, got {threads}"
         )));
     }
     Ok(())

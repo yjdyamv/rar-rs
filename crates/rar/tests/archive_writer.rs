@@ -70,7 +70,9 @@ fn validated_value_types_enforce_boundaries_and_mappings() {
 
     assert_eq!(ThreadCount::AUTOMATIC.get(), 0);
     assert_eq!(ThreadCount::try_from(64).unwrap().get(), 64);
-    assert!(ThreadCount::try_from(65).is_err());
+    // No upper cap: a count above the core count is clamped by the worker pool,
+    // not refused here.
+    assert_eq!(ThreadCount::try_from(1000).unwrap().get(), 1000);
 }
 
 #[test]

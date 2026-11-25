@@ -122,10 +122,11 @@ pub fn parse_mdx_size(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("dictionary size is too large: {s}"))
 }
 
-/// Parse a thread count for `-mt` / `--threads`: any positive integer. There is
-/// deliberately no fixed upper cap — the library clamps to the host's available
-/// parallelism — so `-mt100` is fine on a many-core box. Shared by both
-/// binaries so the bound cannot drift between them again.
+/// Parse a thread count for `-mt` / `--threads`: any positive integer, with no
+/// upper cap. This deliberately does *not* follow official `Rar.exe`/`UnRAR.exe`
+/// (which reject `-mt65`+): the worker pool clamps the count to the host's
+/// available parallelism and falls back to one thread, so `-mt100` on a
+/// 128-core box just works. Only zero and non-numbers are rejected.
 pub fn parse_threads(s: &str) -> Result<usize, String> {
     let n: usize = s
         .parse()
@@ -1088,17 +1089,17 @@ mod tests {
         assert!(parse_mdx_size("18446744073709551615g").is_err());
     }
 
-    /// No fixed upper cap (the library clamps to the host): `-mt100` is valid;
-    /// only zero and non-numbers are rejected. This is the rule both binaries
-    /// now share — `unrar` used to cap at 64 on its own.
+    /// Any positive count, no upper cap (deliberate divergence from official,
+    /// which rejects `-mt65`+); zero and non-numbers are rejected. The worker
+    /// pool clamps large values to the host, so `-mt100` is fine.
     #[test]
     fn thread_count_is_any_positive_integer() {
         assert_eq!(parse_threads("1"), Ok(1));
         assert_eq!(parse_threads("100"), Ok(100));
-        assert!(parse_threads("0").is_err());
-        assert!(parse_threads("-1").is_err());
-        assert!(parse_threads("1.5").is_err());
-        assert!(parse_threads("").is_err());
+        assert_eq!(parse_threads("65535"), Ok(65535));
+        for bad in ["0", "-1", "1.5", ""] {
+            assert!(parse_threads(bad).is_err(), "{bad} should be rejected");
+        }
     }
 
     #[test]

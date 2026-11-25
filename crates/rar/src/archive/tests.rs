@@ -11,7 +11,7 @@ fn assert_invalid_option(result: RarResult<RarArchive>) {
 }
 
 #[test]
-fn create_options_reject_invalid_dictionary_and_thread_values() {
+fn create_options_reject_invalid_dictionary_values() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid.rar");
 
@@ -39,13 +39,6 @@ fn create_options_reject_invalid_dictionary_and_thread_values() {
             },
         ));
     }
-    assert_invalid_option(RarArchive::create_with_options(
-        &path,
-        crate::options::CreateOptions {
-            threads: Some(crate::options::MAX_COMPRESSION_THREADS + 1),
-            ..Default::default()
-        },
-    ));
 }
 
 #[test]
@@ -134,10 +127,6 @@ fn setters_reject_invalid_values_without_mutating_state() {
     let mut archive = RarArchive::create_with_options(&path, Default::default()).unwrap();
 
     archive.set_compression_threads(Some(0)).unwrap();
-    assert!(matches!(
-        archive.set_compression_threads(Some(crate::options::MAX_COMPRESSION_THREADS + 1)),
-        Err(RarError::InvalidOption(_))
-    ));
     assert!(matches!(
         archive.set_dictionary(Some(16), None),
         Err(RarError::InvalidOption(_))
