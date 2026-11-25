@@ -154,7 +154,6 @@ pub(crate) fn build_file_header(p: &FileHeaderParams<'_>) -> RarResult<Vec<u8>> 
         buf.extend_from_slice(ext);
     }
 
-    // Patch CRC16.
     patch_crc16(&mut buf, 0);
     Ok(buf)
 }
