@@ -350,6 +350,7 @@ CHANGELOG。**公开 API 的契约也在本文件**（末尾「公开 API
 - **多卷重写失败不提交半成品**：暂存卷集只在写循环全部成功后摘除，失败要恢复
   path/volume 状态并清暂存文件（`ArchiveEditor` 与 `ArchiveWriter` 一样失败即
   abort）。
+- **编辑必须在写任何字节前拒绝数据区越过 EOF 的块（原子性）**：`BlockCursor` 遇到声明数据区超过 `file_len` 的块会置 `done` 却仍返回该块；`plan_rewrite` 必须在这一步报错。否则重写按声明长度逐字拷贝、把成员静默截断，而损坏只在**提交之后**重开新档时才暴露——`apply` 返回 `Err` 却已替换原档，违反「失败的重写不动原档」。回归：`crates/rar/tests/corruption.rs`（`damaged_archives_survive_the_operation_battery`、`multivolume_damage_survives_edits`）。
 - **无 ENDARC 的老归档（RAR
   2.9）可编辑**：以最后一个块的结束为重建插入点，重写时补一条新 ENDARC。
 - **`rar r` 的打捞扫描只覆盖 RAR5 与 RAR4 且仅非

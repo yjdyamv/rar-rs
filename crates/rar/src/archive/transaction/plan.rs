@@ -66,6 +66,19 @@ impl RarArchive {
             crate::format::rar5::extract::verify::archive_block_key(self)?,
         );
         while let Some(meta) = blocks.next(reader)? {
+            // A block whose declared data area runs past the file means the
+            // archive is truncated. `BlockCursor` stops on it but still
+            // yields the block; copying it verbatim would emit a block
+            // claiming more bytes than the destination holds, and the damage
+            // would only surface on the post-commit re-scan — after the
+            // original had already been replaced. Refuse here, before a byte
+            // is written, so the atomic-rewrite promise ("a failed rewrite
+            // leaves the original untouched") holds.
+            if meta.raw.data_size > 0 && meta.data_end > file_len {
+                return Err(RarError::format(
+                    "RAR5: truncated block data area; refusing to edit a damaged archive",
+                ));
+            }
             match meta.block_type {
                 BLOCK_TYPE_END_ARCHIVE => break,
                 BLOCK_TYPE_FILE_HEADER => {
